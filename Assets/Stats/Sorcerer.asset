@@ -37,6 +37,11 @@ MonoBehaviour:
   attackInterval: 1.2
   attackDamage: 18
   isHero: 1
+  abilities:
+  - {fileID: 11400000, guid: 1a4039de518a4844aa3134e8e84434b1, type: 2}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
   formShieldWall: 0
   stayBehindWall: 0
   kiteEnemies: 1

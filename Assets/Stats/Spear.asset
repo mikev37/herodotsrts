@@ -19,7 +19,7 @@ MonoBehaviour:
   mass: 1
   turnSpeed: 6
   separationStrength: 8
-  meleeRange: 4
+  meleeRange: 3
   wallSpacing: 1.3
   spreadRadius: 5
   spreadStrength: 2
@@ -37,6 +37,11 @@ MonoBehaviour:
   attackInterval: 1.2
   attackDamage: 18
   isHero: 0
+  abilities:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
   formShieldWall: 1
   stayBehindWall: 1
   kiteEnemies: 0

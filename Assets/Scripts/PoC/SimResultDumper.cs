@@ -23,11 +23,24 @@ public class SimResultDumper : MonoBehaviour
 {
     [Tooltip("Press to write the end-state report.")]
     public KeyCode dumpKey = KeyCode.F9;
-    [Tooltip("Output file under Application.persistentDataPath.")]
+    [Tooltip("Output file under Application.persistentDataPath. Mode and tick are appended to the name.")]
     public string dumpFileName = "lockstep_result.txt";
     public bool logChecksumEachSecond = true;
 
+    [Tooltip("If > 0: the sim HALTS exactly at this tick and the report is written automatically. " +
+             "Set the SAME value for the record run and the playback run — that makes the two dump " +
+             "files tick-exact comparable (manual F9 in two runs lands on different ticks). 0 = off.")]
+    public uint autoDumpAtTick = 0;
+
     private float _logTimer;
+    private uint _lastLoggedTick;
+    private float _lastLogTime;
+    private bool _autoDumped;
+
+    private void Start()
+    {
+        LockstepRateManager.HaltAtTick = autoDumpAtTick;   // 0 = no halt
+    }
 
     private void Update()
     {
@@ -44,17 +57,35 @@ public class SimResultDumper : MonoBehaviour
             }
         }
 
+        // Sim is frozen at exactly autoDumpAtTick (rate-manager halt), so this
+        // dump captures identical-tick state in every run.
+        if (autoDumpAtTick > 0 && !_autoDumped && SimClockSystem.LastCompletedTick >= autoDumpAtTick)
+        {
+            _autoDumped = true;
+            DumpReport(w);
+            Debug.Log($"[Lockstep] sim halted at tick {SimClockSystem.LastCompletedTick}; auto-dump written.");
+        }
+
         if (Input.GetKeyDown(dumpKey))
             DumpReport(w);
     }
 
-    private static void LogChecksum(World w)
+    private void LogChecksum(World w)
     {
         var q = w.EntityManager.CreateEntityQuery(typeof(SimChecksum));
         if (q.HasSingleton<SimChecksum>())
         {
             var cs = q.GetSingleton<SimChecksum>();
-            Debug.Log($"[Lockstep] tick {cs.Tick}  checksum {cs.Value:X8}");
+
+            // Measured sim rate since the last log line. Healthy = ~TickRate (30).
+            // ~frame rate (e.g. 170+) = the lockstep rate manager is NOT installed.
+            float now = Time.realtimeSinceStartup;
+            float tps = _lastLogTime > 0f && now > _lastLogTime
+                ? (cs.Tick - _lastLoggedTick) / (now - _lastLogTime) : 0f;
+            _lastLoggedTick = cs.Tick;
+            _lastLogTime = now;
+
+            Debug.Log($"[Lockstep] tick {cs.Tick}  checksum {cs.Value:X8}  (~{tps:0.0} ticks/s, target {LockstepConfig.TickRate})");
         }
         q.Dispose();
     }
@@ -102,7 +133,12 @@ public class SimResultDumper : MonoBehaviour
         foreach (var r in rows)
             sb.AppendLine($"{r.id},{r.team},{math.asuint(r.x):X8},{math.asuint(r.z):X8},{math.asuint(r.hp):X8}");
 
-        string path = Path.Combine(Application.persistentDataPath, dumpFileName);
+        // Encode mode + tick in the filename: record/playback runs never
+        // overwrite each other, and same-tick files are the comparable pairs.
+        string baseName = Path.GetFileNameWithoutExtension(dumpFileName);
+        string ext = Path.GetExtension(dumpFileName);
+        if (string.IsNullOrEmpty(ext)) ext = ".txt";
+        string path = Path.Combine(Application.persistentDataPath, $"{baseName}_{Commander.Mode}_t{tick}{ext}");
         File.WriteAllText(path, sb.ToString());
         Debug.Log($"[Lockstep] dumped {rows.Count} units (HP {totalHp:R}, checksum {checksum:X8}) to {path}");
 

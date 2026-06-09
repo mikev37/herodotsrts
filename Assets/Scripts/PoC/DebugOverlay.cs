@@ -221,7 +221,7 @@ public class DebugOverlay : MonoBehaviour
                 TargetPos = new Vector3(targets[i].Position.x, gizmoY, targets[i].Position.y),
                 HasDest = dests[i].Has,
                 DestPos = new Vector3(dests[i].Value.x, gizmoY, dests[i].Value.y),
-                Selected = _em.HasComponent<Selected>(entities[i]),
+                Selected = _em.HasComponent<Selected>(entities[i]) && _em.IsComponentEnabled<Selected>(entities[i]),
             });
         }
 

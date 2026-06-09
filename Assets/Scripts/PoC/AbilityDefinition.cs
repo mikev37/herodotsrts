@@ -34,6 +34,14 @@ public class AbilityDefinition : ScriptableObject
     [Tooltip("Cooldown before it can be cast again.")]
     public float cooldown = 1f;
 
+    [Header("View effects (visual only — never touch the sim)")]
+    [Tooltip("Instantiated once at the cast center (e.g. an explosion). Auto-destroyed after castEffectSeconds.")]
+    public GameObject castEffectPrefab;
+    [Tooltip("Seconds before the cast effect is destroyed.")]
+    public float castEffectSeconds = 3f;
+    [Tooltip("Attached to each affected unit's view while a modifier from this ability is active on it (e.g. a poison emitter); destroyed when the modifier ends.")]
+    public GameObject attachedEffectPrefab;
+
     [Header("Effects (all applied together)")]
     public List<StatModifierDef> modifiers = new();
 }

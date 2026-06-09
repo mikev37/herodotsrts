@@ -70,9 +70,13 @@ public class UnitDefinition : ScriptableObject
 
     [Header("Hero")]
     [Tooltip("If set, this unit is spawned as a hero (gets HeroTag). It's a normal unit " +
-             "in every other way — selected, ordered, hit, and killed like one. Its aura/powers " +
-             "are AbilityDefinition assets cast via the HeroController.")]
+             "in every other way — selected, ordered, hit, and killed like one.")]
     public bool isHero = false;
+
+    [Header("Abilities (Q/W/E/R slots; null = empty slot)")]
+    [Tooltip("Abilities this unit can cast. When a selection is ordered to cast, the " +
+             "selected unit with the MOST abilities is the caster.")]
+    public AbilityDefinition[] abilities = new AbilityDefinition[4];
 
     [Header("Behaviors (compose freely)")]
     [Tooltip("Slide sideways to line up with nearby friendly wall-formers → a wall.")]

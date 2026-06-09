@@ -54,7 +54,8 @@ public struct BaseStats : IComponentData
 // persistent field refresh its own entry instead of duplicating it.
 public struct ActiveModifier : IBufferElementData
 {
-    public int Source;        // field id (entity index) that applied it
+    public int Source;        // field id that applied it (deterministic FieldIdSeq)
+    public int AbilityId;     // which ability it came from (attached-VFX lookup; -1 = none)
     public int Slot;          // which modifier within that field
     public ModTarget Target;
     public float Delta;
@@ -74,6 +75,7 @@ public struct ActiveModifier : IBufferElementData
 public struct AbilityField : IComponentData
 {
     public int FieldId;
+    public int AbilityId;           // index into AbilityManager's registry (VFX lookup)
     public int Team;
     public AffectFilter Affects;
     public ShapeType Shape;
@@ -98,4 +100,21 @@ public struct FieldModifier : IBufferElementData
     public CapRef CapRef;
     public float CapValue;
     public float Duration;
+}
+
+// --- per-unit ability state (lockstep-deterministic) -----------------------
+
+// Which abilities this unit has, as AbilityManager registry ids (-1 = empty
+// slot). Populated at spawn from UnitDefinition.abilities.
+public struct AbilitySlots : IComponentData
+{
+    public int4 Ids;
+}
+
+// Tick-based cooldowns: slot is castable when SimClock.Tick >= ReadyTick[slot].
+// Replaces the old Time.time-based cooldowns in HeroController — sim-state, so
+// it's identical on every client and in every replay.
+public struct AbilityCooldowns : IComponentData
+{
+    public uint4 ReadyTick;
 }

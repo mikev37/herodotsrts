@@ -99,8 +99,13 @@ public struct Ranged : IComponentData
 }
 
 // Tag: currently selected by the player. Added/removed by the input bridge.
-public struct Selected : IComponentData { }
-
+// Enableable on purpose: selection is toggled by live player input, and
+// add/remove would be a STRUCTURAL change — re-chunking entities and changing
+// job iteration order, which perturbs float summation order in neighbor loops
+// and desyncs record/playback (and, later, lockstep peers with different local
+// selections). Toggling the enabled bit moves nothing. Queries filter on the
+// bit automatically; raw HasComponent does NOT (use IsComponentEnabled).
+public struct Selected : IComponentData, IEnableableComponent { }
 // ---------------------------------------------------------------------------
 // Spatial hash singleton. One map per frame, shared by every system that
 // needs neighbor lookups. THIS is the core of scaling to thousands of units:

@@ -34,11 +34,11 @@ public class UnitManager : MonoBehaviour
     public List<SpawnEntry> teamone = new();
     public List<SpawnEntry> teamtwo = new();
 
+    public static UnitManager Instance { get; private set; }
 
     [Header("Field")]
     public int teamCount = 2;
     public float fieldSize = 80f;
-    public uint randomSeed = 12345;
 
     [Header("Team / commander colors (index = team)")]
     public Color[] teamColors =
@@ -66,6 +66,7 @@ public class UnitManager : MonoBehaviour
 
     private void Start()
     {
+        Instance = this;
         roster.Add(teamone);
         roster.Add(teamtwo);
         var world = World.DefaultGameObjectInjectionWorld;
@@ -93,11 +94,11 @@ public class UnitManager : MonoBehaviour
         {
             typeof(LocalTransform), typeof(UnitTag), typeof(Team), typeof(UnitDefId),
             typeof(BehaviorFlags), typeof(BehaviorOverride), typeof(UnitTuning), typeof(Attack),
-            typeof(Defense), typeof(Speed),
+            typeof(Defense), typeof(Speed), typeof(Selected),
             typeof(UnitRadius), typeof(Mass), typeof(Velocity), typeof(GroundSpeedMultiplier),
             typeof(MoveTarget), typeof(AttackOrder), typeof(CombatTarget), typeof(DesiredDestination),
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
-            typeof(BaseStats), typeof(ActiveModifier),
+            typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
         };
         var archetype = _em.CreateArchetype(common);
         _archetype = archetype;
@@ -133,13 +134,14 @@ public class UnitManager : MonoBehaviour
             }
         }
     }
-
+    private int _nextStableId;
     // Creates one fully-configured unit entity. Heroes are just units that also
     // get a HeroTag + HeroAura — no special movement/combat path.
     public Entity SpawnUnit(UnitDefinition def, int defId, int team, float3 pos)
     {
         var e = _em.CreateEntity(_archetype);
-
+        _em.SetComponentData(e, new StableId { Value = _nextStableId++ });   // deterministic identity
+        _em.SetComponentEnabled<Selected>(e, false);                          // archetype components start enabled
         _em.SetComponentData(e, LocalTransform.FromPosition(pos));
         _em.SetComponentData(e, new Team { Value = team });
         _em.SetComponentData(e, new UnitDefId { Value = defId });
@@ -179,9 +181,23 @@ public class UnitManager : MonoBehaviour
         if (def.isHero)
             _em.AddComponent<HeroTag>(e);   // abilities are cast at the hero via the ability system
 
+        // Ability slots: register each AbilityDefinition with the AbilityManager
+        // (idempotent; roster order => deterministic ids) and store the ids.
+        var slots = new AbilitySlots { Ids = new int4(-1, -1, -1, -1) };
+        if (def.abilities != null && AbilityManager.Instance != null)
+            for (int s = 0; s < 4 && s < def.abilities.Length; s++)
+                slots.Ids[s] = AbilityManager.Instance.Register(def.abilities[s]);
+        _em.AddComponentData(e, slots);
+        _em.AddComponentData(e, new AbilityCooldowns { ReadyTick = uint4.zero });
+
+
         spawnedCount++;
         return e;
     }
+
+    // View accessor for effect attachment (AbilityManager). Null while dead/unspawned.
+    public GameObject GetView(Entity e)
+        => _views.TryGetValue(e, out var v) && v != null ? v.gameObject : null;
 
     private static uint PackFlags(UnitDefinition d)
     {

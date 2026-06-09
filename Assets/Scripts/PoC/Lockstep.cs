@@ -24,22 +24,106 @@ public struct SimClock : IComponentData { public uint Tick; }
 // Rolling, order-independent hash of the simulation state at a given tick.
 public struct SimChecksum : IComponentData { public uint Tick; public uint Value; }
 
+// Custom rate manager: advances the sim at a fixed real-time rate using an
+// accumulator, regardless of frame rate.
+//
+// Single-player / Phase 1-2 (no LockstepNet present):
+//   Accumulates real elapsed time and fires up to MaxCatchupSteps ticks per frame
+//   when behind, giving correct ~30 Hz simulation speed at any frame rate.
+//
+// Networked (LockstepNet present):
+//   Same accumulator, PLUS requires the next network turn to be ready. The sim is
+//   capped to real-time pace (so a fast-network game doesn't run faster than 30 Hz)
+//   and stalls when the network can't keep up.
+//
+// Why the old toggle was wrong: it ran one tick per frame, so 60 fps = 60 ticks/s =
+// 2× real-time speed. The accumulator is what Time.deltaTime was implicitly providing
+// for variable-dt integration — we just make it explicit now.
+public class LockstepRateManager : Unity.Entities.IRateManager
+{
+    public const int MaxCatchupSteps = 8;
+
+    // When non-zero, the sim freezes once this tick completes. Used by
+    // SimResultDumper.autoDumpAtTick so record and playback runs dump at the
+    // EXACT same tick (the sim can advance several ticks per frame, so sampling
+    // from Update without halting could land on different ticks per run).
+    public static uint HaltAtTick;
+
+    private readonly float _dt;
+    private double _elapsed;
+    private bool _pushed;
+    private double _accumulator;
+    private int _stepsThisFrame;
+    private int _lastFrame = -1;
+
+    public LockstepRateManager(float dt) { _dt = dt; }
+    public float Timestep { get => _dt; set { } }
+
+    public bool ShouldGroupUpdate(ComponentSystemGroup group)
+    {
+        if (_pushed) { group.World.PopTime(); _pushed = false; }
+
+        // Accumulate real time once per frame (ShouldGroupUpdate is called in a
+        // loop until we return false, so we'd double-count without the frame guard).
+        if (UnityEngine.Time.frameCount != _lastFrame)
+        {
+            _accumulator += UnityEngine.Time.deltaTime;
+            _lastFrame = UnityEngine.Time.frameCount;
+            _stepsThisFrame = 0;
+        }
+
+        // Hard per-frame cap — prevents spiral-of-death on a slow machine.
+        if (_stepsThisFrame >= MaxCatchupSteps)
+        {
+            _accumulator = System.Math.Min(_accumulator, _dt);   // bleed off excess so next frame is normal
+            return false;
+        }
+
+        // Halt gate: state frozen exactly at HaltAtTick (tick-exact dumps).
+        if (HaltAtTick > 0 && SimClockSystem.LastCompletedTick >= HaltAtTick) return false;
+
+        // Real-time gate: not enough wall-clock time has passed for the next tick.
+        if (_accumulator < _dt) return false;
+
+        // Network gate: also need the next confirmed turn (networked path only).
+        var net = LockstepNet.Instance;
+        if (net != null)
+        {
+            if (!net.IsRunning) return false;
+            if (!net.TryBeginNextTurn()) return false;
+        }
+
+        _accumulator -= _dt;
+        _elapsed += _dt;
+        group.World.PushTime(new Unity.Core.TimeData(_elapsed, _dt));
+        _pushed = true;
+        _stepsThisFrame++;
+        return true;
+    }
+}
 
 // Creates the SimClock singleton and ticks it. Runs first in the sim group so
-// every other system sees the new tick number.
+// every other system sees the new tick number. Not Burst-compiled: it also
+// publishes the tick to a managed static (read by the rate manager's halt gate
+// and by SimResultDumper) — trivial work either way.
 [UpdateInGroup(typeof(SimulationSystemGroup), OrderFirst = true)]
 public partial struct SimClockSystem : ISystem
 {
+    // Last completed tick, readable from managed code without an EntityQuery.
+    public static uint LastCompletedTick;
+
     public void OnCreate(ref SystemState state)
     {
+        LastCompletedTick = 0;
         if (!SystemAPI.HasSingleton<SimClock>())
             state.EntityManager.CreateEntity(typeof(SimClock));
     }
 
-    [BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
-        SystemAPI.GetSingletonRW<SimClock>().ValueRW.Tick++;
+        var clock = SystemAPI.GetSingletonRW<SimClock>();
+        clock.ValueRW.Tick++;
+        LastCompletedTick = clock.ValueRO.Tick;
     }
 }
 

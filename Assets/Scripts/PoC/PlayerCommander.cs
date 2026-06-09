@@ -8,31 +8,107 @@ using UnityEngine;
 // ===========================================================================
 // PLAYER COMMANDER — classic RTS input on the shared verbs. Left-drag box
 // select, right-click ground = move, right-click enemy = attack.
+//
+// Absorbs the former HeroController's ability input: Q/W/E/R arms a slot of the
+// CASTER (the selected unit with the most abilities — heroes in practice);
+// right-click then casts at the clicked point / on the caster, via the
+// IssueAbility verb. Cooldowns are sim-state (AbilityCooldowns, tick-based);
+// this class only READS them for the HUD and to avoid arming dead slots.
 // ===========================================================================
 public class PlayerCommander : Commander
 {
     [Header("Player debug (runtime, read-only)")]
     public int selectedCount;
     public bool dragging;
+    public int armedIndex = -1;
 
     private EntityQuery _selectedQuery;
+    private EntityQuery _clockQuery2;
     private Vector2 _dragStart;
+
+    private static readonly KeyCode[] SlotKeys = { KeyCode.Q, KeyCode.W, KeyCode.E, KeyCode.R };
 
     protected override void Start()
     {
         base.Start();
         if (!worldReady) return;
         _selectedQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<Selected>());
+        _clockQuery2 = Em.CreateEntityQuery(ComponentType.ReadOnly<SimClock>());
     }
 
     private void Update()
     {
         if (!WorldOk) return;
+
         if (Input.GetMouseButtonDown(0)) { _dragStart = Input.mousePosition; dragging = true; }
         if (Input.GetMouseButtonUp(0) && dragging) { dragging = false; BoxSelect(); }
-        if (Input.GetMouseButtonDown(1) && !HeroAbilityInput.AbilityArmed) RightClick();
+
+        // Q/W/E/R toggles an armed ability slot (only if the current caster has it).
+        for (int i = 0; i < SlotKeys.Length; i++)
+            if (Input.GetKeyDown(SlotKeys[i]))
+                armedIndex = (armedIndex == i) ? -1 : (CasterHasSlot(i) ? i : -1);
+
+        if (Input.GetKeyDown(KeyCode.S))
+            SaveNow();
+
+        if (Input.GetMouseButtonDown(1))
+        {
+            if (armedIndex >= 0) { TryCastArmed(); armedIndex = -1; }
+            else RightClick();
+        }
+
         selectedCount = _selectedQuery.CalculateEntityCount();
     }
+
+    // --- ability casting -----------------------------------------------------
+
+    // The caster is the selected unit with the most non-empty ability slots
+    // (lowest StableId wins ties). Returns Entity.Null when nothing selected has
+    // abilities.
+    private Entity FindCaster()
+    {
+        Entity best = Entity.Null; int bestCount = 0; int bestSid = int.MaxValue;
+        var arr = _selectedQuery.ToEntityArray(Allocator.Temp);
+        foreach (var e in arr)
+        {
+            if (!Em.HasComponent<AbilitySlots>(e) || !Em.HasComponent<StableId>(e)) continue;
+            var ids = Em.GetComponentData<AbilitySlots>(e).Ids;
+            int n = 0;
+            for (int s = 0; s < 4; s++) if (ids[s] >= 0) n++;
+            if (n == 0) continue;
+            int sid = Em.GetComponentData<StableId>(e).Value;
+            if (n > bestCount || (n == bestCount && sid < bestSid))
+            {
+                best = e; bestCount = n; bestSid = sid;
+            }
+        }
+        arr.Dispose();
+        return best;
+    }
+
+    private bool CasterHasSlot(int slot)
+    {
+        var c = FindCaster();
+        return c != Entity.Null && Em.GetComponentData<AbilitySlots>(c).Ids[slot] >= 0;
+    }
+
+    private void TryCastArmed()
+    {
+        var caster = FindCaster();
+        if (caster == Entity.Null) { lastOrder = "(cast ignored: no caster selected)"; return; }
+
+        // Anchor decides whether we need a ground point; hero-anchored abilities
+        // cast on the caster, so the click point is ignored (but harmless to send).
+        float2 castPos = default;
+        if (!GroundPoint(out castPos))
+        {
+            var xf = Em.GetComponentData<LocalTransform>(caster);
+            castPos = new float2(xf.Position.x, xf.Position.z);
+        }
+        IssueAbility(caster, armedIndex, castPos);
+    }
+
+    // --- selection / orders ----------------------------------------------------
 
     private void BoxSelect()
     {
@@ -54,11 +130,11 @@ public class PlayerCommander : Commander
                 Vector3 sp = cam.WorldToScreenPoint(xforms[i].Position);
                 sel = sp.z > 0 && rect.Contains(new Vector2(sp.x, sp.y));
             }
-            bool was = Em.HasComponent<Selected>(entities[i]);
-            if (sel && !was) Em.AddComponent<Selected>(entities[i]);
-            else if (!sel && was) Em.RemoveComponent<Selected>(entities[i]);
+            if (Em.IsComponentEnabled<Selected>(entities[i]) != sel)
+                Em.SetComponentEnabled<Selected>(entities[i], sel);
         }
         entities.Dispose(); teams.Dispose(); xforms.Dispose();
+        armedIndex = -1;   // selection changed; disarm
     }
 
     private void RightClick()
@@ -106,8 +182,40 @@ public class PlayerCommander : Commander
         return true;
     }
 
+    // --- HUD --------------------------------------------------------------------
+
     private void OnGUI()
     {
+        // Ability bar for the current caster (replaces the HeroController HUD).
+        var caster = WorldOk ? FindCaster() : Entity.Null;
+        if (caster != Entity.Null)
+        {
+            var ids = Em.GetComponentData<AbilitySlots>(caster).Ids;
+            var cds = Em.GetComponentData<AbilityCooldowns>(caster).ReadyTick;
+            uint tick = _clockQuery2.HasSingleton<SimClock>() ? _clockQuery2.GetSingleton<SimClock>().Tick : 0u;
+            float hp = 0f, hpMax = 0f;
+            if (Em.HasComponent<Health>(caster))
+            {
+                var h = Em.GetComponentData<Health>(caster);
+                hp = h.Current; hpMax = h.Max;
+            }
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"Caster HP {hp:0}/{hpMax:0}  |  ");
+            var mgr = AbilityManager.Instance;
+            for (int s = 0; s < 4; s++)
+            {
+                if (ids[s] < 0) continue;
+                string name = mgr != null && mgr.GetDefinition(ids[s]) != null
+                    ? mgr.GetDefinition(ids[s]).displayName : $"#{ids[s]}";
+                float cd = cds[s] > tick ? (cds[s] - tick) * LockstepConfig.FixedDt : 0f;
+                sb.Append(armedIndex == s ? "[" : " ");
+                sb.Append($"{SlotKeys[s]}:{name}{(cd > 0f ? $" {cd:0.0}s" : "")}");
+                sb.Append(armedIndex == s ? "] " : "  ");
+            }
+            GUI.Label(new Rect(10, Screen.height - 30, 900, 22), sb.ToString());
+        }
+
         if (!dragging) return;
         Vector2 cur = Input.mousePosition;
         Vector2 a = new Vector2(_dragStart.x, Screen.height - _dragStart.y);

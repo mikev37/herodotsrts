@@ -137,6 +137,7 @@ public partial struct AbilityFieldSystem : ISystem
             active.Add(new ActiveModifier
             {
                 Source = f.FieldId,
+                AbilityId = f.AbilityId,
                 Slot = slot,
                 Target = fm.Target,
                 Delta = fm.Delta,

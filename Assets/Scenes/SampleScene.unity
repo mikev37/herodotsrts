@@ -397,59 +397,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &665873911
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 665873913}
-  - component: {fileID: 665873912}
-  m_Layer: 0
-  m_Name: UnitSpawnerAuthoring
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &665873912
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 665873911}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 45a335734b1572644a6a5d09d87adc65, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  _SceneAsset: {fileID: 102900000, guid: deb2cf6d4bc24404389b3363a1984bf5, type: 3}
-  _HierarchyColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}
-  AutoLoadScene: 1
-  _SceneGUID:
-    Value:
-      x: 3606850541
-      y: 1078209716
-      z: 909359491
-      w: 1605667098
---- !u!4 &665873913
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 665873911}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &760247945
 GameObject:
   m_ObjectHideFlags: 0
@@ -460,7 +407,6 @@ GameObject:
   m_Component:
   - component: {fileID: 760247947}
   - component: {fileID: 760247946}
-  - component: {fileID: 760247948}
   m_Layer: 0
   m_Name: PlayerCommander
   m_TagString: Untagged
@@ -481,10 +427,14 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   team: 0
+  mode: 1
+  fileName: lockstep_commands.bin
+  configuresStream: 1
   lastOrder: (none)
   worldReady: 0
   selectedCount: 0
   dragging: 0
+  armedIndex: -1
 --- !u!4 &760247947
 Transform:
   m_ObjectHideFlags: 0
@@ -500,30 +450,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &760247948
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 760247945}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 40f7046f924bd9d468be56ec4edff618, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  team: 0
-  abilities:
-  - {fileID: 11400000, guid: 1a4039de518a4844aa3134e8e84434b1, type: 2}
-  - {fileID: 0}
-  - {fileID: 0}
-  - {fileID: 0}
-  cam: {fileID: 0}
-  worldReady: 0
-  heroFound: 0
-  armedIndex: -1
-  heroHealth: 0
-  heroMaxHealth: 0
 --- !u!1 &991285303
 GameObject:
   m_ObjectHideFlags: 0
@@ -534,7 +460,6 @@ GameObject:
   m_Component:
   - component: {fileID: 991285307}
   - component: {fileID: 991285306}
-  - component: {fileID: 991285305}
   - component: {fileID: 991285304}
   m_Layer: 0
   m_Name: LockstepManager
@@ -555,24 +480,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e600bc40820c1a74ba063a2f97406d18, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  dumpKey: 290
+  dumpKey: 97
   dumpFileName: lockstep_result.txt
   logChecksumEachSecond: 1
---- !u!114 &991285305
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 991285303}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: b986b31dfe88ce7449744ac5213ca004, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  mode: 0
-  fileName: lockstep_commands.bin
-  localPlayerId: 0
+  autoDumpAtTick: 0
 --- !u!114 &991285306
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -686,6 +597,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 1675614459}
+  - component: {fileID: 1675614461}
   - component: {fileID: 1675614457}
   - component: {fileID: 1675614460}
   m_Layer: 0
@@ -739,22 +651,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   teamone:
-  - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
-    countPerTeam: 50
   - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
-    countPerTeam: 100
-  - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 50
-  - definition: {fileID: 11400000, guid: 59640ea508dd8f04189d49b828763818, type: 2}
-    countPerTeam: 1
+    countPerTeam: 20
   teamtwo:
-  - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
-    countPerTeam: 200
   - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 100
+    countPerTeam: 20
   teamCount: 2
   fieldSize: 80
-  randomSeed: 12345
   teamColors:
   - {r: 0.3, g: 0.55, b: 1, a: 1}
   - {r: 1, g: 0.4, b: 0.3, a: 1}
@@ -763,6 +666,21 @@ MonoBehaviour:
   trackedEntities: 0
   activeViews: 0
   pooledViews: 0
+--- !u!114 &1675614461
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1675614456}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f987deb418cab804ea645d8ee9348cb7, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  additionalAbilities: []
+  registeredAbilities: 0
+  activeAttachedEffects: 0
 --- !u!1 &1687258581
 GameObject:
   m_ObjectHideFlags: 0
@@ -1215,15 +1133,14 @@ SceneRoots:
   m_ObjectHideFlags: 0
   m_Roots:
   - {fileID: 1687258585}
+  - {fileID: 991285307}
   - {fileID: 2138677393}
   - {fileID: 207986661}
   - {fileID: 653260038}
   - {fileID: 287793510}
-  - {fileID: 665873913}
   - {fileID: 1675614459}
   - {fileID: 760247947}
   - {fileID: 1282320372}
   - {fileID: 1456942159446485426}
   - {fileID: 3367575877528022649}
   - {fileID: 2012834998}
-  - {fileID: 991285307}

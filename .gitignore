@@ -12,3 +12,13 @@ Assembly-CSharp.csproj
 HeroDots.sln
 
 Assets/SceneDependencyCache/
+
+Library/
+
+Logs/
+
+Temp/
+
+UserSettings/
+
+herodotsrts.sln
