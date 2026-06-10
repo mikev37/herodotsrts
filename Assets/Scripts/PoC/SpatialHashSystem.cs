@@ -54,7 +54,17 @@ public partial struct SpatialHashSystem : ISystem
             CellSize = cellSize,
             Writer = map.AsParallelWriter(),
         };
-        state.Dependency = fill.ScheduleParallel(state.Dependency);
+        // DETERMINISM: Schedule (single-thread), NOT ScheduleParallel. With a
+        // parallel fill, the order of values within each cell's bucket depends on
+        // which worker thread inserted first — OS scheduling, different every run.
+        // Five systems iterate GetValuesForKey in that order (Steering sums
+        // separation floats — non-associative; Targeting breaks ties by it;
+        // ContactCombat scans strikes/blocks in it), so parallel fill = lockstep
+        // and replay divergence. Single-threaded, insertion order = query chunk
+        // order, which is deterministic given identical archetype history.
+        // Hundreds of units make this job trivial; if profiling ever demands a
+        // parallel fill, consumers must sort each bucket (e.g. by StableId) first.
+        state.Dependency = fill.Schedule(state.Dependency);
 
         hashRef.ValueRW.Map = map;
     }

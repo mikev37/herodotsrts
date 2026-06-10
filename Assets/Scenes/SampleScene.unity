@@ -427,7 +427,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   team: 0
-  mode: 1
+  mode: 2
   fileName: lockstep_commands.bin
   configuresStream: 1
   lastOrder: (none)
@@ -483,7 +483,7 @@ MonoBehaviour:
   dumpKey: 97
   dumpFileName: lockstep_result.txt
   logChecksumEachSecond: 1
-  autoDumpAtTick: 0
+  autoDumpAtTick: 1000
 --- !u!114 &991285306
 MonoBehaviour:
   m_ObjectHideFlags: 0
