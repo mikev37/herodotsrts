@@ -5,23 +5,27 @@ using Unity.Mathematics;
 using Unity.Transforms;
 
 // ---------------------------------------------------------------------------
-// CONTACT COMBAT — replaces the rigidbody-collision math. There is no physics
-// engine; we reconstruct "impact force" from data we already have.
+// CONTACT COMBAT — resolves physical contact and melee strikes, receiver-side
+// (each unit only writes its OWN components -> parallel and Burst-safe).
 //
-// Each unit computes the damage it RECEIVES by looking at enemy neighbors that
-// are touching it and moving INTO it. Computing on the receiver side means a
-// unit only ever writes its OWN components -> the whole thing stays parallel
-// and Burst-safe (no cross-entity writes).
+// It iterates the unit's ContactList — the SAME per-tick neighbor snapshot
+// Steering uses for separation (filled once by InformationGatherSystem) — so
+// physics and combat can never disagree about who is touching whom.
 //
-//   impact      = enemyMass * closingSpeed     (closingSpeed = how fast the
-//                 enemy is driving into us along the contact normal)
-//   damage      = ContactDps * dt   (baseline melee) + ImpactScale * impact
-//   knockback   = away from the attacker, scaled by impact / ownMass
+//   * BODY contact (radii-based, any range weapon irrelevant): continuous
+//     ramming damage from mass * closing speed, plus knockback. (Previously
+//     contact range scaled with WEAPON reach, so archers "rammed" from 20m.)
+//   * MELEE strikes: an attacker's published state decides who gets hit — the
+//     strike lands on the unit the attacker DECLARED as its target
+//     (UnitInfo.AttackTarget), or, for cleave attackers, on everyone inside
+//     the strike arc. Either way a body standing between attacker and victim
+//     blocks the hit (long weapons hit the first unit in line).
 //
-// Because a downhill unit moves faster (GroundSpeedMultiplier > 1), its closing
-// speed is higher, so it deals more impact damage automatically. That's your
-// "downhill damage buff" — emergent, not a special case. Same mechanism gives a
-// charging hero ability its punch: charge = high commanded velocity = big impact.
+//   impact    = enemyMass * closingSpeed
+//   damage    = ImpactScale * impact * dt  (+ mitigated strike damage)
+//   knockback = away from the rammer, scaled by impact / ownMass
+//
+// Downhill units close faster -> hit harder. Emergent, not special-cased.
 // ---------------------------------------------------------------------------
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
@@ -31,39 +35,32 @@ public partial struct ContactCombatSystem : ISystem
     [BurstCompile]
     public void OnCreate(ref SystemState state)
     {
-        state.RequireForUpdate<SpatialHash>();
         state.RequireForUpdate<EndSimulationEntityCommandBufferSystem.Singleton>();
     }
 
     [BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
-        var hash = SystemAPI.GetSingleton<SpatialHash>();
-        if (!hash.Map.IsCreated) return;
-
         var ecb = SystemAPI
             .GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>()
             .CreateCommandBuffer(state.WorldUnmanaged)
             .AsParallelWriter();
 
-        var job = new CombatJob
+        new CombatJob
         {
             Dt = SystemAPI.Time.DeltaTime,
-            Map = hash.Map,
-            CellSize = hash.CellSize,
             ImpactScale = 6f,        // global: ramming-impact damage multiplier
             KnockbackScale = 0.4f,   // global: knockback strength
+            BodyContactScale = 1.2f, // global: bodies "touch" within (rA + rB) * this
             Ecb = ecb,
-        };
-        state.Dependency = job.ScheduleParallel(state.Dependency);
+        }.ScheduleParallel();
     }
 
     [BurstCompile]
     [WithNone(typeof(Dead))]
     private partial struct CombatJob : IJobEntity
     {
-        public float Dt, CellSize, ImpactScale, KnockbackScale;
-        [ReadOnly] public NativeParallelMultiHashMap<int, NeighborData> Map;
+        public float Dt, ImpactScale, KnockbackScale, BodyContactScale;
         public EntityCommandBuffer.ParallelWriter Ecb;
 
         private void Execute(
@@ -73,58 +70,59 @@ public partial struct ContactCombatSystem : ISystem
             ref Health health,
             ref CombatStatus status,
             ref UnitAnim anim,
-            in Velocity vel,
+            in Velocity velocity,
             in UnitRadius radius,
             in Mass mass,
             in Defense defense,
-            in Team team)
+            in Team team,
+            DynamicBuffer<UnitInfo> contacts)
         {
-            float2 pos = new float2(xform.Position.x, xform.Position.z);
-            float3 fwd3 = math.forward(xform.Rotation);
-            float2 myForward = math.normalizesafe(new float2(fwd3.x, fwd3.z), new float2(0f, 1f));
+            float2 position = new float2(xform.Position.x, xform.Position.z);
+            float3 forward3 = math.forward(xform.Rotation);
+            float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
             float incoming = 0f;
             float2 knockback = float2.zero;
             bool inContact = false;
 
-            int cx = (int)math.floor(pos.x / CellSize);
-            int cy = (int)math.floor(pos.y / CellSize);
-
-            for (int ox = -1; ox <= 1; ox++)
-            for (int oy = -1; oy <= 1; oy++)
+            for (int i = 0; i < contacts.Length; i++)
             {
-                int key = ((cx + ox) * 73856093) ^ ((cy + oy) * 19349663);
-                if (!Map.TryGetFirstValue(key, out var n, out var it)) continue;
-                do
+                UnitInfo neighbor = contacts[i];
+                if (neighbor.Team == team.Value) continue;
+
+                float2 fromNeighbor = position - neighbor.Position;   // attacker -> me
+                float distance = math.length(fromNeighbor);
+                if (distance < 1e-4f) { fromNeighbor = new float2(0.01f, 0f); distance = 0.01f; }
+                float2 normal = fromNeighbor / distance;
+
+                // --- BODY contact: ramming damage + knockback (radii-based) ---
+                float bodyRange = (radius.Value + neighbor.Radius) * BodyContactScale;
+                if (distance <= bodyRange)
                 {
-                    if (n.Team == team.Value || n.Entity == self) continue;
-
-                    float2 d = pos - n.Position;            // from attacker to me
-                    float dist = math.length(d);
-                    float contactRange = (radius.Value + n.MeleeRange) * 2.2f;
-                    if (dist > contactRange || dist < 1e-4f) continue;
-
                     inContact = true;
-                    float2 normal = d / dist;
-
-                    // How fast the enemy is driving into us along the normal.
-                    float closing = math.max(0f, math.dot(n.Velocity - vel.Value, -normal));
-
-                    float impact = n.Mass * closing;
-                    // Continuous velocity/impact damage (unchanged, no facing).
+                    float closing = math.max(0f, math.dot(neighbor.Velocity - velocity.Value, -normal));
+                    float impact = neighbor.Mass * closing;
                     incoming += ImpactScale * impact * Dt;
-
-                    // Discrete melee bash: lands only if I'm inside the attacker's
-                    // strike arc (normal points from attacker to me) AND no other
-                    // body stands between us — so a spear/long weapon hits the
-                    // FIRST unit in line, not everyone behind it. Damage is
-                    // mitigated by my armor/shield/backstab (toThreat = -normal).
-                    if (n.StrikeDamage > 0f && math.dot(n.Forward, normal) >= n.StrikeArcDot &&
-                        !StrikeBlocked(pos, n.Position, n, self, radius.Value, cx, cy))
-                        incoming += CombatMath.Mitigate(n.StrikeDamage, myForward, -normal,
-                                                        defense.Armor, defense.Shield);
                     knockback += normal * (impact * KnockbackScale / mass.Value);
                 }
-                while (Map.TryGetNextValue(out n, ref it));
+
+                // --- MELEE strike: lands by the attacker's DECLARED state ---
+                // Single-target: I am the unit the attacker committed to. Cleave:
+                // anyone inside the attacker's strike arc. Both require being
+                // within weapon reach and an unblocked line (first body in the
+                // way eats a long weapon's hit instead of everyone behind it).
+                if (neighbor.StrikeDamage > 0f &&
+                    distance <= neighbor.AttackRange + bodyRange)
+                {
+                    bool targeted = neighbor.AttackTarget == self;
+                    bool cleaved = neighbor.Cleave == 1 &&
+                                   math.dot(neighbor.Facing, normal) >= neighbor.StrikeArcDot;
+                    if ((targeted || cleaved) &&
+                        !StrikeBlocked(position, neighbor, self, radius.Value, contacts))
+                    {
+                        incoming += CombatMath.Mitigate(neighbor.StrikeDamage, myFacing, -normal,
+                                                        defense.Armor, defense.Shield);
+                    }
+                }
             }
 
             status.InContactWithEnemy = inContact;
@@ -143,33 +141,27 @@ public partial struct ContactCombatSystem : ISystem
             }
         }
 
-        // True if some other unit stands between the attacker and me — a body in
-        // the path of the strike. Scans the same 3x3 neighborhood; cheap because
-        // it only runs on the rare frames a neighbor actually has a strike pulse.
-        private bool StrikeBlocked(float2 me, float2 attacker, NeighborData adata, Entity self,
-                                   float halfWidth, int cx, int cy)
+        // True if some other body stands between the attacker and me. Scans my
+        // own ContactList (blockers near the victim are the ones on the line);
+        // cheap because it only runs on the rare ticks a strike actually pulses.
+        private static bool StrikeBlocked(float2 me, in UnitInfo attacker, Entity self,
+                                          float halfWidth, in DynamicBuffer<UnitInfo> contacts)
         {
-            float2 ad = me - attacker;
-            float adLen2 = math.lengthsq(ad);
-            if (adLen2 < 1e-4f) return false;
-            float hw2 = halfWidth * halfWidth;
+            float2 line = me - attacker.Position;
+            float lineLengthSq = math.lengthsq(line);
+            if (lineLengthSq < 1e-4f) return false;
+            float halfWidthSq = halfWidth * halfWidth;
 
-            for (int ox = -1; ox <= 1; ox++)
-            for (int oy = -1; oy <= 1; oy++)
+            for (int i = 0; i < contacts.Length; i++)
             {
-                int key = ((cx + ox) * 73856093) ^ ((cy + oy) * 19349663);
-                if (!Map.TryGetFirstValue(key, out var b, out var it)) continue;
-                do
-                {
-                    if (b.Entity == self || b.Entity == adata.Entity) continue;
-                    if (b.Team == adata.Team) continue;
-                    float2 ab = b.Position - adata.Position;
-                    float t = math.dot(ab, ad) / adLen2;        // position along attacker->me (0..1)
-                    if (t <= 0.1f || t >= 0.9f) continue;        // must be BETWEEN, not at an endpoint
-                    float2 perp = ab - ad * t;                   // lateral distance from the strike line
-                    if (math.lengthsq(perp) < hw2) return true;  // a body is in the way
-                }
-                while (Map.TryGetNextValue(out b, ref it));
+                UnitInfo body = contacts[i];
+                if (body.Entity == self || body.Entity == attacker.Entity) continue;
+                if (body.Team == attacker.Team) continue;
+                float2 toBody = body.Position - attacker.Position;
+                float t = math.dot(toBody, line) / lineLengthSq;     // position along attacker->me
+                if (t <= 0.1f || t >= 0.9f) continue;                 // must be BETWEEN, not at an endpoint
+                float2 lateral = toBody - line * t;                   // offset from the strike line
+                if (math.lengthsq(lateral) < halfWidthSq) return true;
             }
             return false;
         }

@@ -69,11 +69,4 @@ public class StatModifierDef
     [Header("Flag targets")]
     [Tooltip("For Flag* targets: set the behavior flag to this while active (reverts after).")]
     public bool boolValue = true;
-
-    [Header("Lifetime")]
-    [Tooltip("Seconds this modifier stays on a unit (CastOnce). PersistentArea keeps it alive while inside.")]
-    public float duration = 1f;
-
-    [Tooltip("Optional view effect to attach while active (wiring pending in the view layer).")]
-    public GameObject viewEffect;
 }

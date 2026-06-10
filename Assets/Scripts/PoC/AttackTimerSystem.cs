@@ -4,14 +4,22 @@ using Unity.Mathematics;
 using Unity.Transforms;
 
 // ===========================================================================
-// ATTACK TIMER — one loop for melee AND ranged: countdown -> act -> cooldown.
-// The only difference is the ACT:
-//   * melee  -> set Pulse = Damage this frame (rides the hash; ContactCombat
-//               applies it, gated by the strike arc + defender mitigation).
-//   * ranged -> spawn an arcing Projectile aimed at the target.
+// ATTACK CYCLE — runs the predictable charge-up -> fire -> cooldown loop, but
+// ONLY while the unit is committed to attacking (CombatStatus.IsAttacking,
+// decided by BehaviorSystem last tick) and has a target.
 //
-// Runs BEFORE the spatial hash so a melee pulse set this frame is in NeighborData
-// for the defender's contact loop the same frame.
+// Breaking off (moving, losing the target, being ordered away) resets the
+// cycle to Ready, so every engagement starts from a known state: charge for
+// ChargeUp seconds, fire, recover for Cooldown seconds, charge again. No unit
+// ever arrives "somewhere in the middle of its attack cycle".
+//
+// Firing: melee sets Attack.Pulse for exactly one tick (the hash publishes it;
+// ContactCombat lands it on the attacker's declared target). Ranged spawns a
+// projectile that flies from the shooter's terrain height to the target's,
+// with a damage bonus for shooting downhill (// global: below). Units cannot
+// move and attack: behavior only sets IsAttacking while holding.
+//
+// Runs BEFORE SpatialHashSystem so this tick's Pulse is in this tick's hash.
 // ===========================================================================
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
@@ -30,14 +38,20 @@ public partial struct AttackTimerSystem : ISystem
             .GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>()
             .CreateCommandBuffer(state.WorldUnmanaged).AsParallelWriter();
 
-        new AttackJob { Dt = SystemAPI.Time.DeltaTime, Ecb = ecb }.ScheduleParallel();
+        new AttackJob
+        {
+            Dt = SystemAPI.Time.DeltaTime,
+            HeightDamageBonus = 0.05f,   // global: ranged damage bonus per meter of height advantage
+            HeightBonusCap = 6f,         // global: height advantage stops counting beyond this (meters)
+            Ecb = ecb,
+        }.ScheduleParallel();
     }
 
     [BurstCompile]
     [WithNone(typeof(Dead))]
     private partial struct AttackJob : IJobEntity
     {
-        public float Dt;
+        public float Dt, HeightDamageBonus, HeightBonusCap;
         public EntityCommandBuffer.ParallelWriter Ecb;
 
         private void Execute(
@@ -45,53 +59,98 @@ public partial struct AttackTimerSystem : ISystem
             in LocalTransform xform,
             in Team team,
             in CombatTarget target,
+            in Perception perception,
             in Ranged ranged,
-            ref Attack atk,
+            in GroundSpeedMultiplier slope,
+            ref Attack attack,
             ref CombatStatus status)
         {
-            atk.Cooldown -= Dt;
+            attack.Pulse = 0f;
 
-            float2 pos = new float2(xform.Position.x, xform.Position.z);
-            bool engaged = target.Has && math.distance(pos, target.Position) <= atk.Range;
-            status.IsFiring = engaged && ranged.IsRanged;   // drives the ranged attack anim
-
-            // Not striking this frame -> make sure no stale melee pulse lingers.
-            if (!engaged || atk.Cooldown > 0f || atk.Interval <= 0f) { atk.Pulse = 0f; return; }
-
-            atk.Cooldown = atk.Interval;    // reset (avoids float error building up vs +=)
-
-            if (!ranged.IsRanged)
+            // Not committed (moving, no target, ordered away) -> cycle resets.
+            if (!status.IsAttacking || !target.Has)
             {
-                atk.Pulse = atk.Damage;     // MELEE: bash this frame
+                attack.Phase = AttackPhase.Ready;
+                attack.Timer = 0f;
+                status.IsFiring = false;
                 return;
             }
 
-            // RANGED: launch an arcing projectile toward the target's position now.
-            atk.Pulse = 0f;
-            if (atk.ProjSpeed <= 0f) return;
+            status.IsFiring = ranged.IsRanged;   // drives the ranged attack anim
 
-            float2 toTarget = target.Position - pos;
-            float dist = math.length(toTarget);
-            float2 dir = dist > 1e-4f ? toTarget / dist : new float2(0f, 1f);
-            float life = dist / atk.ProjSpeed;   // land at the aimed point as the arc reaches 0
-
-            var p = Ecb.CreateEntity(sortKey);
-            Ecb.AddComponent(sortKey, p, LocalTransform.FromPosition(
-                new float3(pos.x, atk.ProjLaunchHeight, pos.y)));
-            Ecb.AddComponent(sortKey, p, new Projectile
+            switch (attack.Phase)
             {
-                Velocity = dir * atk.ProjSpeed,
-                Damage = atk.Damage,
+                case AttackPhase.Ready:
+                    attack.Phase = AttackPhase.Charging;
+                    attack.Timer = attack.ChargeUp;
+                    goto case AttackPhase.Charging;
+
+                case AttackPhase.Charging:
+                    attack.Timer -= Dt;
+                    if (attack.Timer <= 0f)
+                    {
+                        Fire(sortKey, xform, team, target, perception, ranged, slope, ref attack);
+                        attack.Phase = AttackPhase.Cooldown;
+                        attack.Timer += attack.Cooldown;   // += carries the sub-tick remainder
+                    }
+                    break;
+
+                case AttackPhase.Cooldown:
+                    attack.Timer -= Dt;
+                    if (attack.Timer <= 0f)
+                    {
+                        attack.Phase = AttackPhase.Charging;
+                        attack.Timer += attack.ChargeUp;
+                    }
+                    break;
+            }
+        }
+
+        private void Fire(int sortKey, in LocalTransform xform, in Team team,
+                          in CombatTarget target, in Perception perception,
+                          in Ranged ranged, in GroundSpeedMultiplier slope, ref Attack attack)
+        {
+            if (!ranged.IsRanged)
+            {
+                attack.Pulse = attack.Damage;   // MELEE: strike lands this tick (via ContactCombat)
+                return;
+            }
+
+            // RANGED: launch an arcing projectile from our terrain height to the
+            // target's, with a downhill damage bonus.
+            if (attack.ProjSpeed <= 0f) return;
+
+            float2 position = new float2(xform.Position.x, xform.Position.z);
+            float2 toTarget = target.Position - position;
+            float distance = math.length(toTarget);
+            float2 direction = distance > 1e-4f ? toTarget / distance : new float2(0f, 1f);
+            float life = distance / attack.ProjSpeed;   // land at the aimed point as the arc completes
+
+            float heightAdvantage = math.clamp(slope.Height - perception.TargetHeight,
+                                               -HeightBonusCap, HeightBonusCap);
+            float damage = attack.Damage * math.max(0.5f, 1f + HeightDamageBonus * heightAdvantage);
+
+            float startY = slope.Height + attack.ProjLaunchHeight;
+            float endY = perception.TargetHeight;
+
+            var projectile = Ecb.CreateEntity(sortKey);
+            Ecb.AddComponent(sortKey, projectile, LocalTransform.FromPosition(
+                new float3(position.x, startY, position.y)));
+            Ecb.AddComponent(sortKey, projectile, new Projectile
+            {
+                Velocity = direction * attack.ProjSpeed,
+                Damage = damage,
                 Team = team.Value,
                 Life = life,
                 TotalLife = life,
-                Rise = atk.ProjRise,
-                LaunchHeight = atk.ProjLaunchHeight,
-                HitRadius = atk.ProjHitRadius,
-                CollisionHeight = atk.ProjCollisionHeight,
+                Rise = attack.ProjRise,
+                StartY = startY,
+                EndY = endY,
+                HitRadius = attack.ProjHitRadius,
+                CollisionHeight = attack.ProjCollisionHeight,
             });
-            Ecb.AddComponent<ProjectileTag>(sortKey, p);
-            Ecb.AddComponent(sortKey, p, new ProjectileView { Id = atk.ProjectileId });
+            Ecb.AddComponent<ProjectileTag>(sortKey, projectile);
+            Ecb.AddComponent(sortKey, projectile, new ProjectileView { Id = attack.ProjectileId });
         }
     }
 }

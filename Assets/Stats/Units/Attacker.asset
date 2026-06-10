@@ -10,36 +10,44 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fabe54d3493da3645874e32c38b40900, type: 3}
-  m_Name: Archer
+  m_Name: Attacker
   m_EditorClassIdentifier: Assembly-CSharp::UnitDefinition
-  displayName: Unit
-  viewPrefab: {fileID: 5601924201370705552, guid: a7057f4e7a315e3409e94e497d66b7a6, type: 3}
-  speed: 2
-  radius: 0.5
+  displayName: Swordsman
+  viewPrefab: {fileID: 5055938317465080342, guid: 3c6f0c18af3224c48808b863cefaee6b, type: 3}
+  speed: 5
+  radius: 0.7
   mass: 1
   turnSpeed: 6
   separationStrength: 8
-  meleeRange: 1.2
+  meleeRange: 2
   wallSpacing: 1.3
   spreadRadius: 5
   spreadStrength: 2
-  maxHealth: 50
+  maxHealth: 100
   deathAnimSeconds: 2
-  armor: 0
+  armor: 10
   shield: 0
   meleeAttackInterval: 1
+  meleeChargeUpSeconds: 0.3
+  meleeCleave: 0
   meleeAttackDamage: 25
-  meleeStrikeArc: 120
-  isRanged: 1
-  projectile: {fileID: 11400000, guid: d8e2101adbd385944b406faf3480e26f, type: 2}
+  meleeStrikeArc: 10
+  isRanged: 0
+  projectile: {fileID: 0}
   kiteRadius: 6
-  attackRange: 20
-  attackInterval: 2.35
+  attackRange: 10
+  attackInterval: 1.2
+  rangedChargeUpSeconds: 0.5
   attackDamage: 18
   isHero: 0
+  abilities:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
   formShieldWall: 0
   stayBehindWall: 0
-  kiteEnemies: 1
-  advanceToTarget: 0
+  kiteEnemies: 0
+  advanceToTarget: 1
   holdWhenDefensive: 0
-  idleSpread: 0
+  idleSpread: 1

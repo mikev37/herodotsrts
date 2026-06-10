@@ -52,6 +52,13 @@ public class UnitDefinition : ScriptableObject
     [Header("Melee")]
     [Tooltip("Seconds between melee strikes; the attack timer loops while engaged.")]
     public float meleeAttackInterval = 1.0f;
+    [Tooltip("Wind-up seconds before a melee strike lands. The attack cycle is " +
+             "charge-up -> strike -> cooldown(=interval) -> charge-up, and only runs while " +
+             "the unit is committed to attacking (standing on its target).")]
+    public float meleeChargeUpSeconds = 0.3f;
+    [Tooltip("Cleave: the strike hits EVERY enemy inside the strike arc. Off = the strike " +
+             "lands only on the unit's declared target (first body in line can still block).")]
+    public bool meleeCleave = false;
     [Tooltip("Damage of one melee strike — a discrete bash applied on the strike frame.")]
     public float meleeAttackDamage = 25f;
     [Tooltip("Full angle (degrees) of the strike cone in front of the attacker. " +
@@ -66,6 +73,8 @@ public class UnitDefinition : ScriptableObject
     public float kiteRadius = 7f;
     public float attackRange = 10f;
     public float attackInterval = 1.2f;
+    [Tooltip("Wind-up seconds before each shot. Same predictable cycle as melee.")]
+    public float rangedChargeUpSeconds = 0.5f;
     public float attackDamage = 18f;
 
     [Header("Hero")]

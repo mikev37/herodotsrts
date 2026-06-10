@@ -427,7 +427,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   team: 0
-  mode: 3
+  mode: 0
   fileName: lockstep_commands.bin
   configuresStream: 1
   lastOrder: (none)
@@ -468,7 +468,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &940009758
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -602,7 +602,7 @@ MonoBehaviour:
   dumpKey: 97
   dumpFileName: lockstep_result.txt
   logChecksumEachSecond: 1
-  autoDumpAtTick: 400
+  autoDumpAtTick: 0
 --- !u!114 &991285306
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -771,22 +771,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   teamone:
   - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
-    countPerTeam: 100
-  - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 100
-  - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
-    countPerTeam: 100
+    countPerTeam: 20
   - definition: {fileID: 11400000, guid: 59640ea508dd8f04189d49b828763818, type: 2}
     countPerTeam: 1
-  - definition: {fileID: 11400000, guid: d2f1f7a52e2d5f04fa78833e88ee1973, type: 2}
-    countPerTeam: 50
   teamtwo:
-  - definition: {fileID: 11400000, guid: d2f1f7a52e2d5f04fa78833e88ee1973, type: 2}
-    countPerTeam: 200
-  - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 100
   - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
-    countPerTeam: 100
+    countPerTeam: 20
+  - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
+    countPerTeam: 20
   teamCount: 2
   fieldSize: 80
   teamColors:

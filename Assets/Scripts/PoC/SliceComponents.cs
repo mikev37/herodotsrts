@@ -52,7 +52,8 @@ public struct Projectile : IComponentData
     public float Life;            // seconds remaining
     public float TotalLife;       // life at launch (for arc progress)
     public float Rise;            // arc bulge height
-    public float LaunchHeight;    // starting height
+    public float StartY;          // world launch height (shooter terrain + launch offset)
+    public float EndY;            // world ground height at the aimed point
     public float HitRadius;
     public float CollisionHeight; // only collide at/below this height
 }

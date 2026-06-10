@@ -147,11 +147,10 @@ public class DebugOverlay : MonoBehaviour
 
             if (showFlowField && mru >= 0 && nf.CoarseCost.IsCreated)
             {
-                int baseC = mru * NavGrid.BigCount;
                 for (int by = 0; by < NavGrid.BigTilesPerAxis; by++)
                 for (int bx = 0; bx < NavGrid.BigTilesPerAxis; bx++)
                 {
-                    int cb = nf.CoarseCost[baseC + NavGrid.BigIndex(bx, by)];
+                    int cb = CoarseMin(nf.CoarseCost, mru, NavGrid.BigIndex(bx, by));
                     if (cb == int.MaxValue) continue;
                     int best = cb; int2 nb = new int2(bx, by);
                     for (int oy = -1; oy <= 1; oy++)
@@ -160,7 +159,7 @@ public class DebugOverlay : MonoBehaviour
                         if (ox == 0 && oy == 0) continue;
                         int nx = bx + ox, ny = by + oy;
                         if (!NavGrid.BigInBounds(nx, ny)) continue;
-                        int c = nf.CoarseCost[baseC + NavGrid.BigIndex(nx, ny)];
+                        int c = CoarseMin(nf.CoarseCost, mru, NavGrid.BigIndex(nx, ny));
                         if (c < best) { best = c; nb = new int2(nx, ny); }
                     }
                     if (nb.x == bx && nb.y == by) continue;
@@ -226,6 +225,16 @@ public class DebugOverlay : MonoBehaviour
         }
 
         entities.Dispose(); xforms.Dispose(); teams.Dispose(); targets.Dispose(); dests.Dispose();
+    }
+
+    // Cheapest component cost of a big tile (display-grade summary of the
+    // per-component coarse layout).
+    private static int CoarseMin(Unity.Collections.NativeArray<int> coarse, int slot, int bi)
+    {
+        int baseC = (slot * NavGrid.BigCount + bi) * NavGrid.MaxComp;
+        int m = int.MaxValue;
+        for (int c = 0; c < NavGrid.MaxComp; c++) m = Mathf.Min(m, coarse[baseC + c]);
+        return m;
     }
 
     private void OnGUI()

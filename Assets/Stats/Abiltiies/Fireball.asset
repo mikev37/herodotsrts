@@ -1,0 +1,38 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4695cc48e0a579348be3cffe65347f0b, type: 3}
+  m_Name: Fireball
+  m_EditorClassIdentifier: 
+  displayName: Ability
+  shape: 0
+  radius: 5
+  width: 2
+  length: 10
+  anchor: 1
+  applyMode: 0
+  affects: 2
+  lifetime: 5
+  cooldown: 1
+  castEffectPrefab: {fileID: 8244839700207486601, guid: 2566012ba7080f34193c0fc198345ccc, type: 3}
+  castEffectSeconds: 1
+  attachedEffectPrefab: {fileID: 0}
+  modifiers:
+  - target: 0
+    delta: -500
+    mode: 0
+    revert: 0
+    capMode: 0
+    capRef: 0
+    capValue: 0
+    boolValue: 0
+    duration: 0
+    viewEffect: {fileID: 0}

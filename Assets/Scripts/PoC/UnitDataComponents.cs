@@ -65,17 +65,26 @@ public struct UnitTuning : IComponentData
 //               defender's contact loop), gated by the ArcDot cleave cone.
 //   * ranged -> spawns a projectile using the Proj* fields (copied from the
 //               unit's ProjectileDefinition at spawn).
+// Attack cycle: predictable charge-up -> fire -> cooldown -> charge-up...
+// The cycle only runs while the unit is COMMITTED to attacking
+// (CombatStatus.IsAttacking, decided by BehaviorSystem); breaking off resets to
+// Ready, so every engagement starts from a known state — no arriving mid-cycle.
+public enum AttackPhase : byte { Ready = 0, Charging = 1, Cooldown = 2 }
+
 public struct Attack : IComponentData
 {
     // cadence (shared)
     public float Range;       // engage distance (meleeRange for melee, attackRange for ranged)
-    public float Interval;    // seconds between attacks
-    public float Cooldown;    // counts down to the next attack
+    public float ChargeUp;    // wind-up seconds before a strike/shot lands
+    public float Cooldown;    // recovery seconds after firing
+    public float Timer;       // counts down within the current phase
+    public AttackPhase Phase;
     public float Damage;      // melee strike damage OR projectile damage
 
     // melee act
-    public float ArcDot;      // cos(arc/2): strike only lands on defenders within this cone
-    public float Pulse;       // = Damage on the strike frame, else 0 (read by the hash)
+    public float ArcDot;      // cos(arc/2): cleave strikes land within this cone
+    public byte  Cleave;      // strike hits all enemies in the arc, not just the target
+    public float Pulse;       // = Damage on the strike tick, else 0 (read by the hash)
 
     // ranged act (copied from the referenced ProjectileDefinition)
     public int   ProjectileId;       // index into the projectile view registry

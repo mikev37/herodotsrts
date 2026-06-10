@@ -99,7 +99,6 @@ public struct FieldModifier : IBufferElementData
     public CapMode CapMode;
     public CapRef CapRef;
     public float CapValue;
-    public float Duration;
 }
 
 // --- per-unit ability state (lockstep-deterministic) -----------------------

@@ -10,26 +10,39 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4695cc48e0a579348be3cffe65347f0b, type: 3}
-  m_Name: Fireball
+  m_Name: Heal
   m_EditorClassIdentifier: 
   displayName: Ability
   shape: 0
   radius: 5
   width: 2
   length: 10
-  anchor: 1
+  anchor: 0
   applyMode: 0
-  affects: 2
+  affects: 1
   lifetime: 5
   cooldown: 1
+  castEffectPrefab: {fileID: 0}
+  castEffectSeconds: 1
+  attachedEffectPrefab: {fileID: 7832205141861203985, guid: 98ab083d6f459304e88fe17b00386d34, type: 3}
   modifiers:
   - target: 0
-    delta: -500
-    mode: 0
+    delta: 5
+    mode: 1
     revert: 0
-    capMode: 0
-    capRef: 0
+    capMode: 2
+    capRef: 1
     capValue: 0
+    boolValue: 0
+    duration: 0
+    viewEffect: {fileID: 0}
+  - target: 7
+    delta: 2
+    mode: 0
+    revert: 1
+    capMode: 1
+    capRef: 0
+    capValue: 1
     boolValue: 0
     duration: 0
     viewEffect: {fileID: 0}

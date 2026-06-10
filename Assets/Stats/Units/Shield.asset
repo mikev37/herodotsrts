@@ -10,13 +10,13 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fabe54d3493da3645874e32c38b40900, type: 3}
-  m_Name: Attacker
+  m_Name: Shield
   m_EditorClassIdentifier: Assembly-CSharp::UnitDefinition
-  displayName: Swordsman
-  viewPrefab: {fileID: 5055938317465080342, guid: 3c6f0c18af3224c48808b863cefaee6b, type: 3}
-  speed: 5
-  radius: 0.5
-  mass: 1
+  displayName: ManAtArms
+  viewPrefab: {fileID: 5344603145670373808, guid: 5f92dacc65c035343b96ae93aaa7d1a0, type: 3}
+  speed: 4
+  radius: 0.7
+  mass: 2
   turnSpeed: 6
   separationStrength: 8
   meleeRange: 2
@@ -26,8 +26,10 @@ MonoBehaviour:
   maxHealth: 100
   deathAnimSeconds: 2
   armor: 10
-  shield: 0
+  shield: 10
   meleeAttackInterval: 1
+  meleeChargeUpSeconds: 0.3
+  meleeCleave: 0
   meleeAttackDamage: 25
   meleeStrikeArc: 10
   isRanged: 0
@@ -35,11 +37,17 @@ MonoBehaviour:
   kiteRadius: 6
   attackRange: 10
   attackInterval: 1.2
+  rangedChargeUpSeconds: 0.5
   attackDamage: 18
   isHero: 0
-  formShieldWall: 0
+  abilities:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  formShieldWall: 1
   stayBehindWall: 0
   kiteEnemies: 0
   advanceToTarget: 1
   holdWhenDefensive: 0
-  idleSpread: 0
+  idleSpread: 1

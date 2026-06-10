@@ -147,7 +147,7 @@ public partial struct AbilityFieldSystem : ISystem
                 CapMode = fm.CapMode,
                 CapRef = fm.CapRef,
                 CapValue = fm.CapValue,
-                Remaining = f.Mode == ApplyMode.PersistentArea ? f.RefreshWindow : fm.Duration,
+                Remaining = f.Mode == ApplyMode.PersistentArea ? f.RefreshWindow : f.Lifetime,
                 Applied = 0,
                 Offset = 0f,
             });

@@ -28,6 +28,15 @@ using Unity.Transforms;
 // the border seeds (which carry the coarse direction). The improvement shows up
 // most around in-tile obstacles and on diagonals. Bump SubPerAxis to give the
 // solver more room if you want to see the difference clearly.
+//
+// COARSE CONNECTIVITY (components): the coarse graph nodes are (bigTile,
+// component) pairs, where components are 4-connected regions of passable cells
+// within a tile (labeled incrementally in ObstacleGridSystem). Edges exist only
+// where adjacent border cells are passable on both sides. Without this, a wall
+// or cliff that bisects a tile leaves the tile "passable" on both halves and
+// the coarse search routes straight through it — the fine field then can't
+// connect and units fall back to steering into the wall. With it, the coarse
+// path correctly loops around long walls/cliffs.
 // ===========================================================================
 
 public static class NavTerrain
@@ -76,8 +85,8 @@ public static class NavTerrain
 
 public static class NavGrid
 {
-    public const int BigTilesPerAxis = 24;
-    public const int SubPerAxis      = 8;
+    public const int BigTilesPerAxis = 20;
+    public const int SubPerAxis      = 50;
     public const float CellSize      = 1f;
 
     public const int Res       = BigTilesPerAxis * SubPerAxis;
@@ -88,6 +97,7 @@ public static class NavGrid
 
     public const int MaxPaths      = 128;
     public const int MaxFineBlocks = 4096;
+    public const int MaxComp       = 4;   // global: max tracked connected components per big tile
 
     public static float2 Origin => new float2(-WorldSize * 0.5f, -WorldSize * 0.5f);
 
@@ -120,7 +130,8 @@ public static class NavGrid
 public struct ObstacleField : IComponentData
 {
     public NativeArray<byte> Passable;
-    public NativeArray<byte> BigPassable;
+    public NativeArray<byte> CellComp;   // component id of each cell WITHIN its big tile (255 = impassable)
+    public NativeArray<byte> CompCount;  // number of components per big tile
     public NativeArray<int>  BigVersion;
     public int Version;
     public int CoarseVersion;
@@ -160,7 +171,8 @@ public struct PathLookup : IComponentData
 public partial struct ObstacleGridSystem : ISystem
 {
     private NativeArray<byte> _passable;
-    private NativeArray<byte> _bigPassable;
+    private NativeArray<byte> _cellComp;
+    private NativeArray<byte> _compCount;
     private NativeArray<int>  _bigVersion;
     private NativeArray<int>  _bigChecksum;
     private bool              _slopeStamped;
@@ -171,7 +183,8 @@ public partial struct ObstacleGridSystem : ISystem
     public void OnCreate(ref SystemState state)
     {
         _passable    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
-        _bigPassable = new NativeArray<byte>(NavGrid.BigCount, Allocator.Persistent);
+        _cellComp    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
+        _compCount   = new NativeArray<byte>(NavGrid.BigCount, Allocator.Persistent);
         _bigVersion  = new NativeArray<int>(NavGrid.BigCount, Allocator.Persistent);
         _bigChecksum = new NativeArray<int>(NavGrid.BigCount, Allocator.Persistent);
         _slopeBlock  = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
@@ -180,15 +193,16 @@ public partial struct ObstacleGridSystem : ISystem
         state.EntityManager.AddComponentData(state.EntityManager.CreateEntity(),
             new ObstacleField
             {
-                Passable = _passable, BigPassable = _bigPassable, BigVersion = _bigVersion,
-                Version = 0, CoarseVersion = 0,
+                Passable = _passable, CellComp = _cellComp, CompCount = _compCount,
+                BigVersion = _bigVersion, Version = 0, CoarseVersion = 0,
             });
     }
 
     public void OnDestroy(ref SystemState state)
     {
         if (_passable.IsCreated)    _passable.Dispose();
-        if (_bigPassable.IsCreated) _bigPassable.Dispose();
+        if (_cellComp.IsCreated)    _cellComp.Dispose();
+        if (_compCount.IsCreated)   _compCount.Dispose();
         if (_bigVersion.IsCreated)  _bigVersion.Dispose();
         if (_bigChecksum.IsCreated) _bigChecksum.Dispose();
         if (_slopeBlock.IsCreated)  _slopeBlock.Dispose();
@@ -199,7 +213,8 @@ public partial struct ObstacleGridSystem : ISystem
     {
         var fieldRef = SystemAPI.GetSingletonRW<ObstacleField>();
         var passable = fieldRef.ValueRO.Passable;
-        var bigPass  = fieldRef.ValueRO.BigPassable;
+        var cellComp = fieldRef.ValueRO.CellComp;
+        var compCount = fieldRef.ValueRO.CompCount;
         var bigVer   = fieldRef.ValueRO.BigVersion;
 
         for (int i = 0; i < passable.Length; i++) passable[i] = 1;
@@ -244,31 +259,80 @@ public partial struct ObstacleGridSystem : ISystem
                 if (_slopeBlock[i] == 1) passable[i] = 0;
         }
 
-        bool anyMoved = false, coarseChanged = false;
+        bool anyMoved = false;
+        var floodStack = new NativeArray<int>(NavGrid.SubCells, Allocator.Temp);
         for (int by = 0; by < NavGrid.BigTilesPerAxis; by++)
         for (int bx = 0; bx < NavGrid.BigTilesPerAxis; bx++)
         {
             int b = NavGrid.BigIndex(bx, by);
             int2 origin = new int2(bx, by) * NavGrid.SubPerAxis;
-            int sum = 0; byte hasPass = 0;
+            int sum = 0;
             for (int ly = 0; ly < NavGrid.SubPerAxis; ly++)
             for (int lx = 0; lx < NavGrid.SubPerAxis; lx++)
-            {
-                byte v = passable[NavGrid.Index(origin.x + lx, origin.y + ly)];
-                sum = sum * 31 + v;
-                hasPass |= v;
-            }
+                sum = sum * 31 + passable[NavGrid.Index(origin.x + lx, origin.y + ly)];
             if (sum != _bigChecksum[b])
             {
                 _bigChecksum[b] = sum;
                 bigVer[b]++;
                 anyMoved = true;
-                if (bigPass[b] != hasPass) { bigPass[b] = hasPass; coarseChanged = true; }
+                LabelTile(passable, cellComp, compCount, origin, b, floodStack);
             }
         }
+        floodStack.Dispose();
 
-        if (anyMoved) fieldRef.ValueRW.Version++;
-        if (coarseChanged) fieldRef.ValueRW.CoarseVersion++;
+        if (anyMoved)
+        {
+            fieldRef.ValueRW.Version++;
+            // Any cell-level change can alter component structure or border
+            // connectivity, both of which the coarse component graph depends
+            // on, so the coarse fields must rebuild.
+            fieldRef.ValueRW.CoarseVersion++;
+        }
+    }
+
+    // Label 4-connected components of passable cells within one big tile.
+    // Component ids are LOCAL to the tile (0..MaxComp-1); 255 = impassable.
+    // More than MaxComp components in an 8x8 tile is pathological; overflow
+    // regions merge into the last id (may create false intra-tile connectivity
+    // there, never false blockage).
+    private static void LabelTile(NativeArray<byte> passable, NativeArray<byte> cellComp,
+                                  NativeArray<byte> compCount, int2 origin, int b,
+                                  NativeArray<int> stack)
+    {
+        int sub = NavGrid.SubPerAxis;
+        for (int ly = 0; ly < sub; ly++)
+        for (int lx = 0; lx < sub; lx++)
+            cellComp[NavGrid.Index(origin.x + lx, origin.y + ly)] = 255;
+
+        byte comps = 0;
+        for (int ly = 0; ly < sub; ly++)
+        for (int lx = 0; lx < sub; lx++)
+        {
+            int idx = NavGrid.Index(origin.x + lx, origin.y + ly);
+            if (passable[idx] == 0 || cellComp[idx] != 255) continue;
+            byte id = comps < NavGrid.MaxComp ? comps : (byte)(NavGrid.MaxComp - 1);
+            if (comps < NavGrid.MaxComp) comps++;
+
+            int top = 0;
+            stack[top++] = ly * sub + lx;
+            cellComp[idx] = id;
+            while (top > 0)
+            {
+                int si = stack[--top];
+                int cx = si % sub, cy = si / sub;
+                for (int d = 0; d < 4; d++)
+                {
+                    int nx = cx + (d == 0 ? 1 : d == 1 ? -1 : 0);
+                    int ny = cy + (d == 2 ? 1 : d == 3 ? -1 : 0);
+                    if (nx < 0 || nx >= sub || ny < 0 || ny >= sub) continue;
+                    int nidx = NavGrid.Index(origin.x + nx, origin.y + ny);
+                    if (passable[nidx] == 0 || cellComp[nidx] != 255) continue;
+                    cellComp[nidx] = id;
+                    stack[top++] = ny * sub + nx;
+                }
+            }
+        }
+        compCount[b] = comps;
     }
 }
 
@@ -291,7 +355,7 @@ public partial struct FlowFieldSystem : ISystem
 
     public void OnCreate(ref SystemState state)
     {
-        _coarse     = new NativeArray<int>(NavGrid.MaxPaths * NavGrid.BigCount, Allocator.Persistent);
+        _coarse     = new NativeArray<int>(NavGrid.MaxPaths * NavGrid.BigCount * NavGrid.MaxComp, Allocator.Persistent);
         _slots      = new NativeArray<PathSlot>(NavGrid.MaxPaths, Allocator.Persistent);
         _fineDir    = new NativeArray<float2>(NavGrid.MaxFineBlocks * NavGrid.SubCells, Allocator.Persistent);
         _fineCost   = new NativeArray<float>(NavGrid.MaxFineBlocks * NavGrid.SubCells, Allocator.Persistent);
@@ -366,7 +430,7 @@ public partial struct FlowFieldSystem : ISystem
 
             if (!fresh || sl.BuiltCoarseVersion != obs.CoarseVersion)
             {
-                BuildCoarse(coarse, slot, sl.GoalBig, obs.BigPassable);
+                BuildCoarse(coarse, slot, gc, obs.CellComp, obs.CompCount);
                 sl.BuiltCoarseVersion = obs.CoarseVersion;
                 int baseK = slot * NavGrid.BigCount;
                 for (int b = 0; b < NavGrid.BigCount; b++)
@@ -379,7 +443,8 @@ public partial struct FlowFieldSystem : ISystem
             map.TryAdd(NavGrid.Index(gc), slot);
         }
 
-        var seen2 = new NativeHashSet<int>(256, Allocator.Temp);
+        var seenNodes = new NativeHashSet<int>(256, Allocator.Temp);
+        var seenTiles = new NativeHashSet<int>(256, Allocator.Temp);
         var keys  = new NativeList<int>(Allocator.Temp);
         foreach (var (xform, dest) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<DesiredDestination>>())
         {
@@ -388,7 +453,7 @@ public partial struct FlowFieldSystem : ISystem
             if (!map.TryGetValue(gi, out int slot)) continue;
             int2 cell = NavGrid.Cell(new float2(xform.ValueRO.Position.x, xform.ValueRO.Position.z));
             if (!NavGrid.InBounds(cell.x, cell.y)) continue;
-            MarkCorridor(seen2, keys, coarse, slot, NavGrid.BigOf(cell), slots[slot].GoalBig);
+            MarkCorridor(seenNodes, seenTiles, keys, coarse, obs.CellComp, obs.CompCount, slot, cell);
         }
 
         var requests = new NativeList<int3>(Allocator.TempJob);   // passed to a job
@@ -427,6 +492,7 @@ public partial struct FlowFieldSystem : ISystem
                 Coarse     = coarse,
                 Slots      = slots,
                 Passable   = obs.Passable,
+                CellComp   = obs.CellComp,
                 BlockOf    = blockOf,
                 FineDir    = nf.ValueRW.FineDir,
                 FineCost   = nf.ValueRW.FineCost,
@@ -436,14 +502,17 @@ public partial struct FlowFieldSystem : ISystem
                        // (synchronous like the old Complete(), and Temp-safe)
         }
 
-        goals.Dispose(); seen2.Dispose(); keys.Dispose(); requests.Dispose();
+        goals.Dispose(); seenNodes.Dispose(); seenTiles.Dispose(); keys.Dispose(); requests.Dispose();
     }
 
     private static long SortKey(int3 req, NativeArray<int> coarse)
     {
-        // req = (block, slot, big). Group by slot, then ascending coarse cost.
-        int cost = coarse[req.y * NavGrid.BigCount + req.z];
-        return (long)req.y * (1L << 20) + cost;
+        // req = (block, slot, big). Group by slot, then ascending coarse cost
+        // (the tile's cheapest component -> goal-outward build order).
+        int baseI = (req.y * NavGrid.BigCount + req.z) * NavGrid.MaxComp;
+        int cost = int.MaxValue;
+        for (int c = 0; c < NavGrid.MaxComp; c++) cost = math.min(cost, coarse[baseI + c]);
+        return (long)req.y * (1L << 20) + math.min(cost, (1 << 20) - 1);
     }
 
     private static int FindSlot(NativeArray<PathSlot> slots, int2 gc)
@@ -477,58 +546,143 @@ public partial struct FlowFieldSystem : ISystem
         return blk;
     }
 
-    private static void BuildCoarse(NativeArray<int> coarse, int slot, int2 goalBig, NativeArray<byte> bigPass)
+    // Coarse search over (bigTile, component) nodes. Components are connected
+    // regions of passable cells within one big tile (labeled in
+    // ObstacleGridSystem); edges exist only where adjacent border cells are
+    // passable on BOTH sides. This is what lets the coarse field route AROUND
+    // a wall or cliff that bisects a tile (or runs along a tile seam) instead
+    // of pretending the tile is open. Cardinal edges only: a diagonal tile
+    // move always passes through one of the two orthogonal tiles anyway, and
+    // unchecked diagonal hops could tunnel through wall corners. Uniform step
+    // cost (10) makes the plain FIFO queue BFS-exact.
+    private static void BuildCoarse(NativeArray<int> coarse, int slot, int2 goalCell,
+                                    NativeArray<byte> cellComp, NativeArray<byte> compCount)
     {
-        int baseI = slot * NavGrid.BigCount;
-        for (int i = 0; i < NavGrid.BigCount; i++) coarse[baseI + i] = int.MaxValue;
-        coarse[baseI + NavGrid.BigIndex(goalBig)] = 0;
+        int baseI = slot * NavGrid.BigCount * NavGrid.MaxComp;
+        for (int i = 0; i < NavGrid.BigCount * NavGrid.MaxComp; i++) coarse[baseI + i] = int.MaxValue;
 
-        var q = new NativeQueue<int2>(Allocator.Temp);
-        q.Enqueue(goalBig);
-        while (q.TryDequeue(out int2 b))
+        int2 goalBig = NavGrid.BigOf(goalCell);
+        int gb = NavGrid.BigIndex(goalBig);
+        var q = new NativeQueue<int3>(Allocator.Temp);            // (bx, by, comp)
+
+        byte gcomp = cellComp[NavGrid.Index(goalCell)];
+        if (gcomp != 255)
         {
-            int cb = coarse[baseI + NavGrid.BigIndex(b)];
-            for (int oy = -1; oy <= 1; oy++)
-            for (int ox = -1; ox <= 1; ox++)
+            coarse[baseI + gb * NavGrid.MaxComp + gcomp] = 0;
+            q.Enqueue(new int3(goalBig.x, goalBig.y, gcomp));
+        }
+        else
+        {
+            // Goal sits on a blocked cell: seed every component of the goal
+            // tile so units approach it and local steering takes over nearby.
+            for (int c = 0; c < compCount[gb]; c++)
             {
-                if (ox == 0 && oy == 0) continue;
-                int nx = b.x + ox, ny = b.y + oy;
-                if (!NavGrid.BigInBounds(nx, ny)) continue;
-                int ni = NavGrid.BigIndex(nx, ny);
-                if (bigPass[ni] == 0) continue;
-                int step = (ox != 0 && oy != 0) ? 14 : 10;
-                int nc = cb + step;
-                if (nc < coarse[baseI + ni]) { coarse[baseI + ni] = nc; q.Enqueue(new int2(nx, ny)); }
+                coarse[baseI + gb * NavGrid.MaxComp + c] = 0;
+                q.Enqueue(new int3(goalBig.x, goalBig.y, c));
+            }
+        }
+
+        int sub = NavGrid.SubPerAxis;
+        while (q.TryDequeue(out int3 node))
+        {
+            int2 b = new int2(node.x, node.y);
+            int comp = node.z;
+            int cb = coarse[baseI + NavGrid.BigIndex(b) * NavGrid.MaxComp + comp];
+            int2 origin = b * sub;
+
+            for (int e = 0; e < 4; e++)
+            {
+                int nbx = b.x + (e == 0 ? -1 : e == 1 ? 1 : 0);
+                int nby = b.y + (e == 2 ? -1 : e == 3 ? 1 : 0);
+                if (!NavGrid.BigInBounds(nbx, nby)) continue;
+                int nbi = NavGrid.BigIndex(nbx, nby);
+
+                for (int t = 0; t < sub; t++)
+                {
+                    int lx = e == 0 ? 0 : e == 1 ? sub - 1 : t;
+                    int ly = e == 2 ? 0 : e == 3 ? sub - 1 : t;
+                    int2 cell = origin + new int2(lx, ly);
+                    if (cellComp[NavGrid.Index(cell)] != comp) continue;
+                    int2 ncell = new int2(e == 0 ? cell.x - 1 : e == 1 ? cell.x + 1 : cell.x,
+                                          e == 2 ? cell.y - 1 : e == 3 ? cell.y + 1 : cell.y);
+                    byte nc = cellComp[NavGrid.Index(ncell)];
+                    if (nc == 255) continue;
+                    int ni = baseI + nbi * NavGrid.MaxComp + nc;
+                    if (cb + 10 < coarse[ni])
+                    {
+                        coarse[ni] = cb + 10;
+                        q.Enqueue(new int3(nbx, nby, nc));
+                    }
+                }
             }
         }
         q.Dispose();
     }
 
-    private static void MarkCorridor(NativeHashSet<int> seen, NativeList<int> keys,
-                                     NativeArray<int> coarse, int slot, int2 big, int2 goalBig)
+    // Walk downhill through the component graph from the unit's (tile,
+    // component) toward the goal, marking each visited TILE for fine-field
+    // build. The descent follows real border connections (the same edges
+    // BuildCoarse used), so it can't hop a wall into a cheaper-but-unreachable
+    // component. seenNodes dedups traversal across units; seenTiles dedups the
+    // keys list (a corridor can pass through one tile twice via different
+    // components, but the tile's fine field is built once and holds both).
+    private static void MarkCorridor(NativeHashSet<int> seenNodes, NativeHashSet<int> seenTiles,
+                                     NativeList<int> keys, NativeArray<int> coarse,
+                                     NativeArray<byte> cellComp, NativeArray<byte> compCount,
+                                     int slot, int2 startCell)
     {
-        int baseI = slot * NavGrid.BigCount;
-        int2 b = big;
-        for (int guard = 0; guard < NavGrid.BigTilesPerAxis * 4; guard++)
+        int baseI = slot * NavGrid.BigCount * NavGrid.MaxComp;
+        int sub = NavGrid.SubPerAxis;
+        int2 b = NavGrid.BigOf(startCell);
+        int comp = cellComp[NavGrid.Index(startCell)];
+        if (comp == 255)
         {
-            int key = slot * NavGrid.BigCount + NavGrid.BigIndex(b);
-            if (!seen.Add(key)) break;
-            keys.Add(key);
-            if (math.all(b == goalBig)) break;
-
-            int best = coarse[baseI + NavGrid.BigIndex(b)];
-            int2 next = b;
-            for (int oy = -1; oy <= 1; oy++)
-            for (int ox = -1; ox <= 1; ox++)
+            // Unit is standing on a blocked cell (e.g. an obstacle stamped
+            // under it this frame): start from the tile's cheapest component.
+            int bi0 = NavGrid.BigIndex(b);
+            int bestC0 = int.MaxValue;
+            for (int c = 0; c < compCount[bi0]; c++)
             {
-                if (ox == 0 && oy == 0) continue;
-                int nx = b.x + ox, ny = b.y + oy;
-                if (!NavGrid.BigInBounds(nx, ny)) continue;
-                int c = coarse[baseI + NavGrid.BigIndex(nx, ny)];
-                if (c < best) { best = c; next = new int2(nx, ny); }
+                int cc = coarse[baseI + bi0 * NavGrid.MaxComp + c];
+                if (cc < bestC0) { bestC0 = cc; comp = c; }
             }
-            if (math.all(next == b)) break;
-            b = next;
+            if (comp == 255) return;   // tile fully blocked
+        }
+
+        for (int guard = 0; guard < NavGrid.BigCount; guard++)
+        {
+            int bi = NavGrid.BigIndex(b);
+            int tileKey = slot * NavGrid.BigCount + bi;
+            if (!seenNodes.Add(tileKey * NavGrid.MaxComp + comp)) break;  // rest already marked
+            if (seenTiles.Add(tileKey)) keys.Add(tileKey);
+
+            int myCost = coarse[baseI + bi * NavGrid.MaxComp + comp];
+            if (myCost == 0 || myCost == int.MaxValue) break;
+
+            int best = myCost; int2 nbBest = b; int compBest = comp;
+            int2 origin = b * sub;
+            for (int e = 0; e < 4; e++)
+            {
+                int nbx = b.x + (e == 0 ? -1 : e == 1 ? 1 : 0);
+                int nby = b.y + (e == 2 ? -1 : e == 3 ? 1 : 0);
+                if (!NavGrid.BigInBounds(nbx, nby)) continue;
+                int nbi = NavGrid.BigIndex(nbx, nby);
+                for (int t = 0; t < sub; t++)
+                {
+                    int lx = e == 0 ? 0 : e == 1 ? sub - 1 : t;
+                    int ly = e == 2 ? 0 : e == 3 ? sub - 1 : t;
+                    int2 cell = origin + new int2(lx, ly);
+                    if (cellComp[NavGrid.Index(cell)] != comp) continue;
+                    int2 ncell = new int2(e == 0 ? cell.x - 1 : e == 1 ? cell.x + 1 : cell.x,
+                                          e == 2 ? cell.y - 1 : e == 3 ? cell.y + 1 : cell.y);
+                    byte nc = cellComp[NavGrid.Index(ncell)];
+                    if (nc == 255) continue;
+                    int c = coarse[baseI + nbi * NavGrid.MaxComp + nc];
+                    if (c < best) { best = c; nbBest = new int2(nbx, nby); compBest = nc; }
+                }
+            }
+            if (best == myCost) break;
+            b = nbBest; comp = compBest;
         }
     }
 
@@ -546,6 +700,7 @@ public partial struct FlowFieldSystem : ISystem
         [ReadOnly] public NativeArray<int>       Coarse;
         [ReadOnly] public NativeArray<PathSlot>  Slots;
         [ReadOnly] public NativeArray<byte>      Passable;
+        [ReadOnly] public NativeArray<byte>      CellComp;
         [ReadOnly] public NativeArray<int>       BigVersion;
         [ReadOnly] public NativeArray<int>       BlockOf;    // slot*BigCount+big -> block (neighbour lookup)
 
@@ -570,9 +725,9 @@ public partial struct FlowFieldSystem : ISystem
             int2 bcoord = new int2(big % NavGrid.BigTilesPerAxis, big / NavGrid.BigTilesPerAxis);
             int2 cellOrigin = bcoord * NavGrid.SubPerAxis;
             int baseCost = block * NavGrid.SubCells;
-            int baseCoarse = slot * NavGrid.BigCount;
+            int baseKey  = slot * NavGrid.BigCount;                     // BlockOf indexing
+            int baseC    = slot * NavGrid.BigCount * NavGrid.MaxComp;   // coarse cost indexing
             int sub = NavGrid.SubPerAxis;
-            int myCoarse = Coarse[baseCoarse + big];
 
             // state: 0 far, 1 trial (in heap), 2 frozen (final). Heap as parallel
             // (key,idx) arrays with lazy decrease-key (stale entries skipped).
@@ -594,27 +749,25 @@ public partial struct FlowFieldSystem : ISystem
                 stateArr[gi] = 2;
             }
             // --- border seeds ---
-            // For each cardinal edge facing a cheaper coarse neighbour, seed the
-            // border cells. If that neighbour's fine field is already built this
-            // pass (or still valid from a previous frame), seed EACH border cell
-            // from the neighbour's adjacent cell cost (+ one step). That value
-            // varies along the edge, so the edge is no longer a flat equipotential
-            // and the heading carries through the seam. If the neighbour isn't
-            // available (not on this corridor), fall back to the coarse scalar.
+            // For each border cell pair (this tile <-> cardinal neighbour),
+            // compare the COMPONENT coarse costs of the two cells. Seed where
+            // the neighbour side is strictly cheaper (closer to the goal). The
+            // per-pair test replaces the old per-tile test so a bisected tile
+            // seeds each component only from edges its component actually
+            // connects through. If the neighbour's fine field is built, seed
+            // from its adjacent cell cost (+ one step) so the heading carries
+            // through the seam; otherwise fall back to the coarse scalar.
             for (int e = 0; e < 4; e++)
             {
                 int nbx = bcoord.x + (e == 0 ? -1 : e == 1 ? 1 : 0);
                 int nby = bcoord.y + (e == 2 ? -1 : e == 3 ? 1 : 0);
                 if (!NavGrid.BigInBounds(nbx, nby)) continue;
                 int nbBig = NavGrid.BigIndex(nbx, nby);
-                int nbCost = Coarse[baseCoarse + nbBig];
-                if (nbCost == int.MaxValue || nbCost >= myCoarse) continue;
 
-                int nbBlock = BlockOf[baseCoarse + nbBig];
+                int nbBlock = BlockOf[baseKey + nbBig];
                 bool nbReady = nbBlock >= 0 && FineBigVer[nbBlock] == BigVersion[nbBig];
                 int nbBase = nbBlock * NavGrid.SubCells;
                 int2 nbOrigin = new int2(nbx, nby) * sub;
-                float scalarSeed = nbCost * (float)SeedScale;
 
                 for (int t = 0; t < sub; t++)
                 {
@@ -627,6 +780,10 @@ public partial struct FlowFieldSystem : ISystem
                                           e == 2 ? cell.y - 1 : e == 3 ? cell.y + 1 : cell.y);
                     if (!NavGrid.InBounds(ncell.x, ncell.y) || Passable[NavGrid.Index(ncell)] == 0) continue;
 
+                    int myCost = Coarse[baseC + big   * NavGrid.MaxComp + CellComp[NavGrid.Index(cell)]];
+                    int nbCost = Coarse[baseC + nbBig * NavGrid.MaxComp + CellComp[NavGrid.Index(ncell)]];
+                    if (nbCost == int.MaxValue || nbCost >= myCost) continue;
+
                     float seed;
                     if (nbReady)
                     {
@@ -637,7 +794,7 @@ public partial struct FlowFieldSystem : ISystem
                     }
                     else
                     {
-                        seed = scalarSeed;              // fallback: flat edge (old behaviour)
+                        seed = nbCost * (float)SeedScale;   // fallback: coarse scalar (old behaviour)
                     }
 
                     int si = ly * sub + lx;

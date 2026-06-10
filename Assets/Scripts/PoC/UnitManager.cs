@@ -99,17 +99,30 @@ public class UnitManager : MonoBehaviour
             typeof(MoveTarget), typeof(AttackOrder), typeof(CombatTarget), typeof(DesiredDestination),
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
             typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
+            typeof(Perception), typeof(UnitInfo),   // perception + contact list (gather-written)
         };
         var archetype = _em.CreateArchetype(common);
+
+        // Terrain height for spawn placement (baked by TerrainFieldBootstrap; if
+        // it hasn't run yet, units spawn at 0 and Steering snaps them next tick).
+        var terrainQuery = _em.CreateEntityQuery(ComponentType.ReadOnly<TerrainHeightField>());
+        bool hasTerrain = false;
+        TerrainHeightField terrainField = default;
+        if (terrainQuery.HasSingleton<TerrainHeightField>())
+        {
+            terrainField = terrainQuery.GetSingleton<TerrainHeightField>();
+            hasTerrain = terrainField.IsValid;
+        }
         _archetype = archetype;
 
-        int ranks = 2;
+        
         float spacing = 2;
         for (int team = 0; team < teamCount; team++) {
             float teamSign = team == 0 ? -1f : 1f;
             float zFront = teamSign * (fieldSize * 0.25f);
-           
+            int sofarranks = 0;
             for (int id = 0; id < roster[team].Count; id++) {
+                int ranks = roster[team].Count/50+1;
                 float xCursor = -fieldSize * 0.4f;
                 var def = roster[team][id].definition;
                 if (def == null) {
@@ -125,13 +138,15 @@ public class UnitManager : MonoBehaviour
                 int cols = (count + ranks - 1) / ranks;
                 for (int i = 0; i < count; i++) {
                     int col = i / ranks;
-                    int rank = i % ranks + id * ranks;
+                    int rank = i % ranks;
                     float x = xCursor + col * spacing;
-                    float z = zFront + teamSign * rank * spacing;   // extra ranks recede toward own side
-                    SpawnUnit(def, id, team, new float3(x, 0f, z));
+                    float z = zFront + teamSign * (sofarranks+ rank) * spacing;   // extra ranks recede toward own side
+                    // Spawn at terrain height (Steering snaps to slope.Height every
+                    // tick anyway, but spawning at 0 made units pop on the first tick).
+                    float y = hasTerrain ? NavTerrain.SampleHeight(terrainField, new float2(x, z)) : 0f;
+                    SpawnUnit(def, id, team, new float3(x, y, z));
                 }
-                xCursor += (cols + 1) * spacing;                    // gap between unit types
-
+                sofarranks+=ranks+1;
             }
         }
     }
@@ -236,14 +251,17 @@ public class UnitManager : MonoBehaviour
         var a = new Attack
         {
             ArcDot = Mathf.Cos(Mathf.Deg2Rad * def.meleeStrikeArc * 0.5f),
+            Cleave = (byte)(def.meleeCleave ? 1 : 0),
+            Phase = AttackPhase.Ready,
+            Timer = 0f,
             Pulse = 0f,
             ProjectileId = -1,
         };
         if (def.isRanged)
         {
             a.Range = def.attackRange;
-            a.Interval = def.attackInterval;
-            a.Cooldown = def.attackInterval;     // wind up before the first shot
+            a.ChargeUp = def.rangedChargeUpSeconds;
+            a.Cooldown = def.attackInterval;
             a.Damage = def.attackDamage;
             var pd = def.projectile;
             if (pd != null)
@@ -259,8 +277,8 @@ public class UnitManager : MonoBehaviour
         else
         {
             a.Range = def.meleeRange;
-            a.Interval = def.meleeAttackInterval;
-            a.Cooldown = def.meleeAttackInterval;  // wind up before the first strike
+            a.ChargeUp = def.meleeChargeUpSeconds;
+            a.Cooldown = def.meleeAttackInterval;
             a.Damage = def.meleeAttackDamage;
         }
         return a;

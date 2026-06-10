@@ -46,7 +46,7 @@ public partial struct SpatialHashSystem : ISystem
         float cellSize = hashRef.ValueRO.CellSize;
 
         // Rewindable allocator: auto-freed at end of frame, no manual Dispose.
-        var map = new NativeParallelMultiHashMap<int, NeighborData>(
+        var map = new NativeParallelMultiHashMap<int, UnitInfo>(
             math.max(count, 1), state.WorldUpdateAllocator);
 
         var fill = new FillHashJob
@@ -74,28 +74,36 @@ public partial struct SpatialHashSystem : ISystem
     private partial struct FillHashJob : IJobEntity
     {
         public float CellSize;
-        public NativeParallelMultiHashMap<int, NeighborData>.ParallelWriter Writer;
+        public NativeParallelMultiHashMap<int, UnitInfo>.ParallelWriter Writer;
 
-        private void Execute(Entity e, in LocalTransform xform, in Team team,
-                             in Velocity vel, in Mass mass, in Health health,
-                             in BehaviorFlags flags, in Attack atk)
+        private void Execute(Entity entity, in LocalTransform xform, in Team team,
+                             in Velocity velocity, in Mass mass, in Health health,
+                             in BehaviorFlags flags, in Attack attack, in StableId stableId,
+                             in UnitRadius radius, in GroundSpeedMultiplier slope,
+                             in CombatStatus status, in CombatTarget target)
         {
-            float2 pos = new float2(xform.Position.x, xform.Position.z);
-            float3 fwd3 = math.forward(xform.Rotation);
-            float2 forward = math.normalizesafe(new float2(fwd3.x, fwd3.z), new float2(0f, 1f));
-            Writer.Add(SpatialHashSystem.Hash(pos, CellSize), new NeighborData
+            float2 position = new float2(xform.Position.x, xform.Position.z);
+            float3 forward3 = math.forward(xform.Rotation);
+            float2 facing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
+            Writer.Add(SpatialHashSystem.Hash(position, CellSize), new UnitInfo
             {
-                Position = pos,
-                Velocity = vel.Value,
+                Entity = entity,
+                StableId = stableId.Value,
+                Team = team.Value,
+                Position = position,
+                Height = slope.Height,
+                Velocity = velocity.Value,
+                Facing = facing,
+                Radius = radius.Value,
                 Mass = mass.Value,
                 Health = health.Current,
-                StrikeDamage = atk.Pulse,
-                Forward = forward,
-                StrikeArcDot = atk.ArcDot,
-                MeleeRange = atk.Range,
                 Flags = flags.Value,
-                Team = team.Value,
-                Entity = e,
+                IsAttacking = (byte)(status.IsAttacking ? 1 : 0),
+                AttackTarget = target.Has ? target.Value : Entity.Null,
+                StrikeDamage = attack.Pulse,
+                AttackRange = attack.Range,
+                StrikeArcDot = attack.ArcDot,
+                Cleave = attack.Cleave,
             });
         }
     }

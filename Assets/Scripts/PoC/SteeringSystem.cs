@@ -23,16 +23,12 @@ public partial struct SteeringSystem : ISystem
     [BurstCompile]
     public void OnCreate(ref SystemState state)
     {
-        state.RequireForUpdate<SpatialHash>();
         state.RequireForUpdate<UnitTag>();
     }
 
     [BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
-        var hash = SystemAPI.GetSingleton<SpatialHash>();
-        if (!hash.Map.IsCreated) return;
-
         var nf = SystemAPI.GetSingleton<NavFields>();
         var lookup = SystemAPI.GetSingleton<PathLookup>();
         var obstacles = SystemAPI.GetSingleton<ObstacleField>();
@@ -40,8 +36,6 @@ public partial struct SteeringSystem : ISystem
         new SteerJob
         {
             Dt = SystemAPI.Time.DeltaTime,
-            Map = hash.Map,
-            CellSize = hash.CellSize,
             ObstacleStrength = 14f,   // global: repulsion from blocked cells
             ArriveRadius = 0.4f,      // global: stop distance when seeking
             FaceEnemyRange = 14f,     // global: face the target instead of heading within this range
@@ -50,6 +44,7 @@ public partial struct SteeringSystem : ISystem
             BlockOf = nf.BlockOf,
             FineDir = nf.FineDir,
             Passable = obstacles.Passable,
+            CellComp = obstacles.CellComp,
         }.ScheduleParallel();
     }
 
@@ -57,13 +52,13 @@ public partial struct SteeringSystem : ISystem
     [WithNone(typeof(Dead))]
     private partial struct SteerJob : IJobEntity
     {
-        public float Dt, CellSize, ObstacleStrength, ArriveRadius, FaceEnemyRange;
-        [ReadOnly] public NativeParallelMultiHashMap<int, NeighborData> Map;
+        public float Dt, ObstacleStrength, ArriveRadius, FaceEnemyRange;
         [ReadOnly] public NativeParallelHashMap<int, int> PathMap;
         [ReadOnly] public NativeArray<int> CoarseCost;
         [ReadOnly] public NativeArray<int> BlockOf;
         [ReadOnly] public NativeArray<float2> FineDir;
         [ReadOnly] public NativeArray<byte> Passable;
+        [ReadOnly] public NativeArray<byte> CellComp;
 
         private void Execute(
             Entity self,
@@ -74,7 +69,8 @@ public partial struct SteeringSystem : ISystem
             in GroundSpeedMultiplier slope,
             in CombatTarget target,
             in UnitTuning tuning,
-            in DesiredDestination dest)
+            in DesiredDestination dest,
+            DynamicBuffer<UnitInfo> contacts)
         {
             float2 pos = new float2(xform.Position.x, xform.Position.z);
             float locomotion = speed.Value * slope.Value;
@@ -88,19 +84,16 @@ public partial struct SteeringSystem : ISystem
                 // goal -> path slot, current big tile -> fine block. If the fine
                 // field isn't built here yet, head along the coarse gradient
                 // toward the cheaper neighbor big tile (keeps moving, no stall).
-                if (dest.UseFlowField)
-                {
+                if (dest.UseFlowField) {
                     int gi = NavGrid.Index(NavGrid.Cell(dest.Value));
-                    if (PathMap.TryGetValue(gi, out int slot))
-                    {
+                    if (PathMap.TryGetValue(gi, out int slot)) {
                         int2 c = NavGrid.Cell(pos);
-                        if (NavGrid.InBounds(c.x, c.y))
-                        {
+                        if (NavGrid.InBounds(c.x, c.y)) {
                             int big = NavGrid.BigIndex(NavGrid.BigOf(c));
                             int block = BlockOf[slot * NavGrid.BigCount + big];
                             dir = block >= 0
                                 ? FineDir[block * NavGrid.SubCells + NavGrid.SubIndex(c)]
-                                : CoarseDir(CoarseCost, slot, c);
+                                : CoarseDir(CoarseCost, CellComp, slot, c);
                         }
                     }
                 }
@@ -113,24 +106,18 @@ public partial struct SteeringSystem : ISystem
             }
 
             // --- 2. Separation from units ------------------------------------
+            // Iterates the gather system's ContactList — the SAME snapshot
+            // ContactCombat resolves impacts from, so physics and combat agree.
+            // Pushback range uses BOTH radii (big units demand more room).
             float2 separation = float2.zero;
-            int cx = (int)math.floor(pos.x / CellSize);
-            int cy = (int)math.floor(pos.y / CellSize);
-            for (int ox = -1; ox <= 1; ox++)
-            for (int oy = -1; oy <= 1; oy++)
+            for (int i = 0; i < contacts.Length; i++)
             {
-                int key = ((cx + ox) * 73856093) ^ ((cy + oy) * 19349663);
-                if (!Map.TryGetFirstValue(key, out var n, out var it)) continue;
-                do
-                {
-                    if (n.Entity == self) continue;
-                    float2 d = pos - n.Position;
-                    float dist = math.length(d);
-                    if (dist < 1e-4f) { d = new float2(0.01f, 0f); dist = 0.01f; }
-                    float minDist = radius.Value * 2f;
-                    if (dist < minDist) separation += (d / dist) * (1f - dist / minDist);
-                }
-                while (Map.TryGetNextValue(out n, ref it));
+                UnitInfo neighbor = contacts[i];
+                float2 away = pos - neighbor.Position;
+                float dist = math.length(away);
+                if (dist < 1e-4f) { away = new float2(0.01f, 0f); dist = 0.01f; }
+                float minDist = radius.Value + neighbor.Radius;
+                if (dist < minDist) separation += (away / dist) * (1f - dist / minDist);
             }
             desired += separation * tuning.SeparationStrength;
 
@@ -173,24 +160,33 @@ public partial struct SteeringSystem : ISystem
         }
 
         // Heading toward the cheaper neighbor big tile, from the coarse field.
-        private static float2 CoarseDir(NativeArray<int> coarse, int slot, int2 cell)
-        {
+        private static float2 CoarseDir(NativeArray<int> coarse, NativeArray<byte> cellComp,
+                                        int slot, int2 cell) {
             int2 b = NavGrid.BigOf(cell);
-            int baseC = slot * NavGrid.BigCount;
-            int cb = coarse[baseC + NavGrid.BigIndex(b)];
+            int baseC = slot * NavGrid.BigCount * NavGrid.MaxComp;
+            byte comp = cellComp[NavGrid.Index(cell)];
+            int cb = comp != 255
+                ? coarse[baseC + NavGrid.BigIndex(b) * NavGrid.MaxComp + comp]
+                : MinComp(coarse, baseC, NavGrid.BigIndex(b));
             if (cb == int.MaxValue || cb == 0) return float2.zero;
             int best = cb; int2 nb = b;
             for (int oy = -1; oy <= 1; oy++)
-            for (int ox = -1; ox <= 1; ox++)
-            {
-                if (ox == 0 && oy == 0) continue;
-                int nx = b.x + ox, ny = b.y + oy;
-                if (!NavGrid.BigInBounds(nx, ny)) continue;
-                int c = coarse[baseC + NavGrid.BigIndex(nx, ny)];
-                if (c < best) { best = c; nb = new int2(nx, ny); }
-            }
+                for (int ox = -1; ox <= 1; ox++) {
+                    if (ox == 0 && oy == 0) continue;
+                    int nx = b.x + ox, ny = b.y + oy;
+                    if (!NavGrid.BigInBounds(nx, ny)) continue;
+                    int c = MinComp(coarse, baseC, NavGrid.BigIndex(nx, ny));
+                    if (c < best) { best = c; nb = new int2(nx, ny); }
+                }
             if (math.all(nb == b)) return float2.zero;
             return math.normalizesafe(NavGrid.BigCenter(nb) - NavGrid.BigCenter(b));
+        }
+
+        private static int MinComp(NativeArray<int> coarse, int baseC, int bi) {
+            int m = int.MaxValue;
+            for (int c = 0; c < NavGrid.MaxComp; c++)
+                m = math.min(m, coarse[baseC + bi * NavGrid.MaxComp + c]);
+            return m;
         }
 
         // Rotate `from` toward `to` by at most maxRad radians (shortest path).

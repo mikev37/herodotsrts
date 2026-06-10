@@ -5,53 +5,42 @@ using Unity.Mathematics;
 using Unity.Transforms;
 
 // ===========================================================================
-// BEHAVIOR RESOLVER — a PRIORITIZED GUARDED CHAIN with fall-through.
+// BEHAVIOR — the decision layer. Consumes the gather system's Perception and
+// CombatTarget (it does NOT scan the spatial hash; perception happens exactly
+// once, in InformationGatherSystem) and decides, via the prioritized guarded
+// chain, what the unit WANTS: a DesiredDestination for steering, and whether
+// it is COMMITTED to attacking (CombatStatus.IsAttacking).
 //
-// Each rung evaluates a condition and either ACTS (writes a DesiredDestination
-// and returns) or DECLINES (falls through to the next rung). Code order = the
-// priority order. Each rung is gated by the unit's EFFECTIVE behavior mask:
+// IsAttacking is the contract with the rest of combat:
+//   * AttackTimerSystem only runs the charge-up/cooldown cycle while it's set —
+//     so a unit cannot move and attack: any rung that moves clears it, and only
+//     the hold-and-fight rung sets it. (Bowmen no longer fire mid-march.)
+//   * The hash publishes it (UnitInfo.IsAttacking) so ContactCombat resolves
+//     strikes from the attacker's declared state instead of re-deriving it.
 //
-//     effective = (base BehaviorFlags | hero ForceOn) & ~hero ForceOff
-//
-// so abilities/auras turn rungs on and off at runtime. A rung that's disabled,
-// or whose condition isn't met, simply passes control down — which is why a
-// shield that has both flanks filled falls through from "line up" to "advance"
-// and walks forward AS a wall.
-//
-// Steering consumes the single DesiredDestination; facing/melee/ranged are
-// handled by their own systems (a unit that "holds" still auto-fights because
-// ContactCombat/RangedAttack fire on proximity, and steering faces the target
-// when stationary).
-//
-// To add a behavior: add a BehaviorFlag, add a rung here in priority order.
+// Ranged units gain attack range with height advantage (// global: below).
 // ===========================================================================
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
-[UpdateAfter(typeof(TargetingSystem))]
+[UpdateAfter(typeof(InformationGatherSystem))]
 [UpdateAfter(typeof(StatResolveSystem))]
 [UpdateAfter(typeof(FlowFieldSystem))]
 public partial struct BehaviorSystem : ISystem
 {
-    public void OnCreate(ref SystemState state) => state.RequireForUpdate<SpatialHash>();
+    public void OnCreate(ref SystemState state) => state.RequireForUpdate<ObstacleField>();
 
     [BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
-        var hash = SystemAPI.GetSingleton<SpatialHash>();
-        if (!hash.Map.IsCreated) return;
-        var obs = SystemAPI.GetSingleton<ObstacleField>();
-        bool hasTerrain = SystemAPI.TryGetSingleton<TerrainHeightField>(out var terrain) && terrain.IsValid;
+        var obstacles = SystemAPI.GetSingleton<ObstacleField>();
 
         new BehaviorJob
         {
-            Map = hash.Map,
-            CellSize = hash.CellSize,
-            FlankTolerance = 1f,     // global: how far off-line before we slide to fix it
-            ArriveRadius = 3f,       // global: within this of an order target, the order is released
-            Passable = obs.Passable,
-            HasTerrain = hasTerrain,
-            Terrain = terrain,
-            LosRange = 10,             // global: max cells to test LOS; farther -> just use the field
+            FlankTolerance = 1f,          // global: how far off-line before we slide to fix it
+            ArriveRadius = 3f,            // global: within this of an order target, the order is released
+            HeightRangeBonus = 0.5f,      // global: extra ranged attack range per meter of height advantage
+            Passable = obstacles.Passable,
+            LosRange = 10,                // global: max cells to test LOS; farther -> just use the field
         }.ScheduleParallel();
     }
 
@@ -59,85 +48,58 @@ public partial struct BehaviorSystem : ISystem
     [WithNone(typeof(Dead))]
     private partial struct BehaviorJob : IJobEntity
     {
-        [ReadOnly] public NativeParallelMultiHashMap<int, NeighborData> Map;
         [ReadOnly] public NativeArray<byte> Passable;
-        public float CellSize, FlankTolerance, ArriveRadius;
-        public bool HasTerrain;
-        [ReadOnly] public TerrainHeightField Terrain;
+        public float FlankTolerance, ArriveRadius, HeightRangeBonus;
         public int LosRange;
 
         private void Execute(
             in LocalTransform xform,
-            in Team team,
             in BehaviorFlags baseFlags,
             in BehaviorOverride over,
             in CombatTarget target,
+            in Perception perception,
             in UnitTuning tuning,
-            in Attack atk,
-            ref AttackOrder attack,
+            in Attack attack,
+            in Ranged ranged,
+            in GroundSpeedMultiplier slope,
+            ref CombatStatus status,
+            ref AttackOrder attackOrder,
             ref MoveTarget order,
             ref DesiredDestination dest)
         {
-            float2 pos = new float2(xform.Position.x, xform.Position.z);
+            float2 position = new float2(xform.Position.x, xform.Position.z);
             uint E = BehaviorOverride.Effective(baseFlags.Value, over);
 
-            float wallSpacing = tuning.WallSpacing;
-            float kiteRange = tuning.KiteRange;
-            float spreadRadius = tuning.SpreadRadius;
+            // Default stance: not committed to attacking. Exactly one rung below
+            // (hold-and-fight) sets this; every movement rung leaves it false.
+            status.IsAttacking = false;
 
-            // ---- gather neighborhood facts in one hash sweep -------------
-            float2 nearestEnemy = pos; float nearestEnemyDist = float.MaxValue;
-            float2 nearestWall = pos; float nearestWallDist = 3;
-            float2 spreadPush = float2.zero;   // dispersion from all nearby friendlies (idle)
-
-            int cx = (int)math.floor(pos.x / CellSize);
-            int cy = (int)math.floor(pos.y / CellSize);
-            for (int oy = -3; oy <= 3; oy++)
-            for (int ox = -3; ox <= 3; ox++)
-            {
-                int key = ((cx + ox) * 73856093) ^ ((cy + oy) * 19349663);
-                if (!Map.TryGetFirstValue(key, out var n, out var it)) continue;
-                do
-                {
-                    float d = math.distance(pos, n.Position);
-                    if (n.Team != team.Value)
-                    {
-                        if (d < nearestEnemyDist) { nearestEnemyDist = d; nearestEnemy = n.Position; }
-                    }
-                    else  // friendly
-                    {
-                        if (d > 0.01f && d < spreadRadius)
-                            spreadPush += (pos - n.Position) / d * (1f - d / spreadRadius);
-
-                        if ((n.Flags & (uint)BehaviorFlag.FormShieldWall) != 0 && d > 0.01f)
-                        {
-                           float side = math.dot(pos - n.Position, xform.Right().xz);
-                           if ((d < nearestWallDist && side > 0) || nearestWall.Equals(pos)) { nearestWallDist = d; nearestWall = n.Position; }
-                        }
-                    }
-                }
-                while (Map.TryGetNextValue(out n, ref it));
-            }
-
-            bool hasEnemy = nearestEnemyDist < float.MaxValue;
-            float2 enemyDir = hasEnemy ? math.normalizesafe(nearestEnemy - pos) : new float2(0, 1);
+            bool hasEnemy = perception.HasTarget != 0;
+            float enemyDist = perception.TargetDist;
+            float2 enemyDir = hasEnemy
+                ? math.normalizesafe(target.Position - position, new float2(0, 1))
+                : new float2(0, 1);
             bool defensive = (E & (uint)BehaviorFlag.HoldWhenDefensive) != 0;
+
+            // Effective engage range: ranged units shoot farther downhill.
+            float engageRange = attack.Range;
+            if (ranged.IsRanged && hasEnemy)
+                engageRange += HeightRangeBonus * math.max(0f, slope.Height - perception.TargetHeight);
 
             // ================= THE GUARDED CHAIN =========================
 
             // Rung 1: explicit player move order. A plain move ignores enemies
             // and walks to the point; an ATTACK-move engages any enemy it can
             // actually SEE (falls through to the combat rungs, keeping the order
-            // so it resumes once the enemy is gone). Flow field only when the
-            // destination is NOT in line of sight; otherwise steer straight.
+            // so it resumes once the enemy is gone).
             if (order.HasTarget)
             {
-                bool engage = order.AttackMove && hasEnemy && Los(pos, nearestEnemy);
+                bool engage = order.AttackMove && hasEnemy && perception.TargetLos != 0;
                 if (!engage)
                 {
-                    if (math.distance(pos, order.Value) > ArriveRadius)
+                    if (math.distance(position, order.Value) > ArriveRadius)
                     {
-                        Act(ref dest, order.Value, useFlow: !Los(pos, order.Value));
+                        Act(ref dest, order.Value, useFlow: !Los(position, order.Value));
                         return;
                     }
                     order.HasTarget = false;   // arrived -> release, resume behavior below
@@ -146,50 +108,47 @@ public partial struct BehaviorSystem : ISystem
 
             // Rung 2: explicit attack order — advance until we reach the target,
             // then LET GO so the normal combat rungs (hold & fight) take over.
-            // Route via the field when the target is hidden behind a building/
-            // cliff; walk straight at it once we can see it.
-            if (attack.Has)
+            if (attackOrder.Has)
             {
-                if (target.Has && math.distance(pos, target.Position) > atk.Range)
+                if (target.Has && enemyDist > engageRange)
                 {
-                    Act(ref dest, target.Position, useFlow: !Los(pos, target.Position));
+                    Act(ref dest, target.Position, useFlow: perception.TargetLos == 0);
                     return;
                 }
-                attack.Has = false;        // reached or lost the target -> release
+                attackOrder.Has = false;   // reached or lost the target -> release
             }
 
             // Rung 3: KiteEnemies — if an enemy is inside our comfort range, back off.
-            if ((E & (uint)BehaviorFlag.KiteEnemies) != 0 && hasEnemy)
+            if ((E & (uint)BehaviorFlag.KiteEnemies) != 0 && hasEnemy &&
+                enemyDist < tuning.KiteRange)
             {
-                if (nearestEnemyDist < kiteRange)
-                {
-                    Act(ref dest, pos - enemyDir * (kiteRange - nearestEnemyDist), useFlow: false);
-                    return;
-                }
+                Act(ref dest, position - enemyDir * (tuning.KiteRange - enemyDist), useFlow: false);
+                return;
             }
 
-            // Rung 4: target within attack range -> plant and let combat fire.
-            // Holding clears the seek, so the only thing that moves the unit now
-            // is separation + knockback (other units' mass). Kiters never reach
-            // here because the kite rung above outranks this. Uses atk.Range so a
-            // ranged unit stands and shoots from range instead of walking in.
-            if (target.Has && math.distance(pos, target.Position) <= atk.Range)
+            // Rung 4: target within attack range -> plant, commit, and fight.
+            // This is the ONLY place a unit becomes an attacker: holding clears
+            // the seek (only separation + knockback move it now), and IsAttacking
+            // starts the attack cycle (charge-up -> fire -> cooldown).
+            if (target.Has && enemyDist <= engageRange)
             {
-                Hold(ref dest);   // steering keeps facing the target; ContactCombat/RangedAttack fire
+                if(ranged.IsRanged)
+                    Hold(ref dest);
+				else
+                    Act(ref dest, target.Position, useFlow: perception.TargetLos == 0);
+                status.IsAttacking = true;
                 return;
             }
 
             // Rung 5: StayBehindWall — tuck in just behind the nearest friendly
-            // wall-former, but only when there's an enemy (otherwise "behind" has
-            // no meaning and the whole block drifts), and only if that wall is
-            // actually IN FRONT of us (toward the enemy) so we don't recede
-            // chasing peers that are beside or behind us.
+            // wall-former, but only when there's an enemy, and only if that wall
+            // is actually IN FRONT of us (toward the enemy).
             if ((E & (uint)BehaviorFlag.StayBehindWall) != 0 && hasEnemy &&
-                nearestWallDist < 3 &&
-                math.dot(nearestWall - pos, enemyDir) > 0f)
+                perception.HasWallAlly != 0 && perception.WallAllyDist < 3f &&
+                math.dot(perception.WallAllyPos - position, enemyDir) > 0f)
             {
-                float2 behind = nearestWall - enemyDir * wallSpacing;
-                if (math.distance(pos, behind) > FlankTolerance)
+                float2 behind = perception.WallAllyPos - enemyDir * tuning.WallSpacing;
+                if (math.distance(position, behind) > FlankTolerance)
                 {
                     Act(ref dest, behind, useFlow: false);
                     return;
@@ -197,21 +156,19 @@ public partial struct BehaviorSystem : ISystem
                 // already tucked in -> fall through (so a covered spear can still advance)
             }
 
-            // Rung 6: FormShieldWall — if a flank is open, slide to line up; else fall through.
             // Rung 6: FormShieldWall — line up SHOULDER-TO-SHOULDER beside the
             // nearest friendly wall-former, on whichever side I'm already on, at
-            // the same forward distance (so the line stays perpendicular to the
-            // enemy). Once I'm in that slot, fall through so the wall advances.
-            // If I have no shield buddy yet, fall through to advance toward the
-            // front — that's how scattered shields converge instead of freezing.
-            if ((E & (uint)BehaviorFlag.FormShieldWall) != 0 && hasEnemy && math.dot(enemyDir,xform.Forward().xz) > .5f && !nearestWall.Equals(pos) &&
-                nearestWallDist < 3)
+            // the same forward distance. Once in the slot, fall through so the
+            // wall advances. No buddy yet -> fall through and converge forward.
+            if ((E & (uint)BehaviorFlag.FormShieldWall) != 0 && hasEnemy &&
+                math.dot(enemyDir, xform.Forward().xz) > 0.5f &&
+                perception.HasWallAlly != 0 && perception.WallAllyDist < 3f)
             {
                 float2 lateral = new float2(-enemyDir.y, enemyDir.x);
-                float side = math.dot(pos - nearestWall, lateral);   // which side of the buddy I'm on
+                float side = math.dot(position - perception.WallAllyPos, lateral);
                 float sign = side >= 0f ? 1f : -1f;
-                float2 spot = nearestWall + lateral * (sign * wallSpacing);
-                if (math.distance(pos, spot) > FlankTolerance)
+                float2 spot = perception.WallAllyPos + lateral * (sign * tuning.WallSpacing);
+                if (math.distance(position, spot) > FlankTolerance)
                 {
                     Act(ref dest, spot, useFlow: false);
                     return;
@@ -219,31 +176,30 @@ public partial struct BehaviorSystem : ISystem
                 // already shoulder-to-shoulder -> fall through (advance/hold as a wall)
             }
 
-            // Rung 7: AdvanceToTarget — march onto the best target (unless holding
-            // defensively). Route via the field when the target is hidden behind
-            // an obstacle (so we path AROUND it); steer straight once it's visible.
+            // Rung 7: AdvanceToTarget — march onto the best target (unless
+            // holding defensively). Route via the field when it's hidden.
             if ((E & (uint)BehaviorFlag.AdvanceToTarget) != 0 && target.Has && !defensive)
             {
-                Act(ref dest, target.Position, useFlow: !Los(pos, target.Position));
+                Act(ref dest, target.Position, useFlow: perception.TargetLos == 0);
                 return;
             }
 
-            // Rung 8: IdleSpread — no enemy near: drift apart so the group spreads
-            // out at rest, and naturally re-forms (via the rungs above) when an
-            // enemy returns and hasEnemy flips true.
+            // Rung 8: IdleSpread — no enemy near: drift apart so the group
+            // spreads at rest and re-forms when an enemy returns.
             if ((E & (uint)BehaviorFlag.IdleSpread) != 0 && !hasEnemy &&
-                math.lengthsq(spreadPush) > 1e-3f)
+                math.lengthsq(perception.SpreadPush) > 1e-3f)
             {
-                Act(ref dest, pos + math.normalizesafe(spreadPush) * tuning.SpreadStrength, useFlow: false);
+                Act(ref dest, position + math.normalizesafe(perception.SpreadPush) * tuning.SpreadStrength,
+                    useFlow: false);
                 return;
             }
 
-            // Rung 9: nothing applied -> hold.
+            // Rung 9: nothing applied -> hold (without committing to an attack).
             Hold(ref dest);
         }
 
-        private bool Los(float2 a, float2 b) =>
-            NavTerrain.LineOfSight(a, b, Passable, LosRange);
+        private bool Los(float2 from, float2 to) =>
+            NavTerrain.LineOfSight(from, to, Passable, LosRange);
 
         private static void Act(ref DesiredDestination d, float2 value, bool useFlow)
         {

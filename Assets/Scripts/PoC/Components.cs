@@ -77,6 +77,7 @@ public struct UnitAnim : IComponentData
 public struct CombatStatus : IComponentData
 {
     public bool InContactWithEnemy;
+    public bool IsAttacking;      // behavior holds position and commits to attacking its target
     public bool IsBlocking;       // shield unit facing an enemy
     public bool IsFiring;         // ranged unit shooting at a target
 }
@@ -111,24 +112,50 @@ public struct Selected : IComponentData, IEnableableComponent { }
 // needs neighbor lookups. THIS is the core of scaling to thousands of units:
 // O(1) neighbor queries instead of O(n^2).
 // ---------------------------------------------------------------------------
-public struct NeighborData
+// THE canonical per-unit snapshot. Filled once per tick by SpatialHashSystem
+// (into the hash) and copied into each unit's ContactList by the gather system.
+// Every consumer reads the SAME data — no system re-derives its own version.
+public struct UnitInfo : IBufferElementData
 {
-    public float2 Position;
-    public float2 Velocity;   // so a unit can compute closing speed of attackers
-    public float Mass;        // so impact damage scales with the rammer's mass
-    public float Health;      // so targeting can prefer the weakest enemy
-    public float StrikeDamage; // discrete melee strike this frame (0 except on an attacker's strike frame)
-    public float2 Forward;     // attacker's facing (XZ), so a defender can test the strike arc
-    public float StrikeArcDot; // attacker's cos(arc/2)
-    public float MeleeRange;   // attacker's reach (Attack.Range), so contact range scales with weapon length
-    public uint Flags;        // BehaviorFlags, so behaviors can find e.g. friendly wall-formers
-    public int Team;
     public Entity Entity;
+    public int    StableId;       // deterministic identity (tie-breaking, debugging)
+    public int    Team;
+    public float2 Position;
+    public float  Height;         // terrain height under the unit
+    public float2 Velocity;
+    public float2 Facing;         // normalized XZ forward
+    public float  Radius;         // body radius (physical contact)
+    public float  Mass;
+    public float  Health;
+    public uint   Flags;          // BehaviorFlags
+    public byte   IsAttacking;    // behavior committed to an attack this tick
+    public Entity AttackTarget;   // who it is attacking (single-target strikes)
+    public float  StrikeDamage;   // melee pulse this tick (0 except on the strike tick)
+    public float  AttackRange;    // weapon reach (melee) / fire range (ranged)
+    public float  StrikeArcDot;   // cos(arc/2) for cleave strikes
+    public byte   Cleave;         // strike hits everyone in the arc, not just the target
+}
+
+// Per-unit perception, written ONLY by InformationGatherSystem, read by behavior
+// and combat. One scan, one truth: there is exactly one definition of "my
+// target" / "my wall buddy" in the whole sim.
+public struct Perception : IComponentData
+{
+    public byte   HasTarget;
+    public float  TargetDist;
+    public float  TargetHeight;
+    public byte   TargetLos;      // line of sight to the target (passability grid)
+
+    public byte   HasWallAlly;    // nearest friendly shield-wall former (rungs 5/6)
+    public float2 WallAllyPos;
+    public float  WallAllyDist;
+
+    public float2 SpreadPush;     // accumulated idle-dispersion push from nearby friendlies
 }
 
 public struct SpatialHash : IComponentData
 {
     // Key = cell hash, Value = a neighbor in that cell.
-    public NativeParallelMultiHashMap<int, NeighborData> Map;
+    public NativeParallelMultiHashMap<int, UnitInfo> Map;
     public float CellSize;
 }

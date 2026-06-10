@@ -114,8 +114,7 @@ public class AbilityManager : MonoBehaviour
                 BoolValue = (byte)(m.boolValue ? 1 : 0),
                 CapMode = m.capMode,
                 CapRef = m.capRef,
-                CapValue = m.capValue,
-                Duration = m.duration,
+                CapValue = m.capValue
             };
         }
         _mods.Add(arr);

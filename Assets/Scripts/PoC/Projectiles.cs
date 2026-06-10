@@ -10,9 +10,9 @@ using Unity.Transforms;
 // this only flies the projectiles that already exist.
 //
 // Arc: horizontal position advances straight at Velocity; the vertical position
-// follows y(u) = LaunchHeight*(1-u) + 4*Rise*u*(1-u), where u = 1 - Life/TotalLife
-// goes 0->1 over the flight. So it launches at LaunchHeight, bulges up by ~Rise,
-// and lands at 0 right as it reaches the aimed point.
+// interpolates from the SHOOTER's launch height to the TARGET's ground height,
+// plus the bulge: y(u) = lerp(StartY, EndY, u) + 4*Rise*u*(1-u), u = 1-Life/TotalLife.
+// So shots fired downhill descend onto the target and uphill shots climb to it.
 //
 // Collision only happens at/below CollisionHeight, so a high arc clears nearer
 // units and connects as it comes down. Damage uses the same armor/shield/backstab
@@ -62,14 +62,16 @@ public partial struct ProjectileSystem : ISystem
             // Vertical arc.
             float total = math.max(proj.ValueRO.TotalLife, 1e-4f);
             float u = math.saturate(1f - proj.ValueRO.Life / total);
-            np.y = proj.ValueRO.LaunchHeight * (1f - u) + 4f * proj.ValueRO.Rise * u * (1f - u);
+            np.y = math.lerp(proj.ValueRO.StartY, proj.ValueRO.EndY, u)
+                 + 4f * proj.ValueRO.Rise * u * (1f - u);
 
             xform.ValueRW.Position = np;
             xform.ValueRW.Rotation = quaternion.LookRotationSafe(
                 new float3(proj.ValueRO.Velocity.x, 0f, proj.ValueRO.Velocity.y), math.up());
 
-            // Only collide once the shot is low enough (lets high arcs clear units).
-            if (np.y > proj.ValueRO.CollisionHeight) continue;
+            // Only collide once the shot is low enough over the DESTINATION
+            // terrain (lets high arcs clear nearer units on any slope).
+            if (np.y > proj.ValueRO.EndY + proj.ValueRO.CollisionHeight) continue;
 
             float2 pos = new float2(np.x, np.z);
             float2 dir = math.normalizesafe(proj.ValueRO.Velocity, new float2(0f, 1f));
@@ -81,37 +83,37 @@ public partial struct ProjectileSystem : ISystem
             for (int ox = -1; ox <= 1 && !consumed; ox++)
             {
                 int key = ((cx + ox) * 73856093) ^ ((cy + oy) * 19349663);
-                if (!hash.Map.TryGetFirstValue(key, out var n, out var it)) continue;
+                if (!hash.Map.TryGetFirstValue(key, out var victim, out var iterator)) continue;
                 do
                 {
-                    if (n.Team == proj.ValueRO.Team) continue;
-                    if (math.distance(pos, n.Position) > proj.ValueRO.HitRadius) continue;
-                    if (!healthLookup.HasComponent(n.Entity)) continue;
+                    if (victim.Team == proj.ValueRO.Team) continue;
+                    if (math.distance(pos, victim.Position) > proj.ValueRO.HitRadius) continue;
+                    if (!healthLookup.HasComponent(victim.Entity)) continue;
 
                     // Mitigate using the victim's facing vs. where the shot came from
-                    // (toThreat = -travel direction). n.Forward is the victim's facing.
+                    // (toThreat = -travel direction). victim.Facing is the victim's facing.
                     float armor = 0f, shield = 0f;
-                    if (defenseLookup.HasComponent(n.Entity))
+                    if (defenseLookup.HasComponent(victim.Entity))
                     {
-                        var d = defenseLookup[n.Entity];
+                        var d = defenseLookup[victim.Entity];
                         armor = d.Armor; shield = d.Shield;
                     }
-                    float dealt = CombatMath.Mitigate(proj.ValueRO.Damage, n.Forward, -dir, armor, shield);
+                    float dealt = CombatMath.Mitigate(proj.ValueRO.Damage, victim.Facing, -dir, armor, shield);
 
-                    var hp = healthLookup[n.Entity];
+                    var hp = healthLookup[victim.Entity];
                     hp.Current -= dealt;
-                    healthLookup[n.Entity] = hp;
-                    if (hp.Current <= 0f && animLookup.HasComponent(n.Entity))
+                    healthLookup[victim.Entity] = hp;
+                    if (hp.Current <= 0f && animLookup.HasComponent(victim.Entity))
                     {
-                        var a = animLookup[n.Entity]; a.State = AnimState.Die;
-                        animLookup[n.Entity] = a;
-                        ecb.AddComponent<Dead>(n.Entity);
+                        var a = animLookup[victim.Entity]; a.State = AnimState.Die;
+                        animLookup[victim.Entity] = a;
+                        ecb.AddComponent<Dead>(victim.Entity);
                     }
                     ecb.DestroyEntity(entity);
                     consumed = true;
                     break;
                 }
-                while (hash.Map.TryGetNextValue(out n, ref it));
+                while (hash.Map.TryGetNextValue(out victim, ref iterator));
             }
         }
     }

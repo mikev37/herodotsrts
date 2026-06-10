@@ -15,7 +15,7 @@ MonoBehaviour:
   displayName: Spearman
   viewPrefab: {fileID: 8102585676083652646, guid: 947d122ab02f7e84ab2e80dd5363a880, type: 3}
   speed: 4
-  radius: 0.5
+  radius: 0.7
   mass: 1
   turnSpeed: 6
   separationStrength: 8
@@ -28,6 +28,8 @@ MonoBehaviour:
   armor: 10
   shield: 0
   meleeAttackInterval: 1
+  meleeChargeUpSeconds: 0.3
+  meleeCleave: 0
   meleeAttackDamage: 25
   meleeStrikeArc: 2
   isRanged: 0
@@ -35,6 +37,7 @@ MonoBehaviour:
   kiteRadius: 6
   attackRange: 10
   attackInterval: 1.2
+  rangedChargeUpSeconds: 0.5
   attackDamage: 18
   isHero: 0
   abilities:
@@ -47,4 +50,4 @@ MonoBehaviour:
   kiteEnemies: 0
   advanceToTarget: 1
   holdWhenDefensive: 0
-  idleSpread: 0
+  idleSpread: 1

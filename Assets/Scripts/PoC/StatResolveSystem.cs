@@ -14,7 +14,7 @@ using Unity.Mathematics;
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 [UpdateAfter(typeof(ModifierTickSystem))]
-[UpdateBefore(typeof(TargetingSystem))]
+[UpdateBefore(typeof(InformationGatherSystem))]
 public partial struct StatResolveSystem : ISystem
 {
     [BurstCompile]

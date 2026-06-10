@@ -44,7 +44,6 @@ public partial struct AnimationStateSystem : ISystem
                              in Ranged ranged,
                              in CombatTarget target,
                              in BehaviorFlags flags,
-                             in UnitTuning tuning,
                              in DesiredDestination dest)
         {
             // Dying this frame (health 0, Dead tag still queued) -> lock to Die.
@@ -54,9 +53,10 @@ public partial struct AnimationStateSystem : ISystem
             bool moving = dest.Has &&
                           math.distancesq(pos, dest.Value) > MovingDistance * MovingDistance;
 
-            // Melee engagement: stable target-distance test (no contact flicker).
-            bool meleeEngaged = !ranged.IsRanged && target.Has &&
-                math.distancesq(pos, target.Position) <= tuning.MeleeRange * tuning.MeleeRange;
+            // Melee engagement: the behavior layer's declared commitment — the
+            // same signal that runs the attack cycle, so the swing anim and the
+            // actual strikes can't disagree (and no contact flicker).
+            bool meleeEngaged = !ranged.IsRanged && status.IsAttacking;
 
             if (meleeEngaged)
             {
