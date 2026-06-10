@@ -72,6 +72,18 @@ public class LockstepRateManager : Unity.Entities.IRateManager
             _stepsThisFrame = 0;
         }
 
+        // Lobby gate: networked but not started -> sim frozen, AND the bank is
+        // cleared. Lobby wall-time is not owed simulation time; without this,
+        // the accumulator grows during Host/Connect/Start-Game and the match
+        // opens with a multi-second fast-forward at the catch-up cap (observed
+        // as a sustained ~45-55 ticks/s after Start until the bank drained).
+        var net = LockstepNet.Instance;
+        if (net != null && !net.IsRunning)
+        {
+            _accumulator = 0;
+            return false;
+        }
+
         // Hard per-frame cap — prevents spiral-of-death on a slow machine.
         if (_stepsThisFrame >= MaxCatchupSteps)
         {
@@ -85,13 +97,10 @@ public class LockstepRateManager : Unity.Entities.IRateManager
         // Real-time gate: not enough wall-clock time has passed for the next tick.
         if (_accumulator < _dt) return false;
 
-        // Network gate: also need the next confirmed turn (networked path only).
-        var net = LockstepNet.Instance;
-        if (net != null)
-        {
-            if (!net.IsRunning) return false;
-            if (!net.TryBeginNextTurn()) return false;
-        }
+        // Network gate: also need the next confirmed turn. Unlike the lobby,
+        // a mid-game turn stall KEEPS the bank — when the turn arrives we catch
+        // up (bounded by MaxCatchupSteps) to stay at real-time pace.
+        if (net != null && !net.TryBeginNextTurn()) return false;
 
         _accumulator -= _dt;
         _elapsed += _dt;

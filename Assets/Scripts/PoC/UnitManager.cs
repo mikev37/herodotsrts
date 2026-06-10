@@ -108,8 +108,9 @@ public class UnitManager : MonoBehaviour
         for (int team = 0; team < teamCount; team++) {
             float teamSign = team == 0 ? -1f : 1f;
             float zFront = teamSign * (fieldSize * 0.25f);
-            float xCursor = -fieldSize * 0.4f;
+           
             for (int id = 0; id < roster[team].Count; id++) {
+                float xCursor = -fieldSize * 0.4f;
                 var def = roster[team][id].definition;
                 if (def == null) {
                     Debug.LogWarning($"[UnitManager] Roster entry {id} has no definition; skipped.");
@@ -124,7 +125,7 @@ public class UnitManager : MonoBehaviour
                 int cols = (count + ranks - 1) / ranks;
                 for (int i = 0; i < count; i++) {
                     int col = i / ranks;
-                    int rank = i % ranks;
+                    int rank = i % ranks + id * ranks;
                     float x = xCursor + col * spacing;
                     float z = zFront + teamSign * rank * spacing;   // extra ranks recede toward own side
                     SpawnUnit(def, id, team, new float3(x, 0f, z));

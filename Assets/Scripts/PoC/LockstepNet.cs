@@ -87,7 +87,10 @@ public class LockstepNet : MonoBehaviour
     }
 
     // Host presses "Start Game" once all clients are connected. Freezes the roster
-    // of participants, tells everyone to go, and begins locally.
+    // of participants, tells everyone to go, and begins locally. The Start message
+    // carries the HOST's halt tick: virtual players / clients load Inspector values
+    // from the saved scene and can be stale, so the halt (and therefore tick-exact
+    // auto-dumps) must be a networked decision, not a per-instance one.
     private void HostStartGame()
     {
         _participants = new List<ulong>(NetworkManager.Singleton.ConnectedClientsIds);
@@ -97,6 +100,7 @@ public class LockstepNet : MonoBehaviour
         {
             if (cid == NetworkManager.Singleton.LocalClientId) continue;
             using var w = new FastBufferWriter(8, Allocator.Temp);
+            w.WriteValueSafe(LockstepRateManager.HaltAtTick);
             NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage(
                 MSG_START, cid, w, NetworkDelivery.Reliable);
         }
@@ -119,8 +123,15 @@ public class LockstepNet : MonoBehaviour
         if (!IsRunning) return;
 
         // Keep our submitted inputs InputDelay ticks ahead of execution. That gap
-        // is what absorbs network latency.
+        // is what absorbs network latency. Never submit past the halt tick: the
+        // host's sim freezes there but its pump would otherwise keep manufacturing
+        // turns up to halt+delay, letting peers without a local halt spill past
+        // (observed as a client stopping at 403 with a halt of 400 and delay 2).
+        // With the cap, turns simply run out at the halt and every peer starves
+        // to a stop at exactly the same tick.
         uint target = _execTick + (uint)LockstepConfig.InputDelayTicks;
+        if (LockstepRateManager.HaltAtTick > 0 && target > LockstepRateManager.HaltAtTick)
+            target = LockstepRateManager.HaltAtTick;
         while (_sentUpTo < target)
         {
             _sentUpTo++;
@@ -222,7 +233,14 @@ public class LockstepNet : MonoBehaviour
         _turns[tick] = list;
     }
 
-    private void OnStartMsg(ulong sender, FastBufferReader reader) => BeginLocal();
+    private void OnStartMsg(ulong sender, FastBufferReader reader)
+    {
+        // Adopt the host's halt tick — overrides any stale local Inspector value
+        // so every peer halts (and auto-dumps) at the exact same tick.
+        reader.ReadValueSafe(out uint haltAtTick);
+        LockstepRateManager.HaltAtTick = haltAtTick;
+        BeginLocal();
+    }
 
     // --- execution gate (called by LockstepRateManager) ---------------------
 

@@ -25,6 +25,20 @@ public partial struct DeathSystem : ISystem
 
         float dt = SystemAPI.Time.DeltaTime;
 
+        // CENTRAL death detection: any unit at <= 0 HP is marked Dead, no matter
+        // what reduced its health. Contact and projectile damage also mark Dead at
+        // their own sites (harmless duplicate; ECB AddComponent is idempotent),
+        // but ability/modifier damage — and any future damage source — only kills
+        // through this loop. Without it, modifier-killed units played the Die
+        // clip (the view reads health) while every [WithNone(Dead)] sim system
+        // kept marching their corpses around at negative HP.
+        foreach (var (health, entity) in
+                 SystemAPI.Query<RefRO<Health>>().WithAll<UnitTag>().WithNone<Dead>().WithEntityAccess())
+        {
+            if (health.ValueRO.Current <= 0f)
+                ecb.AddComponent<Dead>(entity);
+        }
+
         foreach (var (timer, entity) in
                  SystemAPI.Query<RefRW<DeathTimer>>().WithAll<Dead>().WithEntityAccess())
         {

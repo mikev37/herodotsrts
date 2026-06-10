@@ -3,6 +3,7 @@ using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Netcode;
 using Unity.Transforms;
+using UnityEngine;
 
 // ===========================================================================
 // Command pipeline — data + ECS side. (The issuing API lives in Commander.cs.)
@@ -61,10 +62,26 @@ public struct AbilityCastEvent : IBufferElementData
 public partial class CommandIngestSystem : SystemBase
 {
     private bool _playbackLoaded;
+    private bool _warnedNetworkWithoutNet;
 
     protected override void OnUpdate()
     {
-        if (Commander.Mode == Commander.LockstepMode.Network) return;  // LockstepNet injects turns directly
+        if (Commander.Mode == Commander.LockstepMode.Network)
+        {
+            // In a live network session, LockstepNet drains the outbox and injects
+            // combined turns itself. But if mode was left on Network with no
+            // LockstepNet in the scene (e.g. after an MPPM test), the sim runs
+            // freely while every command silently black-holes in the outbox.
+            // Guard the trap: warn and fall through to normal ingestion.
+            if (LockstepNet.Instance != null) return;
+            if (!_warnedNetworkWithoutNet)
+            {
+                _warnedNetworkWithoutNet = true;
+                Debug.LogWarning("[Lockstep] Commander mode is Network but no LockstepNet is in the scene — " +
+                                 "ingesting commands locally so orders still work. Set mode = Live for " +
+                                 "single-player, or add LockstepNet for a networked session.");
+            }
+        }
         if (!SystemAPI.HasSingleton<CommandQueueTag>()) return;
 
         var qe = SystemAPI.GetSingletonEntity<CommandQueueTag>();
@@ -181,20 +198,22 @@ public partial struct CommandApplySystem : ISystem
     {
         var em = state.EntityManager;
         var mgr = AbilityManager.Instance;
-        if (mgr == null) return;
-        if (c.Units.Length == 0) return;
-        if (!map.TryGetValue(c.Units[0], out Entity caster)) return;        // caster died before execution
-        if (!em.HasComponent<AbilitySlots>(caster) || !em.HasComponent<AbilityCooldowns>(caster)) return;
+        if (mgr == null) { Debug.LogWarning("[Ability] cast dropped: no AbilityManager in the scene."); return; }
+        if (c.Units.Length == 0) { Debug.LogWarning("[Ability] cast dropped: command carried no caster id."); return; }
+        if (!map.TryGetValue(c.Units[0], out Entity caster)) return;        // caster died before execution — normal, silent
+        if (!em.HasComponent<AbilitySlots>(caster) || !em.HasComponent<AbilityCooldowns>(caster))
+        { Debug.LogWarning($"[Ability] cast dropped: caster (StableId {c.Units[0]}) has no AbilitySlots/AbilityCooldowns."); return; }
 
         int slot = c.AbilitySlot;
-        if (slot < 0 || slot > 3) return;
+        if (slot < 0 || slot > 3) { Debug.LogWarning($"[Ability] cast dropped: bad slot {slot}."); return; }
 
         var slots = em.GetComponentData<AbilitySlots>(caster);
         int abilityId = slots.Ids[slot];
-        if (abilityId < 0 || !mgr.TryGetSpec(abilityId, out var spec)) return;
+        if (abilityId < 0 || !mgr.TryGetSpec(abilityId, out var spec))
+        { Debug.LogWarning($"[Ability] cast dropped: slot {slot} has no registered ability (id {abilityId})."); return; }
 
         var cds = em.GetComponentData<AbilityCooldowns>(caster);
-        if (cds.ReadyTick[slot] > tick) return;                             // still cooling down
+        if (cds.ReadyTick[slot] > tick) return;                             // still cooling down — normal, silent (HUD shows it)
         cds.ReadyTick[slot] = tick + spec.CooldownTicks;
         em.SetComponentData(caster, cds);
 

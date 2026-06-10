@@ -427,7 +427,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   team: 0
-  mode: 2
+  mode: 3
   fileName: lockstep_commands.bin
   configuresStream: 1
   lastOrder: (none)
@@ -445,6 +445,125 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &940009757
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 940009761}
+  - component: {fileID: 940009760}
+  - component: {fileID: 940009759}
+  - component: {fileID: 940009758}
+  m_Layer: 0
+  m_Name: NetworkManager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &940009758
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 940009757}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ef001a2da7b794b4095db874fb3fbd86, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+--- !u!114 &940009759
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 940009757}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6960e84d07fb87f47956e7a81d71c4e6, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  m_ProtocolType: 0
+  m_UseWebSockets: 0
+  m_UseEncryption: 0
+  m_MaxPacketQueueSize: 128
+  m_MaxPayloadSize: 6144
+  m_HeartbeatTimeoutMS: 500
+  m_ConnectTimeoutMS: 1000
+  m_MaxConnectAttempts: 60
+  m_DisconnectTimeoutMS: 30000
+  ConnectionData:
+    Address: 127.0.0.1
+    Port: 7777
+    WebSocketPath: /
+    ServerListenAddress: 127.0.0.1
+    ClientBindPort: 0
+  DebugSimulator:
+    PacketDelayMS: 0
+    PacketJitterMS: 0
+    PacketDropRate: 0
+--- !u!114 &940009760
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 940009757}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 593a2fe42fa9d37498c96f9a383b6521, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  NetworkManagerExpanded: 0
+  NetworkConfig:
+    ProtocolVersion: 0
+    NetworkTransport: {fileID: 940009759}
+    PlayerPrefab: {fileID: 0}
+    Prefabs:
+      NetworkPrefabsLists:
+      - {fileID: 11400000, guid: 8d4299ab5c3361c488d70decd3dd9a02, type: 2}
+    TickRate: 30
+    ClientConnectionBufferTimeout: 10
+    ConnectionApproval: 0
+    ConnectionData: 
+    EnableTimeResync: 0
+    TimeResyncInterval: 30
+    EnsureNetworkVariableLengthSafety: 0
+    EnableSceneManagement: 1
+    ForceSamePrefabs: 1
+    RecycleNetworkIds: 1
+    NetworkIdRecycleDelay: 120
+    RpcHashSize: 0
+    LoadSceneTimeOut: 120
+    SpawnTimeout: 10
+    EnableNetworkLogs: 1
+    NetworkTopology: 0
+    UseCMBService: 0
+    AutoSpawnPlayerPrefabClientSide: 1
+    NetworkProfilingMetrics: 1
+    OldPrefabList: []
+  RunInBackground: 1
+  LogLevel: 1
+--- !u!4 &940009761
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 940009757}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 25.702263, y: -128.78317, z: 60.541943}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -483,7 +602,7 @@ MonoBehaviour:
   dumpKey: 97
   dumpFileName: lockstep_result.txt
   logChecksumEachSecond: 1
-  autoDumpAtTick: 1000
+  autoDumpAtTick: 400
 --- !u!114 &991285306
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -652,10 +771,22 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   teamone:
   - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
-    countPerTeam: 20
-  teamtwo:
+    countPerTeam: 100
   - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 20
+    countPerTeam: 100
+  - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
+    countPerTeam: 100
+  - definition: {fileID: 11400000, guid: 59640ea508dd8f04189d49b828763818, type: 2}
+    countPerTeam: 1
+  - definition: {fileID: 11400000, guid: d2f1f7a52e2d5f04fa78833e88ee1973, type: 2}
+    countPerTeam: 50
+  teamtwo:
+  - definition: {fileID: 11400000, guid: d2f1f7a52e2d5f04fa78833e88ee1973, type: 2}
+    countPerTeam: 200
+  - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
+    countPerTeam: 100
+  - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
+    countPerTeam: 100
   teamCount: 2
   fieldSize: 80
   teamColors:
@@ -1144,3 +1275,4 @@ SceneRoots:
   - {fileID: 1456942159446485426}
   - {fileID: 3367575877528022649}
   - {fileID: 2012834998}
+  - {fileID: 940009761}

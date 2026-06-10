@@ -57,9 +57,13 @@ public class SimResultDumper : MonoBehaviour
             }
         }
 
-        // Sim is frozen at exactly autoDumpAtTick (rate-manager halt), so this
-        // dump captures identical-tick state in every run.
-        if (autoDumpAtTick > 0 && !_autoDumped && SimClockSystem.LastCompletedTick >= autoDumpAtTick)
+        // Sim is frozen exactly at the halt tick (rate-manager halt, or turn
+        // starvation when networked), so this dump captures identical-tick state
+        // in every run AND on every peer. HaltAtTick rather than the local
+        // Inspector value: in network sessions the host distributes it via the
+        // Start message, overriding stale scene values on clients.
+        uint haltTick = LockstepRateManager.HaltAtTick;
+        if (haltTick > 0 && !_autoDumped && SimClockSystem.LastCompletedTick >= haltTick)
         {
             _autoDumped = true;
             DumpReport(w);
@@ -133,12 +137,19 @@ public class SimResultDumper : MonoBehaviour
         foreach (var r in rows)
             sb.AppendLine($"{r.id},{r.team},{math.asuint(r.x):X8},{math.asuint(r.z):X8},{math.asuint(r.hp):X8}");
 
-        // Encode mode + tick in the filename: record/playback runs never
-        // overwrite each other, and same-tick files are the comparable pairs.
+        // Encode mode + instance + tick in the filename. The instance tag matters:
+        // MPPM virtual players share the SAME persistentDataPath (same company/
+        // product identity), so without it host and client dumps overwrite each
+        // other. Same-tick files are the comparable pairs.
+        string instance = "";
+        var nm = Unity.Netcode.NetworkManager.Singleton;
+        if (nm != null && (nm.IsServer || nm.IsClient))
+            instance = nm.IsServer ? "_host" : $"_client{nm.LocalClientId}";
+
         string baseName = Path.GetFileNameWithoutExtension(dumpFileName);
         string ext = Path.GetExtension(dumpFileName);
         if (string.IsNullOrEmpty(ext)) ext = ".txt";
-        string path = Path.Combine(Application.persistentDataPath, $"{baseName}_{Commander.Mode}_t{tick}{ext}");
+        string path = Path.Combine(Application.persistentDataPath, $"{baseName}_{Commander.Mode}{instance}_t{tick}{ext}");
         File.WriteAllText(path, sb.ToString());
         Debug.Log($"[Lockstep] dumped {rows.Count} units (HP {totalHp:R}, checksum {checksum:X8}) to {path}");
 
