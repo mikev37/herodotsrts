@@ -28,6 +28,8 @@ MonoBehaviour:
   armor: 0
   shield: 0
   meleeAttackInterval: 1
+  meleeChargeUpSeconds: 0.3
+  meleeCleave: 0
   meleeAttackDamage: 25
   meleeStrikeArc: 120
   isRanged: 1
@@ -35,16 +37,29 @@ MonoBehaviour:
   kiteRadius: 7
   attackRange: 10
   attackInterval: 1.2
+  rangedChargeUpSeconds: 0.5
   attackDamage: 18
   isHero: 1
   abilities:
   - {fileID: 11400000, guid: 1a4039de518a4844aa3134e8e84434b1, type: 2}
-  - {fileID: 0}
-  - {fileID: 0}
-  - {fileID: 0}
-  formShieldWall: 0
-  stayBehindWall: 0
-  kiteEnemies: 1
-  advanceToTarget: 0
-  holdWhenDefensive: 0
-  idleSpread: 0
+  - {fileID: 11400000, guid: eea0c3126e1e73d4ca9baa2e6db3264d, type: 2}
+  - {fileID: 11400000, guid: 6a5dc287ddd9701439677e22e9dabaf4, type: 2}
+  - {fileID: 11400000, guid: 847ddf95ba26c4c4dbac974fa99a8e1f, type: 2}
+  attackNearby: 1
+  flankTarget: 0
+  bodyBlock: 0
+  formWall: 0
+  standBehindFriend: 0
+  advanceOnEnemy: 0
+  advanceIndividual: 1
+  avoidMelee: 0
+  retreatLowHealth: 0
+  formWedge: 0
+  alignCardinal: 0
+  alignFacing: 0
+  alignMovement: 0
+  separate: 0
+  separateIdle: 0
+  attackNearbyRange: 18
+  avoidMeleeRange: 6
+  retreatHealthFraction: 0.25

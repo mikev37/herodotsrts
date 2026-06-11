@@ -114,7 +114,7 @@ public partial struct ContactCombatSystem : ISystem
                     distance <= neighbor.AttackRange + bodyRange)
                 {
                     bool targeted = neighbor.AttackTarget == self;
-                    bool cleaved = neighbor.Cleave == 1 &&
+                    bool cleaved = neighbor.Cleave &&
                                    math.dot(neighbor.Facing, normal) >= neighbor.StrikeArcDot;
                     if ((targeted || cleaved) &&
                         !StrikeBlocked(position, neighbor, self, radius.Value, contacts))

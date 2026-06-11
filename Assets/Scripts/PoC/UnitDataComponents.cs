@@ -9,15 +9,28 @@ using Unity.Entities;
 // bitmask at spawn so Burst systems can read them. (Burst can't walk a list of
 // polymorphic behavior objects, so a flag bitmask is the data-driven stand-in.)
 [Flags]
+// Composable behavior primitives. A unit archetype is just a SET of these —
+// e.g. a shield-waller is AttackNearby | FormWall | AlignFacing | AlignCardinal
+// | AdvanceOnEnemy. Priority between active flags is the guarded-chain order in
+// BehaviorSystem (top of that file documents it).
 public enum BehaviorFlag : uint
 {
-    None            = 0,
-    FormShieldWall  = 1u << 0,   // slide laterally to line up -> wall
-    StayBehindWall  = 1u << 1,   // tuck behind nearest friendly wall-former
-    KiteEnemies     = 1u << 2,   // keep distance from nearest enemy
-    AdvanceToTarget = 1u << 3,   // move onto best target
-    HoldWhenDefensive = 1u << 4, // hold ground under a Defensive aura
-    IdleSpread      = 1u << 5,   // disperse when no enemy is near
+    None              = 0,
+    AttackNearby      = 1u << 0,   // enemy within AttackNearbyRange -> engage it
+    FlankTarget       = 1u << 1,   // position behind the chosen target's facing
+    BodyBlock         = 1u << 2,   // stand between the chosen enemy and friendly center of mass
+    FormWall          = 1u << 3,   // hold the line between friendly CoM and enemy CoM
+    StandBehindFriend = 1u << 4,   // tuck behind the closest friendly, relative to enemy CoM
+    AdvanceOnEnemy    = 1u << 5,   // march toward the enemy center of mass
+    AdvanceIndividual = 1u << 6,   // march toward the chosen target
+    AvoidMelee        = 1u << 7,   // enemy within AvoidMeleeRange -> back off
+    RetreatLowHealth  = 1u << 8,   // health below fraction -> flee the enemy CoM
+    FormWedge         = 1u << 9,   // slot in behind-and-beside the friendly ahead
+    AlignCardinal     = 1u << 10,  // snap to 90-degree slots around the closest friendly's facing
+    AlignFacing       = 1u << 11,  // face the friendly facing consensus
+    AlignMovement     = 1u << 12,  // move with the friendly movement consensus
+    Separate          = 1u << 13,  // push apart from crowded allies (always)
+    SeparateIdle      = 1u << 14,  // push apart from crowded allies (only with no enemies near)
 }
 
 public struct BehaviorFlags : IComponentData
@@ -52,10 +65,11 @@ public struct UnitTuning : IComponentData
     public float TurnSpeed;
     public float SeparationStrength;
     public float MeleeRange;
-    public float WallSpacing;
-    public float KiteRange;
-    public float SpreadRadius;
-    public float SpreadStrength;
+    public float CombatSpacing;       // formation spacing with enemies near
+    public float IdleSpacing;         // formation spacing at rest (looser)
+    public float AttackNearbyRange;   // aggression radius for AttackNearby
+    public float AvoidMeleeRange;     // back-off radius for AvoidMelee
+    public float RetreatHealthPct;    // RetreatLowHealth triggers below Current/Max
 }
 
 // Unified attack: ONE countdown->act->cooldown timer for both melee and ranged.
@@ -73,6 +87,7 @@ public enum AttackPhase : byte { Ready = 0, Charging = 1, Cooldown = 2 }
 
 public struct Attack : IComponentData
 {
+    public bool isRange;
     // cadence (shared)
     public float Range;       // engage distance (meleeRange for melee, attackRange for ranged)
     public float ChargeUp;    // wind-up seconds before a strike/shot lands
@@ -83,7 +98,7 @@ public struct Attack : IComponentData
 
     // melee act
     public float ArcDot;      // cos(arc/2): cleave strikes land within this cone
-    public byte  Cleave;      // strike hits all enemies in the arc, not just the target
+    public bool  Cleave;      // strike hits all enemies in the arc, not just the target
     public float Pulse;       // = Damage on the strike tick, else 0 (read by the hash)
 
     // ranged act (copied from the referenced ProjectileDefinition)

@@ -217,7 +217,7 @@ public class DebugOverlay : MonoBehaviour
                 Forward = new Vector3(fwd.x, 0f, fwd.z),
                 Team = teams[i].Value,
                 HasTarget = targets[i].Has,
-                TargetPos = new Vector3(targets[i].Position.x, gizmoY, targets[i].Position.y),
+                TargetPos = new Vector3(targets[i].Info.Position.x, gizmoY, targets[i].Info.Position.y),
                 HasDest = dests[i].Has,
                 DestPos = new Vector3(dests[i].Value.x, gizmoY, dests[i].Value.y),
                 Selected = _em.HasComponent<Selected>(entities[i]) && _em.IsComponentEnabled<Selected>(entities[i]),

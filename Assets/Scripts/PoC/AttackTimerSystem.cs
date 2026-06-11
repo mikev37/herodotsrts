@@ -58,8 +58,8 @@ public partial struct AttackTimerSystem : ISystem
             [ChunkIndexInQuery] int sortKey,
             in LocalTransform xform,
             in Team team,
+            in Velocity vel,
             in CombatTarget target,
-            in Perception perception,
             in Ranged ranged,
             in GroundSpeedMultiplier slope,
             ref Attack attack,
@@ -72,11 +72,11 @@ public partial struct AttackTimerSystem : ISystem
             {
                 attack.Phase = AttackPhase.Ready;
                 attack.Timer = 0f;
-                status.IsFiring = false;
                 return;
             }
-
-            status.IsFiring = ranged.IsRanged;   // drives the ranged attack anim
+            float2 enemydir = target.Info.Position - xform.Position.xz;
+            //moving or not facing the enemy = no attack
+            if (math.length(vel.Value) > 1 || math.dot(xform.Forward().xz, enemydir) < .65f) return;
 
             switch (attack.Phase)
             {
@@ -89,7 +89,7 @@ public partial struct AttackTimerSystem : ISystem
                     attack.Timer -= Dt;
                     if (attack.Timer <= 0f)
                     {
-                        Fire(sortKey, xform, team, target, perception, ranged, slope, ref attack);
+                        Fire(sortKey, xform, team, target, ranged, slope, ref attack);
                         attack.Phase = AttackPhase.Cooldown;
                         attack.Timer += attack.Cooldown;   // += carries the sub-tick remainder
                     }
@@ -107,7 +107,7 @@ public partial struct AttackTimerSystem : ISystem
         }
 
         private void Fire(int sortKey, in LocalTransform xform, in Team team,
-                          in CombatTarget target, in Perception perception,
+                          in CombatTarget target,
                           in Ranged ranged, in GroundSpeedMultiplier slope, ref Attack attack)
         {
             if (!ranged.IsRanged)
@@ -121,17 +121,17 @@ public partial struct AttackTimerSystem : ISystem
             if (attack.ProjSpeed <= 0f) return;
 
             float2 position = new float2(xform.Position.x, xform.Position.z);
-            float2 toTarget = target.Position - position;
+            float2 toTarget = target.Info.Position - position;
             float distance = math.length(toTarget);
             float2 direction = distance > 1e-4f ? toTarget / distance : new float2(0f, 1f);
             float life = distance / attack.ProjSpeed;   // land at the aimed point as the arc completes
 
-            float heightAdvantage = math.clamp(slope.Height - perception.TargetHeight,
+            float heightAdvantage = math.clamp(slope.Height - target.Info.Height,
                                                -HeightBonusCap, HeightBonusCap);
             float damage = attack.Damage * math.max(0.5f, 1f + HeightDamageBonus * heightAdvantage);
 
             float startY = slope.Height + attack.ProjLaunchHeight;
-            float endY = perception.TargetHeight;
+            float endY = target.Info.Height;
 
             var projectile = Ecb.CreateEntity(sortKey);
             Ecb.AddComponent(sortKey, projectile, LocalTransform.FromPosition(

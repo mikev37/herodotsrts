@@ -12,7 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4695cc48e0a579348be3cffe65347f0b, type: 3}
   m_Name: Fireball
   m_EditorClassIdentifier: 
-  displayName: Ability
+  displayName: Fireball
   shape: 0
   radius: 5
   width: 2
@@ -34,5 +34,3 @@ MonoBehaviour:
     capRef: 0
     capValue: 0
     boolValue: 0
-    duration: 0
-    viewEffect: {fileID: 0}

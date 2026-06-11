@@ -80,7 +80,8 @@ public partial struct SpatialHashSystem : ISystem
                              in Velocity velocity, in Mass mass, in Health health,
                              in BehaviorFlags flags, in Attack attack, in StableId stableId,
                              in UnitRadius radius, in GroundSpeedMultiplier slope,
-                             in CombatStatus status, in CombatTarget target)
+                             in CombatStatus status, in CombatTarget target,
+                             in Defense defense, in UnitDefId defId)
         {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 forward3 = math.forward(xform.Rotation);
@@ -89,6 +90,7 @@ public partial struct SpatialHashSystem : ISystem
             {
                 Entity = entity,
                 StableId = stableId.Value,
+                DefId = defId.Value,
                 Team = team.Value,
                 Position = position,
                 Height = slope.Height,
@@ -97,14 +99,16 @@ public partial struct SpatialHashSystem : ISystem
                 Radius = radius.Value,
                 Mass = mass.Value,
                 Health = health.Current,
+                Damage = attack.Damage,
+                Armor = defense.Armor,
+                Shield = defense.Shield,
                 Flags = flags.Value,
-                IsAttacking = (byte)(status.IsAttacking ? 1 : 0),
-                AttackTarget = target.Has ? target.Value : Entity.Null,
+                IsAttacking = status.IsAttacking,
+                AttackTarget = target.Has ? target.Info.Entity : Entity.Null,
                 StrikeDamage = attack.Pulse,
                 AttackRange = attack.Range,
                 StrikeArcDot = attack.ArcDot,
                 Cleave = attack.Cleave,
             });
-        }
-    }
+        }    }
 }

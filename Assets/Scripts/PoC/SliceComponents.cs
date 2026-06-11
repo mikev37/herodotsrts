@@ -11,10 +11,12 @@ using Unity.Collections;
 // modified by a BehaviorOverride mask (driven by hero abilities).
 
 // The enemy this unit currently considers its target (snapshot each frame).
+// The CHOSEN target — selected by BehaviorSystem from the gather system's
+// candidates (perception supplies facts; behavior makes the decision). Carries
+// the full snapshot so consumers (attack cycle, anim, debug) share one copy.
 public struct CombatTarget : IComponentData
 {
-    public Entity Value;
-    public float2 Position;
+    public UnitInfo Info;
     public bool Has;
 }
 
@@ -32,6 +34,12 @@ public struct DesiredDestination : IComponentData
     public float2 Value;
     public bool Has;
     public bool UseFlowField;   // long-range commanded move -> route via field
+
+    // Desired facing, decided by BEHAVIOR (face target / facing consensus / ...).
+    // Steering only executes it (turn rate); it does not choose. When HasFace is
+    // false, steering falls back to facing the movement heading.
+    public float2 Face;
+    public bool HasFace;
 }
 
 // ---------------------------------------------------------------------------

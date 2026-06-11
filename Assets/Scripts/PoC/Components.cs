@@ -19,6 +19,8 @@ public struct MoveTarget : IComponentData
 public struct Velocity : IComponentData
 {
     public float2 Value;
+    public float2 desiredValue;
+	public float2 faceDir;
 }
 
 public struct Speed : IComponentData
@@ -79,7 +81,6 @@ public struct CombatStatus : IComponentData
     public bool InContactWithEnemy;
     public bool IsAttacking;      // behavior holds position and commits to attacking its target
     public bool IsBlocking;       // shield unit facing an enemy
-    public bool IsFiring;         // ranged unit shooting at a target
 }
 
 // Marks a unit as dead: movement/combat stop, the view plays Die, then the
@@ -96,7 +97,6 @@ public struct DeathTimer : IComponentData
 public struct Ranged : IComponentData
 {
     public bool IsRanged;
-    public float KiteRadius;   // distance at which ranged units start backing up
 }
 
 // Tag: currently selected by the player. Added/removed by the input bridge.
@@ -119,6 +119,7 @@ public struct UnitInfo : IBufferElementData
 {
     public Entity Entity;
     public int    StableId;       // deterministic identity (tie-breaking, debugging)
+    public int    DefId;          // unit type (e.g. "form a wall with units of my type")
     public int    Team;
     public float2 Position;
     public float  Height;         // terrain height under the unit
@@ -127,13 +128,25 @@ public struct UnitInfo : IBufferElementData
     public float  Radius;         // body radius (physical contact)
     public float  Mass;
     public float  Health;
+    public float  Damage;         // its attack damage (danger/exposure scoring)
+    public float  Armor;
+    public float  Shield;
     public uint   Flags;          // BehaviorFlags
-    public byte   IsAttacking;    // behavior committed to an attack this tick
+    public bool   IsAttacking;    // behavior committed to an attack this tick
     public Entity AttackTarget;   // who it is attacking (single-target strikes)
     public float  StrikeDamage;   // melee pulse this tick (0 except on the strike tick)
     public float  AttackRange;    // weapon reach (melee) / fire range (ranged)
     public float  StrikeArcDot;   // cos(arc/2) for cleave strikes
-    public byte   Cleave;         // strike hits everyone in the arc, not just the target
+    public bool   Cleave;         // strike hits everyone in the arc, not just the target
+}
+
+// Nearby friendlies (full snapshots), gather-written. Separate from the
+// ContactList: this is the FORMATION neighborhood (wedge/wall/cardinal/align),
+// the ContactList is the PHYSICAL one (separation/impacts).
+[InternalBufferCapacity(0)]
+public struct FriendlyUnit : IBufferElementData
+{
+    public UnitInfo Info;
 }
 
 // Per-unit perception, written ONLY by InformationGatherSystem, read by behavior
@@ -141,16 +154,28 @@ public struct UnitInfo : IBufferElementData
 // target" / "my wall buddy" in the whole sim.
 public struct Perception : IComponentData
 {
-    public byte   HasTarget;
-    public float  TargetDist;
-    public float  TargetHeight;
-    public byte   TargetLos;      // line of sight to the target (passability grid)
+    // Group structure (centers of mass are outlier-trimmed; Clustered=false
+    // means the group is spread apart and its CoM is a weak signal).
+    public bool   HasEnemies;
+    public bool   EnemiesClustered;
+    public float2 EnemyCenter;
+    public bool   HasFriendlies;
+    public bool   FriendliesClustered;
+    public float2 FriendlyCenter;
 
-    public byte   HasWallAlly;    // nearest friendly shield-wall former (rungs 5/6)
-    public float2 WallAllyPos;
-    public float  WallAllyDist;
+    // Candidate enemies (full snapshots; behavior picks the actual target).
+    public bool     HasClosestEnemy;
+    public UnitInfo ClosestEnemy;
+    public bool     HasMostDangerous;
+    public UnitInfo MostDangerousEnemy;   // would do the most damage to ME (my armor/facing applied)
+    public bool     HasMostExposed;
+    public UnitInfo MostExposedEnemy;     // I would do the most damage to THEM
 
-    public float2 SpreadPush;     // accumulated idle-dispersion push from nearby friendlies
+    // Friendly structure for formation/alignment behaviors.
+    public bool     HasClosestFriendly;
+    public UnitInfo ClosestFriendly;
+    public float2   FriendlyAvgFacing;    // facing consensus (normalized, zero if none)
+    public float2   FriendlyAvgVelocity;  // movement consensus
 }
 
 public struct SpatialHash : IComponentData

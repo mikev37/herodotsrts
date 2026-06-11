@@ -45,13 +45,12 @@ public partial struct SimDebugSystem : ISystem
             if (team.ValueRO.Value == 0) d.UnitsTeam0++; else d.UnitsTeam1++;
 
             uint f = flags.ValueRO.Value;
-            if ((f & (uint)BehaviorFlag.FormShieldWall) != 0) d.WallFormers++;
-            if ((f & (uint)BehaviorFlag.StayBehindWall) != 0) d.Tuckers++;
-            if ((f & (uint)BehaviorFlag.KiteEnemies) != 0) d.Kiters++;
-            if ((f & (uint)BehaviorFlag.AdvanceToTarget) != 0) d.Advancers++;
+            if ((f & (uint)BehaviorFlag.FormWall) != 0) d.WallFormers++;
+            if ((f & (uint)BehaviorFlag.StandBehindFriend) != 0) d.Tuckers++;
+            if ((f & (uint)BehaviorFlag.AvoidMelee) != 0) d.Kiters++;
+            if ((f & (uint)BehaviorFlag.AdvanceIndividual) != 0) d.Advancers++;
 
             if ((over.ValueRO.ForceOn | over.ValueRO.ForceOff) != 0) d.Overridden++;
-            if (status.ValueRO.IsFiring) d.Firing++;
             if (status.ValueRO.InContactWithEnemy) d.InContact++;
         }
 

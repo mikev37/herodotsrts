@@ -15,7 +15,7 @@ using Unity.Transforms;
 //    physical-overlap CombatStatus.InContactWithEnemy, which flickers on/off as
 //    separation jostles units across the contact boundary (that flicker is what
 //    dropped attacks back to Idle).
-//  * ATTACK vs BLOCK: an engaged melee unit attacks; a shield (FormShieldWall)
+//  * ATTACK vs BLOCK: an engaged melee unit attacks; a shield (FormWall)
 //    that is holding the line braces (Block) instead.
 //  * MOVING is "the behavior gave me a destination I'm not basically standing
 //    on", not raw steering velocity (which includes separation jostle).
@@ -53,20 +53,15 @@ public partial struct AnimationStateSystem : ISystem
             bool moving = dest.Has &&
                           math.distancesq(pos, dest.Value) > MovingDistance * MovingDistance;
 
-            // Melee engagement: the behavior layer's declared commitment — the
-            // same signal that runs the attack cycle, so the swing anim and the
-            // actual strikes can't disagree (and no contact flicker).
-            bool meleeEngaged = !ranged.IsRanged && status.IsAttacking;
 
-            if (meleeEngaged)
+            if (status.IsAttacking)
             {
                
                 anim.State =  AnimState.Attack;
                 return;
             }
 
-            if (status.IsFiring) { anim.State = AnimState.Attack; return; }
-            bool shieldHolding = (flags.Value & (uint)BehaviorFlag.FormShieldWall) != 0 && !moving;
+            bool shieldHolding = (flags.Value & (uint)BehaviorFlag.FormWall) != 0 && !moving;
             anim.State = moving ? AnimState.Walk : AnimState.Idle;
         }
     }

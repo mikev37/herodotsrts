@@ -99,7 +99,7 @@ public class UnitManager : MonoBehaviour
             typeof(MoveTarget), typeof(AttackOrder), typeof(CombatTarget), typeof(DesiredDestination),
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
             typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
-            typeof(Perception), typeof(UnitInfo),   // perception + contact list (gather-written)
+            typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit),   // perception + contact/friendly lists
         };
         var archetype = _em.CreateArchetype(common);
 
@@ -167,10 +167,11 @@ public class UnitManager : MonoBehaviour
             TurnSpeed = def.turnSpeed,
             SeparationStrength = def.separationStrength,
             MeleeRange = def.meleeRange,
-            WallSpacing = def.wallSpacing,
-            KiteRange = def.kiteRadius,
-            SpreadRadius = def.spreadRadius,
-            SpreadStrength = def.spreadStrength,
+            CombatSpacing = def.combatSpacing,
+            IdleSpacing = def.idleSpacing,
+            AttackNearbyRange = def.attackNearbyRange,
+            AvoidMeleeRange = def.avoidMeleeRange,
+            RetreatHealthPct = def.retreatHealthFraction,
         });
         _em.SetComponentData(e, BuildAttack(def));
         _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = def.shield });
@@ -180,14 +181,14 @@ public class UnitManager : MonoBehaviour
         _em.SetComponentData(e, new GroundSpeedMultiplier { Value = 1f });
         _em.SetComponentData(e, new Health { Current = def.maxHealth, Max = def.maxHealth });
         _em.SetComponentData(e, new DeathTimer { Seconds = def.deathAnimSeconds });
-        _em.SetComponentData(e, new Ranged { IsRanged = def.isRanged, KiteRadius = def.kiteRadius });
+        _em.SetComponentData(e, new Ranged { IsRanged = def.isRanged });
         _em.SetComponentData(e, new UnitAnim { State = AnimState.Idle });
         _em.SetComponentData(e, new BaseStats
         {
             Speed = def.speed,
             TurnSpeed = def.turnSpeed,
             MeleeRange = def.meleeRange,
-            AttackDamage = def.isRanged ? def.attackDamage : def.meleeAttackDamage,
+            AttackDamage = def.attackDamage,
             Armor = def.armor,
             Shield = def.shield,
         });
@@ -218,15 +219,23 @@ public class UnitManager : MonoBehaviour
     private static uint PackFlags(UnitDefinition d)
     {
         uint f = 0;
-        if (d.formShieldWall)    f |= (uint)BehaviorFlag.FormShieldWall;
-        if (d.stayBehindWall)    f |= (uint)BehaviorFlag.StayBehindWall;
-        if (d.kiteEnemies)       f |= (uint)BehaviorFlag.KiteEnemies;
-        if (d.advanceToTarget)   f |= (uint)BehaviorFlag.AdvanceToTarget;
-        if (d.holdWhenDefensive) f |= (uint)BehaviorFlag.HoldWhenDefensive;
-        if (d.idleSpread)        f |= (uint)BehaviorFlag.IdleSpread;
+        if (d.attackNearby)       f |= (uint)BehaviorFlag.AttackNearby;
+        if (d.flankTarget)        f |= (uint)BehaviorFlag.FlankTarget;
+        if (d.bodyBlock)          f |= (uint)BehaviorFlag.BodyBlock;
+        if (d.formWall)           f |= (uint)BehaviorFlag.FormWall;
+        if (d.standBehindFriend)  f |= (uint)BehaviorFlag.StandBehindFriend;
+        if (d.advanceOnEnemy)     f |= (uint)BehaviorFlag.AdvanceOnEnemy;
+        if (d.advanceIndividual)  f |= (uint)BehaviorFlag.AdvanceIndividual;
+        if (d.avoidMelee)         f |= (uint)BehaviorFlag.AvoidMelee;
+        if (d.retreatLowHealth)   f |= (uint)BehaviorFlag.RetreatLowHealth;
+        if (d.formWedge)          f |= (uint)BehaviorFlag.FormWedge;
+        if (d.alignCardinal)      f |= (uint)BehaviorFlag.AlignCardinal;
+        if (d.alignFacing)        f |= (uint)BehaviorFlag.AlignFacing;
+        if (d.alignMovement)      f |= (uint)BehaviorFlag.AlignMovement;
+        if (d.separate)           f |= (uint)BehaviorFlag.Separate;
+        if (d.separateIdle)       f |= (uint)BehaviorFlag.SeparateIdle;
         return f;
     }
-
     private Color TeamColor(int team)
         => (teamColors != null && team >= 0 && team < teamColors.Length) ? teamColors[team] : Color.white;
 
@@ -251,8 +260,9 @@ public class UnitManager : MonoBehaviour
         var a = new Attack
         {
             ArcDot = Mathf.Cos(Mathf.Deg2Rad * def.meleeStrikeArc * 0.5f),
-            Cleave = (byte)(def.meleeCleave ? 1 : 0),
+            Cleave = def.meleeCleave,
             Phase = AttackPhase.Ready,
+            isRange = def.isRanged,
             Timer = 0f,
             Pulse = 0f,
             ProjectileId = -1,
@@ -260,8 +270,8 @@ public class UnitManager : MonoBehaviour
         if (def.isRanged)
         {
             a.Range = def.attackRange;
-            a.ChargeUp = def.rangedChargeUpSeconds;
-            a.Cooldown = def.attackInterval;
+            a.ChargeUp = def.attackInterval;
+            a.Cooldown = def.attackCooldown;
             a.Damage = def.attackDamage;
             var pd = def.projectile;
             if (pd != null)
@@ -277,9 +287,9 @@ public class UnitManager : MonoBehaviour
         else
         {
             a.Range = def.meleeRange;
-            a.ChargeUp = def.meleeChargeUpSeconds;
-            a.Cooldown = def.meleeAttackInterval;
-            a.Damage = def.meleeAttackDamage;
+            a.ChargeUp = def.attackInterval;
+            a.Cooldown = def.attackCooldown;
+            a.Damage = def.attackDamage;
         }
         return a;
     }

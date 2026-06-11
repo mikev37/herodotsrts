@@ -38,7 +38,6 @@ public partial struct SteeringSystem : ISystem
             Dt = SystemAPI.Time.DeltaTime,
             ObstacleStrength = 14f,   // global: repulsion from blocked cells
             ArriveRadius = 0.4f,      // global: stop distance when seeking
-            FaceEnemyRange = 14f,     // global: face the target instead of heading within this range
             PathMap = lookup.Map,
             CoarseCost = nf.CoarseCost,
             BlockOf = nf.BlockOf,
@@ -52,7 +51,7 @@ public partial struct SteeringSystem : ISystem
     [WithNone(typeof(Dead))]
     private partial struct SteerJob : IJobEntity
     {
-        public float Dt, ObstacleStrength, ArriveRadius, FaceEnemyRange;
+        public float Dt, ObstacleStrength, ArriveRadius;
         [ReadOnly] public NativeParallelHashMap<int, int> PathMap;
         [ReadOnly] public NativeArray<int> CoarseCost;
         [ReadOnly] public NativeArray<int> BlockOf;
@@ -67,7 +66,6 @@ public partial struct SteeringSystem : ISystem
             in Speed speed,
             in UnitRadius radius,
             in GroundSpeedMultiplier slope,
-            in CombatTarget target,
             in UnitTuning tuning,
             in DesiredDestination dest,
             DynamicBuffer<UnitInfo> contacts)
@@ -102,7 +100,11 @@ public partial struct SteeringSystem : ISystem
                     float2 to = dest.Value - pos;
                     if (math.length(to) > ArriveRadius) dir = math.normalizesafe(to);
                 }
-                desired += dir * locomotion;
+                vel.desiredValue = math.lerp(vel.desiredValue, dir * locomotion, Dt);
+                desired += vel.desiredValue;
+            } else {
+                vel.desiredValue = math.lerp(vel.desiredValue, float2.zero, Dt);
+                desired += vel.desiredValue;
             }
 
             // --- 2. Separation from units ------------------------------------
@@ -139,18 +141,25 @@ public partial struct SteeringSystem : ISystem
             // --- 4. Integrate ------------------------------------------------
             vel.Value = desired;
             float2 step = desired * Dt;
-            xform.Position = new float3(xform.Position.x + step.x,slope.Height, xform.Position.z + step.y);
+            float2 desiredDir = math.normalizesafe(vel.desiredValue);
+            float currentLen = math.min(math.length(vel.desiredValue), locomotion); // clamp to current top speed (handles cresting hills)
+            float projectedLen = math.max(0f, math.dot(vel.Value, desiredDir));
+            vel.desiredValue = desiredDir * math.min(currentLen, projectedLen);     // only bleed down, never boost
+            xform.Position = new float3(xform.Position.x + step.x, slope.Height, xform.Position.z + step.y);
             // --- 5. Facing ---------------------------------------------------
-            // Face the THREAT if we have a target in range (so a shield sliding
-            // sideways to line up still faces the enemy, not its shuffle dir);
-            // otherwise face our heading. Turn at a capped rate so it doesn't
-            // snap or jitter frame-to-frame.
+            // Behavior DECIDES facing (face the target / facing consensus / ...);
+            // steering only executes it at the turn rate. With no decided facing,
+            // fall back to the movement heading. External forces (knockback,
+            // separation) shove position but never twist facing.
             float2 faceDir = float2.zero;
-            if (target.Has && math.distance(pos, target.Position) <= FaceEnemyRange)
-                faceDir = target.Position - pos;
+            if (dest.HasFace)
+                faceDir = dest.Face;
             else if (math.lengthsq(desired) > 0.05f)
                 faceDir = desired;
 
+            vel.faceDir = math.normalizesafe(math.lerp(vel.faceDir, faceDir, tuning.TurnSpeed * Dt));
+
+            faceDir = vel.faceDir;
             if (math.lengthsq(faceDir) > 1e-4f)
             {
                 quaternion want = quaternion.LookRotationSafe(

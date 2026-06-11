@@ -30,16 +30,12 @@ public class UnitDefinition : ScriptableObject
     [Header("Spacing & formation")]
     [Tooltip("How hard this unit pushes off neighbors (body-blocking).")]
     public float separationStrength = 8f;
-    [Tooltip("Distance at which an enemy is 'in our face' -> hold and fight.")]
-    public float meleeRange = 1.2f;
-    [Tooltip("Preferred shoulder-to-shoulder gap when forming a wall.")]
-    public float wallSpacing = 1.3f;
+    [Tooltip("Formation spacing (wall/wedge/cardinal/behind) when enemies are near.")]
+    public float combatSpacing = 1.3f;
+    [Tooltip("Formation spacing when no enemies are near (looser at rest).")]
+    public float idleSpacing = 2.2f;
 
     [Header("Idle")]
-    [Tooltip("How far apart to spread when no enemy is near.")]
-    public float spreadRadius = 3f;
-    [Tooltip("Step size taken each frame while dispersing.")]
-    public float spreadStrength = 2f;
 
     [Header("Survivability")]
     public float maxHealth = 100f;
@@ -49,33 +45,25 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Extra armor that only applies when the attacker is in this unit's front half-arc.")]
     public float shield = 0f;
 
+    [Header("Attack")]
+    public float attackInterval = 1f;
+    public float attackCooldown = 0;
+    public float attackDamage = 18f;
     [Header("Melee")]
-    [Tooltip("Seconds between melee strikes; the attack timer loops while engaged.")]
-    public float meleeAttackInterval = 1.0f;
-    [Tooltip("Wind-up seconds before a melee strike lands. The attack cycle is " +
-             "charge-up -> strike -> cooldown(=interval) -> charge-up, and only runs while " +
-             "the unit is committed to attacking (standing on its target).")]
-    public float meleeChargeUpSeconds = 0.3f;
     [Tooltip("Cleave: the strike hits EVERY enemy inside the strike arc. Off = the strike " +
              "lands only on the unit's declared target (first body in line can still block).")]
     public bool meleeCleave = false;
-    [Tooltip("Damage of one melee strike — a discrete bash applied on the strike frame.")]
-    public float meleeAttackDamage = 25f;
     [Tooltip("Full angle (degrees) of the strike cone in front of the attacker. " +
              "A strike only lands on defenders inside this arc. 360 = cleave (hits all around).")]
     [Range(0f, 360f)] public float meleeStrikeArc = 120f;
+    [Tooltip("Distance at which an enemy is 'in our face' -> hold and fight.")]
+    public float meleeRange = 1.2f;
 
     [Header("Ranged")]
     public bool isRanged = false;
     [Tooltip("Projectile this unit fires (defines speed, arc, view). Required if isRanged.")]
     public ProjectileDefinition projectile;
-    [Tooltip("Standoff distance the unit kites to keep from the nearest enemy.")]
-    public float kiteRadius = 7f;
     public float attackRange = 10f;
-    public float attackInterval = 1.2f;
-    [Tooltip("Wind-up seconds before each shot. Same predictable cycle as melee.")]
-    public float rangedChargeUpSeconds = 0.5f;
-    public float attackDamage = 18f;
 
     [Header("Hero")]
     [Tooltip("If set, this unit is spawned as a hero (gets HeroTag). It's a normal unit " +
@@ -88,16 +76,42 @@ public class UnitDefinition : ScriptableObject
     public AbilityDefinition[] abilities = new AbilityDefinition[4];
 
     [Header("Behaviors (compose freely)")]
-    [Tooltip("Slide sideways to line up with nearby friendly wall-formers → a wall.")]
-    public bool formShieldWall = false;
-    [Tooltip("Tuck in just behind the nearest friendly wall-former.")]
-    public bool stayBehindWall = false;
-    [Tooltip("Keep a preferred distance from the nearest enemy (kite).")]
-    public bool kiteEnemies = false;
-    [Tooltip("Advance onto the best target chosen by the targeting system.")]
-    public bool advanceToTarget = true;
-    [Tooltip("Hold ground while inside a friendly Defensive hero aura.")]
-    public bool holdWhenDefensive = false;
-    [Tooltip("When no enemy is near, drift apart to spread out; re-form when enemies return.")]
-    public bool idleSpread = false;
+    [Tooltip("Engage enemies that come within Attack Nearby Range.")]
+    public bool attackNearby = true;
+    [Tooltip("Try to position behind the chosen target's facing.")]
+    public bool flankTarget = false;
+    [Tooltip("Stand between the chosen enemy and the friendly center of mass.")]
+    public bool bodyBlock = false;
+    [Tooltip("Hold the line between the friendly and enemy centers of mass.")]
+    public bool formWall = false;
+    [Tooltip("Tuck behind the closest friendly, relative to the enemy center of mass.")]
+    public bool standBehindFriend = false;
+    [Tooltip("March toward the enemy center of mass.")]
+    public bool advanceOnEnemy = false;
+    [Tooltip("March toward the chosen target.")]
+    public bool advanceIndividual = true;
+    [Tooltip("Back off when an enemy is within Avoid Melee Range.")]
+    public bool avoidMelee = false;
+    [Tooltip("Flee the enemy center of mass when health drops below Retreat Health Fraction.")]
+    public bool retreatLowHealth = false;
+    [Tooltip("Slot in behind-and-beside the friendly ahead (wedge formations).")]
+    public bool formWedge = false;
+    [Tooltip("Snap to 90-degree slots around the closest friendly, in their facing frame.")]
+    public bool alignCardinal = false;
+    [Tooltip("Face the friendly facing consensus when not attacking.")]
+    public bool alignFacing = false;
+    [Tooltip("Move with the friendly movement consensus when nothing else applies.")]
+    public bool alignMovement = false;
+    [Tooltip("Push apart from crowded allies at all times.")]
+    public bool separate = false;
+    [Tooltip("Push apart from crowded allies only when no enemies are near.")]
+    public bool separateIdle = false;
+
+    [Header("Behavior ranges")]
+    [Tooltip("AttackNearby aggression radius.")]
+    public float attackNearbyRange = 18f;
+    [Tooltip("AvoidMelee back-off radius.")]
+    public float avoidMeleeRange = 6f;
+    [Tooltip("RetreatLowHealth triggers below this health fraction.")]
+    [Range(0f, 1f)] public float retreatHealthFraction = 0.25f;
 }

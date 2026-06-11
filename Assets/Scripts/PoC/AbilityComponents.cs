@@ -11,11 +11,14 @@ using Unity.Mathematics;
 // ===========================================================================
 
 // Every modifiable thing. Numeric ones come first, behavior bools after.
+// NOTE: the behavior-flag entries were renamed in place (serialized indices
+// preserved) when the flag set was rebuilt — RE-CHECK any AbilityDefinition
+// assets that toggle behavior flags; the semantics shifted with the rename.
 public enum ModTarget : byte
 {
     Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield,   // numeric
-    FlagFormShieldWall, FlagStayBehindWall, FlagKiteEnemies,             // bool
-    FlagAdvanceToTarget, FlagHoldWhenDefensive, FlagIdleSpread,
+    FlagFormWall, FlagStandBehindFriend, FlagAvoidMelee,                 // bool
+    FlagAdvanceIndividual, FlagAdvanceOnEnemy, FlagSeparateIdle,
 }
 
 public enum ModMode : byte { Instant, PerSecond }
@@ -28,16 +31,16 @@ public enum AffectFilter : byte { Enemies, Allies, All }
 
 public static class AbilityUtil
 {
-    public static bool IsBool(ModTarget t) => t >= ModTarget.FlagFormShieldWall;
+    public static bool IsBool(ModTarget t) => t >= ModTarget.FlagFormWall;
 
     public static uint FlagBit(ModTarget t) => t switch
     {
-        ModTarget.FlagFormShieldWall   => (uint)BehaviorFlag.FormShieldWall,
-        ModTarget.FlagStayBehindWall   => (uint)BehaviorFlag.StayBehindWall,
-        ModTarget.FlagKiteEnemies      => (uint)BehaviorFlag.KiteEnemies,
-        ModTarget.FlagAdvanceToTarget  => (uint)BehaviorFlag.AdvanceToTarget,
-        ModTarget.FlagHoldWhenDefensive=> (uint)BehaviorFlag.HoldWhenDefensive,
-        ModTarget.FlagIdleSpread       => (uint)BehaviorFlag.IdleSpread,
+        ModTarget.FlagFormWall          => (uint)BehaviorFlag.FormWall,
+        ModTarget.FlagStandBehindFriend => (uint)BehaviorFlag.StandBehindFriend,
+        ModTarget.FlagAvoidMelee        => (uint)BehaviorFlag.AvoidMelee,
+        ModTarget.FlagAdvanceIndividual => (uint)BehaviorFlag.AdvanceIndividual,
+        ModTarget.FlagAdvanceOnEnemy    => (uint)BehaviorFlag.AdvanceOnEnemy,
+        ModTarget.FlagSeparateIdle      => (uint)BehaviorFlag.SeparateIdle,
         _ => 0u,
     };
 }
