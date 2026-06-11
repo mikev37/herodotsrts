@@ -23,7 +23,10 @@ using Unity.Transforms;
 //     and they SUM (consensus stacking) — formations form while advancing
 //     instead of competing for control:
 //       * Navigation: pursue (AttackNearby beyond weapon range), advance on
-//         target / enemy CoM, flank, body-block, stand-behind-friend.
+//         target / enemy CoM (gated by PursueDistance), flank, body-block,
+//         stand-behind-friend.
+//       * Lateral spread: push perpendicular to the enemy axis, away from
+//         friendly CoM projected laterally — widens the group into a line.
 //       * Formation (displacement-based consensus): each term is the summed
 //         neighbor displacement error  Σ (x_j + d*_ij − x_i)  toward desired
 //         offsets — cardinal lattice over ALL nearby friendlies, wall line,
@@ -34,9 +37,11 @@ using Unity.Transforms;
 //       * Spacing: separation push; spacing tightens to CombatSpacing when
 //         enemies are near, relaxes to IdleSpacing at rest.
 //
-//   FACING (independent channel, executed by steering): attacking -> face the
-//   target; else AlignFacing -> Vicsek facing consensus (own + neighbors);
-//   else the movement heading.
+//   FACING (independent channel, executed by steering):
+//     attacking         -> face the target (set by Attack())
+//     AlignFacing       -> Vicsek facing consensus, only when NOT moving
+//     moving            -> face the movement heading (set by Act())
+//     holding           -> no face written; steering keeps current facing
 // ===========================================================================
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
@@ -54,28 +59,29 @@ public partial struct BehaviorSystem : ISystem
 
         new BehaviorJob
         {
-            ArriveRadius = 3f,        // global: within this of an order target, the order is released
-            Lookahead = 4f,           // global: how far ahead the summed maneuver direction aims
-            SlotSoftRadius = 2f,      // global: formation errors fade inside this (consensus settles, no jitter)
-            HeightRangeBonus = 0.5f,  // global: extra ranged attack range per meter of height advantage
-            FlankDistance = 2.5f,     // global: how far behind the target a flanker aims
-            BodyBlockDistance = 2.5f, // global: how far in front of the enemy a blocker stands
-            WallForwardOffset = 4f,   // global: the wall line sits this far toward the enemy from friendly CoM
+            ArriveRadius      = 3f,    // global: within this of an order target, the order is released
+            Lookahead         = 4f,    // global: how far ahead the summed maneuver direction aims
+            SlotSoftRadius    = 2f,    // global: formation errors fade inside this (consensus settles, no jitter)
+            HeightRangeBonus  = 0.5f,  // global: extra ranged attack range per meter of height advantage
+            FlankDistance     = 2.5f,  // global: how far behind the target a flanker aims
+            BodyBlockDistance = 2.5f,  // global: how far in front of the enemy a blocker stands
+            WallForwardOffset = 4f,    // global: the wall line sits this far toward the enemy from friendly CoM
 
-            WeightOrder = 2.5f,       // global: order objective vs maneuver shaping while marching
-            WeightPursue = 2.0f,      // global: chase toward an in-aggression enemy
-            WeightAdvance = 1.0f,     // global: advance on target / enemy CoM
-            WeightFlank = 1.5f,       // global: flank slot pull
-            WeightBlock = 1.5f,       // global: body-block slot pull
-            WeightBehind = 1.2f,      // global: stand-behind-friend slot pull
-            WeightWall = 1.5f,        // global: wall-line consensus pull
-            WeightWedge = 1.2f,       // global: wedge slot pull
-            WeightCardinal = 1.0f,    // global: cardinal-lattice consensus pull
-            WeightAlignMove = 0.8f,   // global: Vicsek movement consensus
-            WeightSeparate = 1.0f,    // global: spacing push
+            WeightOrder       = 1.5f,  // global: order objective vs maneuver shaping while marching
+            WeightPursue      = 1.0f,  // global: chase toward an in-aggression enemy
+            WeightAdvance     = 1.0f,  // global: advance on target / enemy CoM
+            WeightFlank       = 1.5f,  // global: flank slot pull
+            WeightBlock       = 1.5f,  // global: body-block slot pull
+            WeightBehind      = 1.2f,  // global: stand-behind-friend slot pull
+            WeightWall        = 1.5f,  // global: wall-line consensus pull
+            WeightWedge       = 1.2f,  // global: wedge slot pull
+            WeightCardinal    = 1.0f,  // global: cardinal-lattice consensus pull
+            WeightAlignMove   = 0.8f,  // global: Vicsek movement consensus
+            WeightSeparate    = 1.0f,  // global: spacing push
+            WeightSpreadLat   = 1f,  // global: lateral spread perpendicular to enemy axis
 
             Passable = obstacles.Passable,
-            LosRange = 10,            // global: max cells to test LOS; farther -> just use the field
+            LosRange = 10,             // global: max cells to test LOS; farther -> just use the field
         }.ScheduleParallel();
     }
 
@@ -88,7 +94,7 @@ public partial struct BehaviorSystem : ISystem
         public float FlankDistance, BodyBlockDistance, WallForwardOffset;
         public float WeightOrder, WeightPursue, WeightAdvance, WeightFlank, WeightBlock,
                      WeightBehind, WeightWall, WeightWedge, WeightCardinal,
-                     WeightAlignMove, WeightSeparate;
+                     WeightAlignMove, WeightSeparate, WeightSpreadLat;
         public int LosRange;
 
         private void Execute(
@@ -115,21 +121,17 @@ public partial struct BehaviorSystem : ISystem
 
             status.IsAttacking = false;
 
-            // ---- target CHOICE (perception offers candidates; behavior decides) --
+            // ---- target choice: closest known enemy -------------------------
             target.Has = false;
-            if (perception.HasClosestEnemy &&
-                math.distance(position, perception.ClosestEnemy.Position) <= tuning.AttackNearbyRange)
+            if (perception.HasClosestEnemy)
             {
                 target.Info = perception.ClosestEnemy;
-                target.Has = true;
-            }
-            else if (perception.HasClosestEnemy)
-            {
-                target.Info = perception.ClosestEnemy;
-                target.Has = true;
+                target.Has  = true;
             }
 
-            float targetDist = target.Has ? math.distance(position, target.Info.Position) : float.MaxValue;
+            float targetDist = target.Has
+                ? math.distance(position, target.Info.Position)
+                : float.MaxValue;
             float2 enemyDir = target.Has
                 ? math.normalizesafe(target.Info.Position - position, new float2(0f, 1f))
                 : new float2(0f, 1f);
@@ -140,11 +142,6 @@ public partial struct BehaviorSystem : ISystem
 
             // Spacing tightens for battle, relaxes at rest.
             float spacing = perception.HasEnemies ? tuning.CombatSpacing : tuning.IdleSpacing;
-
-            // =================== TIER 2 — SURVIVAL (exclusive) ===================
-            // Checked before orders? No — orders are tier 1 and outrank survival
-            // EXCEPT committed engagement, which orders release into naturally.
-            // Survival here means: when it fires, the maneuver stack gets no vote.
 
             float healthFrac = health.Max > 0f ? health.Current / health.Max : 1f;
 
@@ -157,22 +154,15 @@ public partial struct BehaviorSystem : ISystem
                     float orderDist = math.distance(position, order.Value);
                     if (orderDist > ArriveRadius)
                     {
-                        if (!Los(position, order.Value))
-                        {
-                            // Far / occluded: pure flow routing; formations re-form on arrival.
-                            Act(ref dest, position, order.Value);
-                        }
-                        else
-                        {
-                            // Visible objective: the order leads, maneuver shapes the march.
-                            float2 objective = math.normalizesafe(order.Value - position) * WeightOrder;
-                            float2 shaped = objective + Maneuver(E, position, enemyDir, spacing,
-                                                                 in perception, in tuning, in friendlies,
-                                                                 target.Has, target.Info, targetDist, engageRange,
-                                                                 includeNavigation: false);
-                            Act(ref dest, position, position + math.normalizesafe(shaped) * Lookahead);
-                        }
-                        ResolveFacing(E, ref dest, myFacing, enemyDir, in perception);
+
+                        // the order leads, maneuver shapes the march.
+                        float2 objective = math.normalizesafe(order.Value - position) * WeightOrder;
+                        float2 shaped = objective + Maneuver(E, position, enemyDir, spacing,
+                                                                in perception, in tuning, in friendlies, myFacing,
+                                                                target.Has, target.Info, targetDist, engageRange,
+                                                                includeNavigation: false);
+                        Act(ref dest, position, position + math.normalizesafe(shaped) * Lookahead);
+                        
                         return;
                     }
                     order.HasTarget = false;   // arrived -> release
@@ -185,11 +175,10 @@ public partial struct BehaviorSystem : ISystem
                 {
                     float2 objective = enemyDir * WeightOrder;
                     float2 shaped = objective + Maneuver(E, position, enemyDir, spacing,
-                                                         in perception, in tuning, in friendlies,
+                                                         in perception, in tuning, in friendlies, myFacing,
                                                          target.Has, target.Info, targetDist, engageRange,
                                                          includeNavigation: false);
                     Act(ref dest, position, position + math.normalizesafe(shaped) * Lookahead);
-                    ResolveFacing(E, ref dest, myFacing, enemyDir, in perception);
                     return;
                 }
                 attackOrder.Has = false;   // in range (or lost) -> release into survival
@@ -201,7 +190,6 @@ public partial struct BehaviorSystem : ISystem
             {
                 float2 away = math.normalizesafe(position - perception.EnemyCenter, -enemyDir);
                 Act(ref dest, position, position + away * 8f);
-                ResolveFacing(E, ref dest, myFacing, enemyDir, in perception);
                 return;
             }
 
@@ -212,22 +200,28 @@ public partial struct BehaviorSystem : ISystem
                 {
                     float2 away = math.normalizesafe(position - perception.ClosestEnemy.Position, -enemyDir);
                     Act(ref dest, position, position + away * (tuning.AvoidMeleeRange - closestDist));
-                    ResolveFacing(E, ref dest, myFacing, enemyDir, in perception);
                     return;
                 }
             }
 
             if ((E & (uint)BehaviorFlag.AttackNearby) != 0 && target.Has &&
-                targetDist <= tuning.AttackNearbyRange && targetDist <= engageRange)
+                targetDist <= engageRange)
             {
+                //Attack
                 status.IsAttacking = true;
                 Attack(ref dest, position, target.Info.Position, enemyDir, ranged.IsRanged);
+                return;
+            } else if ((E & (uint)BehaviorFlag.AttackNearby) != 0 && target.Has && targetDist <= tuning.AttackNearbyRange) {
+                //Break formation and move towards enemy
+                // add once implemented status.isBlocking = true;
+                Act(ref dest, position, target.Info.Position);
+                //Attack(ref dest, position, target.Info.Position, enemyDir, ranged.IsRanged);
                 return;
             }
 
             // =================== TIER 3 — MANEUVER (consensus sum) ===============
             float2 summed = Maneuver(E, position, enemyDir, spacing,
-                                     in perception, in tuning, in friendlies,
+                                     in perception, in tuning, in friendlies, myFacing,
                                      target.Has, target.Info, targetDist, engageRange,
                                      includeNavigation: true);
 
@@ -236,7 +230,16 @@ public partial struct BehaviorSystem : ISystem
             else
                 Hold(ref dest);
 
-            ResolveFacing(E, ref dest, myFacing, enemyDir, in perception);
+            // AlignFacing: Vicsek facing consensus, only when the unit is holding.
+            // Moving units face their heading (set by Act()); attacking units face
+            // the enemy (set by Attack()); holding units with AlignFacing enabled
+            // gradually align with the group's facing direction.
+            if (!dest.Has && (E & (uint)BehaviorFlag.AlignFacing) != 0 &&
+                math.lengthsq(perception.FriendlyAvgFacing) > 1e-4f)
+            {
+                dest.Face = math.normalizesafe(myFacing + perception.FriendlyAvgFacing, myFacing);
+                dest.HasFace = true;
+            }
         }
 
         // The stacked maneuver vector. Every enabled term contributes; they SUM.
@@ -245,6 +248,7 @@ public partial struct BehaviorSystem : ISystem
         private float2 Maneuver(
             uint E, float2 position, float2 enemyDir, float spacing,
             in Perception perception, in UnitTuning tuning, in DynamicBuffer<FriendlyUnit> friendlies,
+            float2 myFacing,
             bool hasTarget, in UnitInfo target, float targetDist, float engageRange,
             bool includeNavigation)
         {
@@ -257,11 +261,18 @@ public partial struct BehaviorSystem : ISystem
                     targetDist <= tuning.AttackNearbyRange && targetDist > engageRange)
                     sum += enemyDir * WeightPursue;
 
-                if ((E & (uint)BehaviorFlag.AdvanceIndividual) != 0 && hasTarget)
+                // Advance: march toward the target or enemy CoM, but only within
+                // PursueDistance. Beyond that the unit holds and waits for the group.
+                if ((E & (uint)BehaviorFlag.AdvanceIndividual) != 0 && hasTarget &&
+                    targetDist <= tuning.PursueDistance)
                     sum += enemyDir * WeightAdvance;
 
                 if ((E & (uint)BehaviorFlag.AdvanceOnEnemy) != 0 && perception.HasEnemies)
-                    sum += math.normalizesafe(perception.EnemyCenter - position) * WeightAdvance;
+                {
+                    float distToCenter = math.distance(position, perception.EnemyCenter);
+                    if (distToCenter <= tuning.PursueDistance)
+                        sum += math.normalizesafe(perception.EnemyCenter - position) * WeightAdvance;
+                }
 
                 if ((E & (uint)BehaviorFlag.FlankTarget) != 0 && hasTarget)
                     sum += SlotPull(position, target.Position - target.Facing * FlankDistance) * WeightFlank;
@@ -279,6 +290,30 @@ public partial struct BehaviorSystem : ISystem
                         perception.EnemyCenter - perception.ClosestFriendly.Position, enemyDir);
                     sum += SlotPull(position, perception.ClosestFriendly.Position - threatDir * spacing)
                            * WeightBehind;
+                }
+
+                // SpreadLateral: push perpendicular to the enemy axis, away from
+                // the friendly center of mass projected onto that lateral axis.
+                // This widens the group horizontally while advancing — units on
+                // the left edge push further left, units on the right push right.
+                // Has no depth component so it doesn't fight the advance vector.
+                if ((E & (uint)BehaviorFlag.SpreadLateral) != 0 && (perception.HasEnemies || math.length(perception.FriendlyAvgVelocity) > 1)) //&&
+                {
+                    float2 forward;
+                    if (perception.HasEnemies) {
+                        forward = enemyDir;
+                        
+					} else {
+                        forward = math.normalizesafe(perception.FriendlyAvgFacing, myFacing);
+                    }
+                    float2 lateral = new float2(-forward.y, forward.x);
+                    float2 center = perception.HasFriendlies ? perception.FriendlyCenter : position;
+                    float myLateral = math.dot(position - center, lateral);
+                    // Push away from center along the lateral axis.
+                    // Magnitude proportional to how close to center (falls off as
+                    // the unit reaches its natural spacing from neighbors).
+                    float2 spreadDir = myLateral >= 0f ? lateral : -lateral;
+                    sum += spreadDir * WeightSpreadLat;
                 }
             }
 
@@ -307,27 +342,91 @@ public partial struct BehaviorSystem : ISystem
             // Cardinal lattice as TRUE consensus: sum the displacement error
             // toward the nearest 90-degree slot of EVERY nearby friendly, in each
             // friendly's facing frame:  Σ_j (x_j + d*_ij − x_i) / n.
-            if ((E & (uint)BehaviorFlag.AlignCardinal) != 0 && friendlies.Length > 0)
-            {
-                float2 error = float2.zero; int counted = 0;
-                for (int i = 0; i < friendlies.Length; i++)
-                {
+            if ((E & (uint)BehaviorFlag.AlignCardinal) != 0 && friendlies.Length > 0) {
+                NativeList<SlotCandidate> candidates = new NativeList<SlotCandidate>(Allocator.Temp);
+
+                // --- 1. Generate all candidate slots ---
+                for (int i = 0; i < friendlies.Length; i++) {
                     UnitInfo ally = friendlies[i].Info;
+
                     float2 f = math.normalizesafe(ally.Facing, new float2(0f, 1f));
                     float2 r = new float2(f.y, -f.x);
-                    float2 best = default; float bestDist = float.MaxValue;
-                    for (int k = 0; k < 4; k++)
-                    {
+
+                    for (int k = 0; k < 4; k++) {
                         float2 axis = k == 0 ? f : k == 1 ? r : k == 2 ? -f : -r;
                         float2 slot = ally.Position + axis * spacing;
-                        float d = math.distancesq(position, slot);
-                        if (d < bestDist) { bestDist = d; best = slot; }
+
+                        // --- 2. Merge overlapping slots ---
+                        bool merged = false;
+                        for (int c = 0; c < candidates.Length; c++) {
+                            if (math.distancesq(candidates[c].position, slot) < (spacing * spacing * 0.25f)) {
+                                // Merge INTO FIRST position (not average)
+                                SlotCandidate existing = candidates[c];
+                                existing.count += 1;
+                                existing.score += 1f; // boost weight
+                                candidates[c] = existing;
+
+                                merged = true;
+                                break;
+                            }
+                        }
+
+                        if (!merged) {
+                            candidates.Add(new SlotCandidate {
+                                position = slot,
+                                score = 1f,
+                                count = 1
+                            });
+                        }
                     }
-                    error += best - position;
-                    counted++;
                 }
-                if (counted > 0)
-                    sum += Cap(error / counted) * WeightCardinal;
+
+                // --- 3. Mark taken positions ---
+                for (int c = 0; c < candidates.Length; c++) {
+                    bool taken = false;
+
+                    for (int i = 0; i < friendlies.Length; i++) {
+                        float2 allyPos = friendlies[i].Info.Position;
+
+                        if (math.distancesq(allyPos, candidates[c].position) < (spacing * spacing * 0.25f)) {
+                            taken = true;
+                            break;
+                        }
+                    }
+
+                    if (taken) {
+                        SlotCandidate sc = candidates[c];
+                        sc.score = -1000f; // invalidate
+                        candidates[c] = sc;
+                    }
+                }
+
+                // --- 4. Add distance preference + pick best ---
+                float bestScore = float.MinValue;
+                float2 bestPos = position;
+
+                for (int c = 0; c < candidates.Length; c++) {
+                    SlotCandidate sc = candidates[c];
+
+                    if (sc.score < 0f)
+                        continue;
+
+                    float dist = math.distance(position, sc.position);
+
+                    // Prefer closer slots, but still respect merge weight
+                    float finalScore = sc.score * 10f - dist;
+
+                    if (finalScore > bestScore) {
+                        bestScore = finalScore;
+                        bestPos = sc.position;
+                    }
+                }
+
+                // Apply steering toward chosen slot
+                float2 desired = bestPos - position;
+                sum += Cap(desired) * WeightCardinal;
+
+                candidates.Dispose();
             }
 
             // ---- Vicsek movement consensus ---------------------------------------
@@ -335,7 +434,7 @@ public partial struct BehaviorSystem : ISystem
                 math.lengthsq(perception.FriendlyAvgVelocity) > 0.05f)
                 sum += math.normalizesafe(perception.FriendlyAvgVelocity) * WeightAlignMove;
 
-            // ---- Spacing ----------------------------------------------------------
+            // ---- Spacing ---------------------------------------------------------
             bool separate =
                 (E & (uint)BehaviorFlag.Separate) != 0 ||
                 ((E & (uint)BehaviorFlag.SeparateIdle) != 0 && !perception.HasEnemies);
@@ -372,26 +471,6 @@ public partial struct BehaviorSystem : ISystem
             return len > 1f ? v / len : v;
         }
 
-        // Facing: attacking -> the target; else AlignFacing -> Vicsek consensus
-        // over my own facing plus neighbors'; else unset (steering uses heading).
-// ResolveFacing: optionally overrides the movement-heading face that Act()
-        // already set, when formation consensus wants a different facing.
-        // Only touches dest.Face when AlignFacing is on — Act()'s heading-face
-        // is the correct default and is deliberately left in place otherwise.
-        private static void ResolveFacing(uint E, ref DesiredDestination dest,
-                                          float2 myFacing, float2 enemyDir,
-                                          in Perception perception)
-        {
-            /*
-            if ((E & (uint)BehaviorFlag.AlignFacing) != 0 &&
-                math.lengthsq(perception.FriendlyAvgFacing) > 1e-4f &&
-                !dest.Has)   // don't override an explicit face (order target, enemy, etc.)
-            {
-                dest.Face = math.normalizesafe(myFacing + perception.FriendlyAvgFacing, myFacing);
-                dest.HasFace = true;
-            }*/
-        }
-
         // The closest friendly AHEAD of me toward the enemy (wedge leader).
         private static bool TryClosestAhead(float2 position, float2 enemyDir,
                                             in DynamicBuffer<FriendlyUnit> friendlies, out UnitInfo leader)
@@ -416,18 +495,20 @@ public partial struct BehaviorSystem : ISystem
 
         // Act: move to value, face the direction of travel.
         // UseFlowField is derived from LoS — if the destination isn't directly
-        // visible, route through the flow field. Never pass useFlow manually;
-        // the answer is always "can I see it?".
+        // visible, route through the flow field.
         private void Act(ref DesiredDestination d, float2 position, float2 value)
         {
             d.Value = value; d.Has = true; d.UseFlowField = !Los(position, value);
+            float2 heading = math.normalizesafe(value - position, float2.zero);
+            if (math.lengthsq(heading) > 1e-4f) { d.Face = heading; d.HasFace = true; }
+            else d.HasFace = false;
         }
 
-        // Hold: no movement; steering keeps current facing.
+        // Hold: no movement, no facing change. Steering keeps the current
+        // rotation — the unit has already settled and shouldn't keep turning.
         private static void Hold(ref DesiredDestination d)
         {
-            d.Has = false; d.UseFlowField = false;
-            d.HasFace = false;
+            d.Has = false; d.UseFlowField = false; d.HasFace = false;
         }
 
         // Attack: the unit is committed to fighting its target.
@@ -449,4 +530,9 @@ public partial struct BehaviorSystem : ISystem
             d.Face = enemyDir; d.HasFace = true;
         }
     }
+}
+struct SlotCandidate {
+    public float2 position;
+    public float score;
+    public int count; // how many overlaps merged into this
 }

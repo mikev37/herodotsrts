@@ -31,6 +31,7 @@ public enum BehaviorFlag : uint
     AlignMovement     = 1u << 12,  // move with the friendly movement consensus
     Separate          = 1u << 13,  // push apart from crowded allies (always)
     SeparateIdle      = 1u << 14,  // push apart from crowded allies (only with no enemies near)
+    SpreadLateral     = 1u << 15,  // spread perpendicular to the enemy axis while advancing
 }
 
 public struct BehaviorFlags : IComponentData
@@ -70,6 +71,7 @@ public struct UnitTuning : IComponentData
     public float AttackNearbyRange;   // aggression radius for AttackNearby
     public float AvoidMeleeRange;     // back-off radius for AvoidMelee
     public float RetreatHealthPct;    // RetreatLowHealth triggers below Current/Max
+    public float PursueDistance;      // AdvanceIndividual/AdvanceOnEnemy contribute only within this range
 }
 
 // Unified attack: ONE countdown->act->cooldown timer for both melee and ranged.

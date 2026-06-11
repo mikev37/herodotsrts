@@ -18,14 +18,14 @@ public struct MoveTarget : IComponentData
 // Accumulated velocity for this frame, integrated by the steering system.
 public struct Velocity : IComponentData
 {
-    public float2 Value;
-    public float2 desiredValue;
-	public float2 faceDir;
+    public float2 Value;        // actual velocity this frame (back-calculated from step taken)
+    public float2 desiredValue; // acceleration-ramped locomotion; bled down when blocked
+    public float2 faceDir;      // smoothed facing direction; used by steering for turn input
 }
 
 public struct Speed : IComponentData
 {
-    public float Value;    // units / second
+    public float Value;    // units / second (top speed)
 }
 
 // Used by separation (body-blocking push) and neighbor queries.
@@ -80,7 +80,6 @@ public struct CombatStatus : IComponentData
 {
     public bool InContactWithEnemy;
     public bool IsAttacking;      // behavior holds position and commits to attacking its target
-    public bool IsBlocking;       // shield unit facing an enemy
 }
 
 // Marks a unit as dead: movement/combat stop, the view plays Die, then the
@@ -107,6 +106,7 @@ public struct Ranged : IComponentData
 // selections). Toggling the enabled bit moves nothing. Queries filter on the
 // bit automatically; raw HasComponent does NOT (use IsComponentEnabled).
 public struct Selected : IComponentData, IEnableableComponent { }
+
 // ---------------------------------------------------------------------------
 // Spatial hash singleton. One map per frame, shared by every system that
 // needs neighbor lookups. THIS is the core of scaling to thousands of units:

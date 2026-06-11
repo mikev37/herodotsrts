@@ -19,26 +19,21 @@ MonoBehaviour:
   mass: 1
   turnSpeed: 6
   separationStrength: 8
-  meleeRange: 3
-  wallSpacing: 1.3
-  spreadRadius: 5
-  spreadStrength: 2
+  combatSpacing: 1.3
+  idleSpacing: 2.2
   maxHealth: 100
   deathAnimSeconds: 2
   armor: 10
   shield: 0
-  meleeAttackInterval: 1
-  meleeChargeUpSeconds: 0.3
+  attackInterval: 0.75
+  attackCooldown: 0.25
+  attackDamage: 20
   meleeCleave: 0
-  meleeAttackDamage: 25
   meleeStrikeArc: 2
+  meleeRange: 3
   isRanged: 0
   projectile: {fileID: 0}
-  kiteRadius: 6
   attackRange: 10
-  attackInterval: 1.2
-  rangedChargeUpSeconds: 0.5
-  attackDamage: 18
   isHero: 0
   abilities:
   - {fileID: 0}
@@ -51,15 +46,17 @@ MonoBehaviour:
   formWall: 1
   standBehindFriend: 1
   advanceOnEnemy: 1
-  advanceIndividual: 1
+  advanceIndividual: 0
   avoidMelee: 0
   retreatLowHealth: 1
   formWedge: 0
   alignCardinal: 1
   alignFacing: 1
-  alignMovement: 1
+  alignMovement: 0
   separate: 0
   separateIdle: 1
-  attackNearbyRange: 18
-  avoidMeleeRange: 6
+  spreadLateral: 1
+  attackNearbyRange: 6
+  avoidMeleeRange: 8
   retreatHealthFraction: 0.25
+  pursueDistance: 40

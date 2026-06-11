@@ -115,7 +115,6 @@ public class UnitManager : MonoBehaviour
         }
         _archetype = archetype;
 
-        
         float spacing = 2;
         for (int team = 0; team < teamCount; team++) {
             float teamSign = team == 0 ? -1f : 1f;
@@ -140,38 +139,39 @@ public class UnitManager : MonoBehaviour
                     int col = i / ranks;
                     int rank = i % ranks;
                     float x = xCursor + col * spacing;
-                    float z = zFront + teamSign * (sofarranks+ rank) * spacing;   // extra ranks recede toward own side
-                    // Spawn at terrain height (Steering snaps to slope.Height every
-                    // tick anyway, but spawning at 0 made units pop on the first tick).
+                    float z = zFront + teamSign * (sofarranks + rank) * spacing;
                     float y = hasTerrain ? NavTerrain.SampleHeight(terrainField, new float2(x, z)) : 0f;
                     SpawnUnit(def, id, team, new float3(x, y, z));
                 }
-                sofarranks+=ranks+1;
+                sofarranks += ranks + 1;
             }
         }
     }
+
     private int _nextStableId;
+
     // Creates one fully-configured unit entity. Heroes are just units that also
     // get a HeroTag + HeroAura — no special movement/combat path.
     public Entity SpawnUnit(UnitDefinition def, int defId, int team, float3 pos)
     {
         var e = _em.CreateEntity(_archetype);
-        _em.SetComponentData(e, new StableId { Value = _nextStableId++ });   // deterministic identity
-        _em.SetComponentEnabled<Selected>(e, false);                          // archetype components start enabled
+        _em.SetComponentData(e, new StableId { Value = _nextStableId++ });
+        _em.SetComponentEnabled<Selected>(e, false);
         _em.SetComponentData(e, LocalTransform.FromPosition(pos));
         _em.SetComponentData(e, new Team { Value = team });
         _em.SetComponentData(e, new UnitDefId { Value = defId });
         _em.SetComponentData(e, new BehaviorFlags { Value = PackFlags(def) });
         _em.SetComponentData(e, new UnitTuning
         {
-            TurnSpeed = def.turnSpeed,
+            TurnSpeed          = def.turnSpeed,
             SeparationStrength = def.separationStrength,
-            MeleeRange = def.meleeRange,
-            CombatSpacing = def.combatSpacing,
-            IdleSpacing = def.idleSpacing,
-            AttackNearbyRange = def.attackNearbyRange,
-            AvoidMeleeRange = def.avoidMeleeRange,
-            RetreatHealthPct = def.retreatHealthFraction,
+            MeleeRange         = def.meleeRange,
+            CombatSpacing      = def.combatSpacing,
+            IdleSpacing        = def.idleSpacing,
+            AttackNearbyRange  = def.attackNearbyRange,
+            AvoidMeleeRange    = def.avoidMeleeRange,
+            RetreatHealthPct   = def.retreatHealthFraction,
+            PursueDistance     = def.pursueDistance,
         });
         _em.SetComponentData(e, BuildAttack(def));
         _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = def.shield });
@@ -185,28 +185,25 @@ public class UnitManager : MonoBehaviour
         _em.SetComponentData(e, new UnitAnim { State = AnimState.Idle });
         _em.SetComponentData(e, new BaseStats
         {
-            Speed = def.speed,
-            TurnSpeed = def.turnSpeed,
-            MeleeRange = def.meleeRange,
+            Speed        = def.speed,
+            TurnSpeed    = def.turnSpeed,
+            MeleeRange   = def.meleeRange,
             AttackDamage = def.attackDamage,
-            Armor = def.armor,
-            Shield = def.shield,
+            Armor        = def.armor,
+            Shield       = def.shield,
         });
         // BehaviorOverride / MoveTarget / AttackOrder / CombatTarget /
         // DesiredDestination default to zero (Has=false) — fine.
 
         if (def.isHero)
-            _em.AddComponent<HeroTag>(e);   // abilities are cast at the hero via the ability system
+            _em.AddComponent<HeroTag>(e);
 
-        // Ability slots: register each AbilityDefinition with the AbilityManager
-        // (idempotent; roster order => deterministic ids) and store the ids.
         var slots = new AbilitySlots { Ids = new int4(-1, -1, -1, -1) };
         if (def.abilities != null && AbilityManager.Instance != null)
             for (int s = 0; s < 4 && s < def.abilities.Length; s++)
                 slots.Ids[s] = AbilityManager.Instance.Register(def.abilities[s]);
         _em.AddComponentData(e, slots);
         _em.AddComponentData(e, new AbilityCooldowns { ReadyTick = uint4.zero });
-
 
         spawnedCount++;
         return e;
@@ -234,8 +231,10 @@ public class UnitManager : MonoBehaviour
         if (d.alignMovement)      f |= (uint)BehaviorFlag.AlignMovement;
         if (d.separate)           f |= (uint)BehaviorFlag.Separate;
         if (d.separateIdle)       f |= (uint)BehaviorFlag.SeparateIdle;
+        if (d.spreadLateral)      f |= (uint)BehaviorFlag.SpreadLateral;
         return f;
     }
+
     private Color TeamColor(int team)
         => (teamColors != null && team >= 0 && team < teamColors.Length) ? teamColors[team] : Color.white;
 
@@ -259,37 +258,37 @@ public class UnitManager : MonoBehaviour
     {
         var a = new Attack
         {
-            ArcDot = Mathf.Cos(Mathf.Deg2Rad * def.meleeStrikeArc * 0.5f),
-            Cleave = def.meleeCleave,
-            Phase = AttackPhase.Ready,
-            isRange = def.isRanged,
-            Timer = 0f,
-            Pulse = 0f,
+            ArcDot      = Mathf.Cos(Mathf.Deg2Rad * def.meleeStrikeArc * 0.5f),
+            Cleave      = def.meleeCleave,
+            Phase       = AttackPhase.Ready,
+            isRange     = def.isRanged,
+            Timer       = 0f,
+            Pulse       = 0f,
             ProjectileId = -1,
         };
         if (def.isRanged)
         {
-            a.Range = def.attackRange;
+            a.Range    = def.attackRange;
             a.ChargeUp = def.attackInterval;
             a.Cooldown = def.attackCooldown;
-            a.Damage = def.attackDamage;
+            a.Damage   = def.attackDamage;
             var pd = def.projectile;
             if (pd != null)
             {
-                a.ProjectileId = ResolveProjectileId(pd);
-                a.ProjSpeed = pd.speed;
-                a.ProjRise = pd.riseHeight;
-                a.ProjLaunchHeight = pd.launchHeight;
-                a.ProjHitRadius = pd.hitRadius;
+                a.ProjectileId       = ResolveProjectileId(pd);
+                a.ProjSpeed          = pd.speed;
+                a.ProjRise           = pd.riseHeight;
+                a.ProjLaunchHeight   = pd.launchHeight;
+                a.ProjHitRadius      = pd.hitRadius;
                 a.ProjCollisionHeight = pd.collisionHeight;
             }
         }
         else
         {
-            a.Range = def.meleeRange;
+            a.Range    = def.meleeRange;
             a.ChargeUp = def.attackInterval;
             a.Cooldown = def.attackCooldown;
-            a.Damage = def.attackDamage;
+            a.Damage   = def.attackDamage;
         }
         return a;
     }
@@ -316,13 +315,12 @@ public class UnitManager : MonoBehaviour
         for (int i = 0; i < entities.Length; i++)
         {
             var e = entities[i];
-           
             alive.Add(e);
             if (!_views.TryGetValue(e, out var view))
             {
-                view = Acquire(teams[i].Value,ids[i].Value);
+                view = Acquire(teams[i].Value, ids[i].Value);
                 if (view == null) continue;
-                view.SetTeamColor(TeamColor(teams[i].Value));   // tint on (re)assignment
+                view.SetTeamColor(TeamColor(teams[i].Value));
                 _views[e] = view;
             }
             var t = view.transform;

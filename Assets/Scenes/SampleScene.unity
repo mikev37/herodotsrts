@@ -770,15 +770,11 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   teamone:
-  - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
+  - definition: {fileID: 11400000, guid: 0ba2a2468c7e07246bf7077fcf8c459e, type: 2}
     countPerTeam: 20
-  - definition: {fileID: 11400000, guid: 59640ea508dd8f04189d49b828763818, type: 2}
-    countPerTeam: 1
   teamtwo:
-  - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
-    countPerTeam: 0
   - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 20
+    countPerTeam: 0
   teamCount: 2
   fieldSize: 80
   teamColors:

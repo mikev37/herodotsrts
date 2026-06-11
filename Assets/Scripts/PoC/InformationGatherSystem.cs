@@ -66,6 +66,7 @@ public partial struct InformationGatherSystem : ISystem {
             Entity self,
             in LocalTransform xform,
             in Team team,
+            in UnitTuning meUnit,
             in Attack myAttack,
             in Defense myDefense,
             ref Perception perception,
@@ -107,7 +108,7 @@ public partial struct InformationGatherSystem : ISystem {
                             contacts.Add(neighbor);
 
                         if (neighbor.Team != team.Value) {
-                            if (effectiveDist > LosRange && !myAttack.isRange)
+                            if (effectiveDist > meUnit.PursueDistance && !myAttack.isRange)
                                 continue;
                             enemies.Add(neighbor);
                             if (Better(effectiveDist, neighbor.StableId, closestEnemyDist, closestEnemyId)) {

@@ -10,7 +10,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fabe54d3493da3645874e32c38b40900, type: 3}
-  m_Name: Shield
+  m_Name: TestUnit
   m_EditorClassIdentifier: Assembly-CSharp::UnitDefinition
   displayName: ManAtArms
   viewPrefab: {fileID: 5344603145670373808, guid: 5f92dacc65c035343b96ae93aaa7d1a0, type: 3}
@@ -40,21 +40,21 @@ MonoBehaviour:
   - {fileID: 0}
   - {fileID: 0}
   - {fileID: 0}
-  attackNearby: 1
+  attackNearby: 0
   flankTarget: 0
-  bodyBlock: 1
-  formWall: 1
+  bodyBlock: 0
+  formWall: 0
   standBehindFriend: 0
-  advanceOnEnemy: 1
+  advanceOnEnemy: 0
   advanceIndividual: 0
   avoidMelee: 0
-  retreatLowHealth: 1
+  retreatLowHealth: 0
   formWedge: 0
   alignCardinal: 1
   alignFacing: 1
   alignMovement: 0
   separate: 0
-  separateIdle: 1
+  separateIdle: 0
   spreadLateral: 1
   attackNearbyRange: 6
   avoidMeleeRange: 8

@@ -106,6 +106,8 @@ public class UnitDefinition : ScriptableObject
     public bool separate = false;
     [Tooltip("Push apart from crowded allies only when no enemies are near.")]
     public bool separateIdle = false;
+    [Tooltip("Spread perpendicular to the enemy axis while advancing — widens the group into a line.")]
+    public bool spreadLateral = false;
 
     [Header("Behavior ranges")]
     [Tooltip("AttackNearby aggression radius.")]
@@ -114,4 +116,7 @@ public class UnitDefinition : ScriptableObject
     public float avoidMeleeRange = 6f;
     [Tooltip("RetreatLowHealth triggers below this health fraction.")]
     [Range(0f, 1f)] public float retreatHealthFraction = 0.25f;
+    [Tooltip("AdvanceIndividual and AdvanceOnEnemy only contribute within this distance of the enemy. " +
+             "Beyond it the unit holds and waits for the group to close together.")]
+    public float pursueDistance = 40f;
 }
