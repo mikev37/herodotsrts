@@ -10,7 +10,7 @@ using Unity.Entities;
 // polymorphic behavior objects, so a flag bitmask is the data-driven stand-in.)
 [Flags]
 // Composable behavior primitives. A unit archetype is just a SET of these —
-// e.g. a shield-waller is AttackNearby | FormWall | AlignFacing | AlignCardinal
+// e.g. a shield-waller is AttackNearby | FormWall | AlignCardinal
 // | AdvanceOnEnemy. Priority between active flags is the guarded-chain order in
 // BehaviorSystem (top of that file documents it).
 public enum BehaviorFlag : uint
@@ -27,7 +27,6 @@ public enum BehaviorFlag : uint
     RetreatLowHealth  = 1u << 8,   // health below fraction -> flee the enemy CoM
     FormWedge         = 1u << 9,   // slot in behind-and-beside the friendly ahead
     AlignCardinal     = 1u << 10,  // snap to 90-degree slots around the closest friendly's facing
-    AlignFacing       = 1u << 11,  // face the friendly facing consensus
     AlignMovement     = 1u << 12,  // move with the friendly movement consensus
     Separate          = 1u << 13,  // push apart from crowded allies (always)
     SeparateIdle      = 1u << 14,  // push apart from crowded allies (only with no enemies near)

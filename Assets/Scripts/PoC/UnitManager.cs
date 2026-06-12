@@ -121,7 +121,7 @@ public class UnitManager : MonoBehaviour
             float zFront = teamSign * (fieldSize * 0.25f);
             int sofarranks = 0;
             for (int id = 0; id < roster[team].Count; id++) {
-                int ranks = roster[team].Count/50+1;
+                int ranks = roster[team][id].countPerTeam/50+1;
                 float xCursor = -fieldSize * 0.4f;
                 var def = roster[team][id].definition;
                 if (def == null) {
@@ -227,7 +227,6 @@ public class UnitManager : MonoBehaviour
         if (d.retreatLowHealth)   f |= (uint)BehaviorFlag.RetreatLowHealth;
         if (d.formWedge)          f |= (uint)BehaviorFlag.FormWedge;
         if (d.alignCardinal)      f |= (uint)BehaviorFlag.AlignCardinal;
-        if (d.alignFacing)        f |= (uint)BehaviorFlag.AlignFacing;
         if (d.alignMovement)      f |= (uint)BehaviorFlag.AlignMovement;
         if (d.separate)           f |= (uint)BehaviorFlag.Separate;
         if (d.separateIdle)       f |= (uint)BehaviorFlag.SeparateIdle;

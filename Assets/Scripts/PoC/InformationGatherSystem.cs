@@ -44,11 +44,11 @@ public partial struct InformationGatherSystem : ISystem {
             CellSize = hash.CellSize,
             Passable = SystemAPI.GetSingleton<ObstacleField>().Passable,
             SearchCells = 4,            // global: how many hash cells out to perceive
-            ContactRadius = 6f,         // global: neighbors within this go into the ContactList
+            ContactRadius = 40f,         // global: neighbors within this go into the ContactList
             FriendlyRadius = 14f,       // global: friendlies within this go into the FriendlyUnit buffer
             OutlierFactor = 1.75f,      // global: CoM pass 2 drops units beyond mean dist * this
             ClusterRadius = 14f,        // global: trimmed mean spread above this -> "spread apart"
-            LosRange = 20,              // global: max cells for LoS check
+            LosRange = 10,              // global: max cells for LoS check
             NoLosMultiplier = 10f,       // global: effective distance penalty for enemies without LoS
         }.ScheduleParallel();
     }

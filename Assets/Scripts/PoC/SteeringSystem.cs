@@ -20,9 +20,9 @@ using Unity.Transforms;
 //      forces (separation, obstacle repulsion) are instantaneous — they affect
 //      position but do not modify vel.desiredValue. vel.Value is back-calculated
 //      from the step taken, so ContactCombat's closing-speed math stays correct.
-//   5. Facing: behavior DECIDES facing (dest.HasFace); steering only executes
-//      it at the turn rate via a smoothed vel.faceDir. When holding (dest.Has
-//      and dest.HasFace are both false), no turn is applied — the unit settles.
+//   5. Facing, three rules: attacking -> face the enemy (explicit dest.Face);
+//      moving at speed -> face the movement direction; otherwise -> no turn,
+//      facing holds where it is. One rate limiter (TurnSpeed rad/s).
 // ===========================================================================
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
@@ -47,6 +47,7 @@ public partial struct SteeringSystem : ISystem
             Dt               = SystemAPI.Time.DeltaTime,
             ObstacleStrength = 14f,   // global: repulsion from blocked cells
             ArriveRadius     = 0.4f,  // global: stop distance when seeking
+            FaceMinSpeed     = 0.3f,  // global: below this locomotion speed, movement doesn't drive facing
             PathMap          = lookup.Map,
             CoarseCost       = nf.CoarseCost,
             BlockOf          = nf.BlockOf,
@@ -60,7 +61,7 @@ public partial struct SteeringSystem : ISystem
     [WithNone(typeof(Dead))]
     private partial struct SteerJob : IJobEntity
     {
-        public float Dt, ObstacleStrength, ArriveRadius;
+        public float Dt, ObstacleStrength, ArriveRadius, FaceMinSpeed;
         [ReadOnly] public NativeParallelHashMap<int, int> PathMap;
         [ReadOnly] public NativeArray<int> CoarseCost;
         [ReadOnly] public NativeArray<int> BlockOf;
@@ -185,27 +186,23 @@ public partial struct SteeringSystem : ISystem
             xform.Position = new float3(xform.Position.x + step.x, slope.Height, xform.Position.z + step.y);
 
             // --- 5. Facing ---------------------------------------------------
-            // Behavior decides facing (dest.HasFace); steering only executes it.
-            // Priority: explicit face from behavior > movement heading.
-            // When holding (neither dest.Has nor dest.HasFace), skip the turn
-            // entirely — the unit has settled and shouldn't keep rotating.
-            // The fallback uses vel.desiredValue (the smooth locomotion vector),
-            // not desired (which includes noisy separation/repulsion forces).
-            if ((!dest.Has && !dest.HasFace) || math.lengthsq(vel.desiredValue) < .1)
-                return;   // holding — no turn
-
+            // Three rules, in priority order:
+            //   attacking       -> face the enemy (behavior wrote dest.Face)
+            //   moving at speed -> face the movement direction (smooth
+            //                      desiredValue, not the noisy force sum)
+            //   otherwise       -> no turn at all; facing holds where it is
+            // The speed gate applies only to movement-facing — an explicit
+            // Face (planted ranged unit) turns even while standing still.
             float2 faceDir;
             if (dest.HasFace)
                 faceDir = dest.Face;
+            else if (dest.Has && math.lengthsq(vel.desiredValue) > FaceMinSpeed * FaceMinSpeed)
+                faceDir = math.normalizesafe(vel.desiredValue);
             else
-                faceDir = math.normalizesafe(vel.desiredValue);   // movement heading, noise-free
+                return;   // minute adjustment / holding — facing stays put
 
-            if (math.lengthsq(faceDir) < 1e-4f)
-                return;
-
-            vel.faceDir = math.normalizesafe(math.lerp(vel.faceDir, faceDir, tuning.TurnSpeed * Dt));
             quaternion want = quaternion.LookRotationSafe(
-                new float3(vel.faceDir.x, 0f, vel.faceDir.y), math.up());
+                new float3(faceDir.x, 0f, faceDir.y), math.up());
             xform.Rotation = TurnToward(xform.Rotation, want, tuning.TurnSpeed * Dt);
         }
 

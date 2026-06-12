@@ -98,8 +98,6 @@ public class UnitDefinition : ScriptableObject
     public bool formWedge = false;
     [Tooltip("Snap to 90-degree slots around the closest friendly, in their facing frame.")]
     public bool alignCardinal = false;
-    [Tooltip("Face the friendly facing consensus when not attacking.")]
-    public bool alignFacing = false;
     [Tooltip("Move with the friendly movement consensus when nothing else applies.")]
     public bool alignMovement = false;
     [Tooltip("Push apart from crowded allies at all times.")]

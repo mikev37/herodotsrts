@@ -771,12 +771,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   teamone:
   - definition: {fileID: 11400000, guid: 0ba2a2468c7e07246bf7077fcf8c459e, type: 2}
-    countPerTeam: 20
+    countPerTeam: 300
   teamtwo:
   - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 0
+    countPerTeam: 300
   teamCount: 2
-  fieldSize: 80
+  fieldSize: 60
   teamColors:
   - {r: 0.3, g: 0.55, b: 1, a: 1}
   - {r: 1, g: 0.4, b: 0.3, a: 1}

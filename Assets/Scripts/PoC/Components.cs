@@ -20,7 +20,6 @@ public struct Velocity : IComponentData
 {
     public float2 Value;        // actual velocity this frame (back-calculated from step taken)
     public float2 desiredValue; // acceleration-ramped locomotion; bled down when blocked
-    public float2 faceDir;      // smoothed facing direction; used by steering for turn input
 }
 
 public struct Speed : IComponentData
