@@ -92,8 +92,10 @@ public class UnitDefinition : ScriptableObject
     public bool bodyBlock = false;
     [Tooltip("Hold the line between the friendly and enemy centers of mass.")]
     public bool formWall = false;
-    [Tooltip("Tuck behind the closest friendly, relative to the enemy center of mass.")]
+    [Tooltip("Fill the nearest open slot behind a formation friendly (group-forward direction).")]
     public bool standBehindFriend = false;
+    [Tooltip("Fill the nearest open slot in front of a formation friendly (group-forward direction).")]
+    public bool standFrontline = false;
     [Tooltip("March toward the enemy center of mass.")]
     public bool advanceOnEnemy = false;
     [Tooltip("March toward the chosen target.")]
@@ -106,8 +108,6 @@ public class UnitDefinition : ScriptableObject
     public bool formWedge = false;
     [Tooltip("Snap to 90-degree slots around the closest friendly, in their facing frame.")]
     public bool alignCardinal = false;
-    [Tooltip("Face the friendly facing consensus when not attacking.")]
-    public bool alignFacing = false;
     [Tooltip("Move with the friendly movement consensus when nothing else applies.")]
     public bool alignMovement = false;
     [Tooltip("Push apart from crowded allies at all times.")]
@@ -116,6 +116,10 @@ public class UnitDefinition : ScriptableObject
     public bool separateIdle = false;
     [Tooltip("Push apart into a rough line")]
     public bool separateLateral = false;
+    [Tooltip("Pull toward the friendly center of mass when farther than Cohesion Radius.")]
+    public bool groupCohesion = false;
+    [Tooltip("Move with nearby friendlies that have an active target (ignores idle units).")]
+    public bool followMoving = false;
 
     [Header("Behavior ranges")]
     [Tooltip("Break formation and attack range")]
@@ -126,5 +130,7 @@ public class UnitDefinition : ScriptableObject
     [Range(0f, 1f)] public float retreatHealthFraction = 0.25f;
     [Tooltip("Engage the enemy range")]
     public float pursueDistance = 40;
-    
+    [Tooltip("GroupCohesion pulls toward the friendly center of mass when the unit is beyond this distance from it.")]
+    public float cohesionRadius = 20f;
+
 }

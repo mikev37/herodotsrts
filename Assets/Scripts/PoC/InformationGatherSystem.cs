@@ -94,7 +94,8 @@ public partial struct InformationGatherSystem : ISystem {
             float dangerDist = float.MaxValue, exposureDist = float.MaxValue;
             int closestEnemyId = int.MaxValue, closestFriendId = int.MaxValue;
             int dangerId = int.MaxValue, exposureId = int.MaxValue;
-            float2 avgFacing = float2.zero, avgVelocity = float2.zero;
+            float2 avgFacing = float2.zero, avgVelocity = float2.zero, movingVelocity = float2.zero;
+            int movingCount = 0;
 
             for (int offsetY = -SearchCells; offsetY <= SearchCells; offsetY++)
                 for (int offsetX = -SearchCells; offsetX <= SearchCells; offsetX++) {
@@ -147,10 +148,18 @@ public partial struct InformationGatherSystem : ISystem {
                                 continue;
                             allies.Add(neighbor);
 
-                            if (distance <= FriendlyRadius) {
+                            // Formation neighborhood is MOBILE units only: a
+                            // building must not anchor lattice/wedge/rank slots
+                            // or drag the movement/facing consensus to zero.
+                            if (distance <= FriendlyRadius && !neighbor.IsBuilding) {
                                 friendlies.Add(new FriendlyUnit { Info = neighbor });
                                 avgFacing += neighbor.Facing;
                                 avgVelocity += neighbor.Velocity;
+                                if (neighbor.IsAttacking || math.lengthsq(neighbor.Velocity) > 0.1f)
+                                {
+                                    movingVelocity += neighbor.Velocity;
+                                    movingCount++;
+                                }
                             }
 
                             if (Better(distance, neighbor.StableId, closestFriendDist, closestFriendId)) {
@@ -174,6 +183,8 @@ public partial struct InformationGatherSystem : ISystem {
             perception.FriendlyAvgFacing = math.normalizesafe(avgFacing, float2.zero);
             perception.FriendlyAvgVelocity = friendlies.Length > 0
                 ? avgVelocity / friendlies.Length : float2.zero;
+            perception.FriendlyMovingAvgVelocity = movingCount > 0
+                ? movingVelocity / movingCount : float2.zero;
 
             enemies.Dispose();
             allies.Dispose();

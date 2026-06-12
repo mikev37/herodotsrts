@@ -20,17 +20,20 @@ public enum BehaviorFlag : uint
     FlankTarget       = 1u << 1,   // position behind the chosen target's facing
     BodyBlock         = 1u << 2,   // stand between the chosen enemy and friendly center of mass
     FormWall          = 1u << 3,   // hold the line between friendly CoM and enemy CoM
-    StandBehindFriend = 1u << 4,   // tuck behind the closest friendly, relative to enemy CoM
+    StandBehindFriend = 1u << 4,   // fill the nearest open slot behind a friendly (slot pipeline)
+    StandFrontline    = 1u << 17,  // fill the nearest open slot in front of a friendly (slot pipeline)
     AdvanceOnEnemy    = 1u << 5,   // march toward the enemy center of mass
     AdvanceIndividual = 1u << 6,   // march toward the chosen target
     AvoidMelee        = 1u << 7,   // enemy within AvoidMeleeRange -> back off
     RetreatLowHealth  = 1u << 8,   // health below fraction -> flee the enemy CoM
     FormWedge         = 1u << 9,   // slot in behind-and-beside the friendly ahead
     AlignCardinal     = 1u << 10,  // snap to 90-degree slots around the closest friendly's facing
+    GroupCohesion     = 1u << 11,  // pull toward the friendly center of mass when too far
     AlignMovement     = 1u << 12,  // move with the friendly movement consensus
     Separate          = 1u << 13,  // push apart from crowded allies (always)
     SeparateIdle      = 1u << 14,  // push apart from crowded allies (only with no enemies near)
     SpreadLateral     = 1u << 15,  // spread perpendicular to the enemy axis while advancing
+    FollowMoving      = 1u << 16,  // align movement with friendlies that have an active target (ignore idle)
 }
 
 public struct BehaviorFlags : IComponentData
@@ -71,6 +74,7 @@ public struct UnitTuning : IComponentData
     public float AvoidMeleeRange;     // back-off radius for AvoidMelee
     public float RetreatHealthPct;    // RetreatLowHealth triggers below Current/Max
     public float PursueDistance;      // AdvanceIndividual/AdvanceOnEnemy contribute only within this range
+    public float CohesionRadius;      // GroupCohesion activates beyond this distance from friendly center
 }
 
 // Unified attack: ONE countdown->act->cooldown timer for both melee and ranged.

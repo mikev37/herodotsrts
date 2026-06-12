@@ -200,6 +200,7 @@ public class UnitManager : MonoBehaviour
             PursueDistance = def.pursueDistance,
             AvoidMeleeRange = def.avoidMeleeRange,
             RetreatHealthPct = def.retreatHealthFraction,
+            CohesionRadius = def.cohesionRadius,
         });
         _em.SetComponentData(e, BuildAttack(def));
         _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = def.shield });
@@ -317,6 +318,7 @@ public class UnitManager : MonoBehaviour
         if (d.bodyBlock)          f |= (uint)BehaviorFlag.BodyBlock;
         if (d.formWall)           f |= (uint)BehaviorFlag.FormWall;
         if (d.standBehindFriend)  f |= (uint)BehaviorFlag.StandBehindFriend;
+        if (d.standFrontline)      f |= (uint)BehaviorFlag.StandFrontline;
         if (d.advanceOnEnemy)     f |= (uint)BehaviorFlag.AdvanceOnEnemy;
         if (d.advanceIndividual)  f |= (uint)BehaviorFlag.AdvanceIndividual;
         if (d.avoidMelee)         f |= (uint)BehaviorFlag.AvoidMelee;
@@ -327,6 +329,8 @@ public class UnitManager : MonoBehaviour
         if (d.separate)           f |= (uint)BehaviorFlag.Separate;
         if (d.separateIdle)       f |= (uint)BehaviorFlag.SeparateIdle;
         if (d.separateLateral)    f |= (uint)BehaviorFlag.SpreadLateral;
+        if (d.groupCohesion)      f |= (uint)BehaviorFlag.GroupCohesion;
+        if (d.followMoving)       f |= (uint)BehaviorFlag.FollowMoving;
         return f;
     }
     private Color TeamColor(int team)

@@ -18,9 +18,8 @@ public struct MoveTarget : IComponentData
 // Accumulated velocity for this frame, integrated by the steering system.
 public struct Velocity : IComponentData
 {
-    public float2 Value;
-    public float2 desiredValue;
-	public float2 faceDir;
+    public float2 Value;        // actual velocity this frame (back-calculated from step taken)
+    public float2 desiredValue; // acceleration-ramped locomotion; bled down when blocked
 }
 
 public struct Speed : IComponentData
@@ -177,8 +176,9 @@ public struct Perception : IComponentData
     // Friendly structure for formation/alignment behaviors.
     public bool     HasClosestFriendly;
     public UnitInfo ClosestFriendly;
-    public float2   FriendlyAvgFacing;    // facing consensus (normalized, zero if none)
-    public float2   FriendlyAvgVelocity;  // movement consensus
+    public float2   FriendlyAvgFacing;         // facing consensus (normalized, zero if none)
+    public float2   FriendlyAvgVelocity;       // movement consensus (all friendlies)
+    public float2   FriendlyMovingAvgVelocity; // movement consensus — only friendlies with HasTarget
 }
 
 public struct SpatialHash : IComponentData

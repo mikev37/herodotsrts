@@ -72,15 +72,18 @@ public partial struct BehaviorSystem : ISystem
             WeightFlank       = 1.5f,  // global: flank slot pull
             WeightBlock       = 1.5f,  // global: body-block slot pull
             WeightBehind      = 1.2f,  // global: stand-behind-friend slot pull
+            WeightFrontline   = 1.2f,  // global: stand-frontline slot pull
             WeightWall        = 3.5f,  // global: wall-line depth constraint
             WeightWedge       = 1.2f,  // global: wedge slot pull
             WeightCardinal    = 1.0f,  // global: cardinal-lattice slot pull
             WeightAlignMove   = 0.8f,  // global: Vicsek movement consensus
             WeightSeparate    = 1.0f,  // global: spacing push
             WeightSpreadLat   = 1f,    // global: lateral spread perpendicular to the advance axis
+            WeightCohesion    = 1.2f,  // global: pull toward the friendly center when too far
+            WeightFollowMov   = 0.8f,  // global: align movement with friendlies that have a target
 
             Passable = obstacles.Passable,
-            LosRange = 10,             // global: max cells to test LOS; farther -> just use the field
+            LosRange = 20,             // global: max cells to test LOS; farther -> just use the field
         }.ScheduleParallel();
     }
 
@@ -93,8 +96,8 @@ public partial struct BehaviorSystem : ISystem
         public float SlotDeadZone, SlotCaptureRadius, SlotMaxRange, HeightRangeBonus;
         public float FlankDistance, BodyBlockDistance, WallForwardOffset;
         public float WeightOrder, WeightPursue, WeightAdvance, WeightFlank, WeightBlock,
-                     WeightBehind, WeightWall, WeightWedge, WeightCardinal,
-                     WeightAlignMove, WeightSeparate, WeightSpreadLat;
+                     WeightBehind, WeightFrontline, WeightWall, WeightWedge, WeightCardinal,
+                     WeightAlignMove, WeightSeparate, WeightSpreadLat, WeightCohesion, WeightFollowMov;
         public int LosRange;
 
         private void Execute(
@@ -271,14 +274,19 @@ public partial struct BehaviorSystem : ISystem
                     sum += SlotPull(position, target.Position + toAllies * BodyBlockDistance) * WeightBlock;
                 }
 
-                if ((E & (uint)BehaviorFlag.StandBehindFriend) != 0 &&
-                    perception.HasClosestFriendly && perception.HasEnemies)
-                {
-                    float2 threatDir = math.normalizesafe(
-                        perception.EnemyCenter - perception.ClosestFriendly.Position, enemyDir);
-                    sum += SlotPull(position, perception.ClosestFriendly.Position - threatDir * spacing)
-                           * WeightBehind;
-                }
+                // StandBehindFriend: one slot directly behind each formation
+                // ally (opposite the group forward direction). Same pipeline as
+                // cardinal: merge overlaps, mark taken, pick best open slot.
+                if ((E & (uint)BehaviorFlag.StandBehindFriend) != 0 && friendlies.Length > 0)
+                    sum += FormationSlotPull(position, friendlies, GroupForward(enemyDir, in perception),
+                                            spacing, offsetForward: -1f) * WeightBehind;
+
+                // StandFrontline: one slot directly in front of each formation
+                // ally (along the group forward direction). Rear-rank units fill
+                // open front slots; front-rank units in an open slot hold it.
+                if ((E & (uint)BehaviorFlag.StandFrontline) != 0 && friendlies.Length > 0)
+                    sum += FormationSlotPull(position, friendlies, GroupForward(enemyDir, in perception),
+                                            spacing, offsetForward: 1f) * WeightFrontline;
             }
 
             // ---- Cohesion: active under orders AND free maneuver -----------------
@@ -303,14 +311,14 @@ public partial struct BehaviorSystem : ISystem
             }
 
             // FormWall as a LINE constraint: pull only on the perpendicular
-            // (depth) error toward the wall line. WHERE along the line the unit
-            // sits is owned by SpreadLateral + Separate — so the two never fight,
-            // and a shared advance force translates the whole wall as one.
+            // (depth) error toward the wall line. Position ALONG the line is
+            // owned by SpreadLateral + Separate so they never fight.
+            // The wall's orientation follows the group's shared direction
+            // (movement consensus if moving, facing consensus if standing).
             if ((E & (uint)BehaviorFlag.FormWall) != 0 &&
                 perception.HasEnemies && perception.HasFriendlies)
             {
-                float2 frontDir = math.normalizesafe(perception.EnemyCenter - perception.FriendlyCenter,
-                                                     new float2(0f, 1f));
+                float2 frontDir = GroupForward(enemyDir, in perception);
                 float2 anchor = perception.FriendlyCenter + frontDir * WallForwardOffset;
                 float depth = math.dot(anchor - position, frontDir);   // signed distance off the line
                 float mag = math.saturate((math.abs(depth) - SlotDeadZone)
@@ -318,12 +326,13 @@ public partial struct BehaviorSystem : ISystem
                 sum += frontDir * math.sign(depth) * mag * WeightWall;
             }
 
-            if ((E & (uint)BehaviorFlag.FormWedge) != 0 && hasTarget &&
-                TryClosestAhead(position, enemyDir, friendlies, out UnitInfo leader))
+            if ((E & (uint)BehaviorFlag.FormWedge) != 0 &&
+                TryClosestAhead(position, GroupForward(enemyDir, in perception), friendlies, out UnitInfo leader))
             {
-                float2 lateral = new float2(-enemyDir.y, enemyDir.x);
+                float2 fwd = GroupForward(enemyDir, in perception);
+                float2 lateral = new float2(-fwd.y, fwd.x);
                 float side = math.dot(position - leader.Position, lateral) >= 0f ? 1f : -1f;
-                float2 slot = leader.Position - enemyDir * spacing + lateral * (side * spacing);
+                float2 slot = leader.Position - fwd * spacing + lateral * (side * spacing);
                 sum += SlotPull(position, slot) * WeightWedge;
             }
 
@@ -336,14 +345,17 @@ public partial struct BehaviorSystem : ISystem
             {
                 NativeList<SlotCandidate> candidates = new NativeList<SlotCandidate>(Allocator.Temp);
 
+                // Lattice axes follow the group's shared direction (movement
+                // consensus -> enemy direction -> group facing) — never an
+                // individual unit's facing, and no arbitrary north default.
+                float2 f = GroupForward(enemyDir, in perception);
+                float2 r = new float2(f.y, -f.x);
+
                 // --- 1. Generate candidate slots from formation-relevant allies ---
                 for (int i = 0; i < friendlies.Length; i++)
                 {
                     UnitInfo ally = friendlies[i].Info;
                     if (ally.IsAttacking) continue;   // instinct unit: not a formation anchor
-
-                    float2 f = math.normalizesafe(perception.FriendlyAvgVelocity, new float2(0f, 1f));
-                    float2 r = new float2(f.y, -f.x);
 
                     for (int k = 0; k < 4; k++)
                     {
@@ -446,7 +458,101 @@ public partial struct BehaviorSystem : ISystem
                 sum += Cap(push) * WeightSeparate;
             }
 
+            // ---- Group cohesion --------------------------------------------------
+            // Pulls toward the friendly center when the unit has drifted too far.
+            // Activates only beyond CohesionRadius; fades in smoothly so units
+            // near the group feel nothing, stragglers get a firm pull back.
+            if ((E & (uint)BehaviorFlag.GroupCohesion) != 0 && perception.HasFriendlies)
+            {
+                float2 toCenter = perception.FriendlyCenter - position;
+                float dist = math.length(toCenter);
+                if (dist > tuning.CohesionRadius)
+                    sum += math.normalizesafe(toCenter)
+                           * ((dist - tuning.CohesionRadius) / tuning.CohesionRadius)
+                           * WeightCohesion;
+            }
+
+            // ---- Follow moving -----------------------------------------------
+            // Align movement with nearby friendlies that have an active target
+            // (either attacking or chasing). Idle friendlies are excluded so a
+            // unit doesn't get anchored to a standing crowd when others are
+            // already engaged and moving.
+            if ((E & (uint)BehaviorFlag.FollowMoving) != 0 &&
+                math.lengthsq(perception.FriendlyMovingAvgVelocity) > 0.05f)
+                sum += math.normalizesafe(perception.FriendlyMovingAvgVelocity) * WeightFollowMov;
+
             return sum;
+        }
+
+        // Formation slot pipeline for behind/frontline behaviors.
+        // Generates one slot per formation ally at (ally.Position + fwd * offsetForward * spacing),
+        // merges overlaps, marks taken positions, and returns SlotPull toward
+        // the best available slot. offsetForward = -1 for behind, +1 for frontline.
+        private float2 FormationSlotPull(float2 position,
+                                         in DynamicBuffer<FriendlyUnit> friendlies,
+                                         float2 fwd, float spacing, float offsetForward)
+        {
+            NativeList<SlotCandidate> candidates = new NativeList<SlotCandidate>(Allocator.Temp);
+
+            for (int i = 0; i < friendlies.Length; i++)
+            {
+                UnitInfo ally = friendlies[i].Info;
+                if (ally.IsAttacking) continue;
+                float2 slot = ally.Position + fwd * (offsetForward * spacing);
+
+                bool merged = false;
+                for (int c = 0; c < candidates.Length; c++)
+                {
+                    if (math.distancesq(candidates[c].position, slot) < spacing * spacing * 0.25f)
+                    {
+                        SlotCandidate e = candidates[c];
+                        e.score += 1f; e.count += 1;
+                        candidates[c] = e;
+                        merged = true; break;
+                    }
+                }
+                if (!merged)
+                    candidates.Add(new SlotCandidate { position = slot, score = 1f, count = 1 });
+            }
+
+            for (int c = 0; c < candidates.Length; c++)
+            {
+                for (int i = 0; i < friendlies.Length; i++)
+                {
+                    UnitInfo ally = friendlies[i].Info;
+                    if (ally.IsAttacking) continue;
+                    if (math.distancesq(ally.Position, candidates[c].position) < spacing * spacing * 0.25f)
+                    {
+                        SlotCandidate sc = candidates[c]; sc.score = -1000f; candidates[c] = sc; break;
+                    }
+                }
+            }
+
+            float bestScore = float.MinValue;
+            float2 bestPos = position;
+            for (int c = 0; c < candidates.Length; c++)
+            {
+                SlotCandidate sc = candidates[c];
+                if (sc.score < 0f) continue;
+                float finalScore = sc.score * 10f - math.distance(position, sc.position);
+                if (finalScore > bestScore) { bestScore = finalScore; bestPos = sc.position; }
+            }
+
+            candidates.Dispose();
+            return SlotPull(position, bestPos);
+        }
+
+        // Shared group orientation: movement consensus when the group is moving,
+        // falling back to the enemy direction (formations face the threat).
+        // Using the group vector rather than individual vectors means the wall
+        // and wedge orient consistently even as individual units turn.
+        private float2 GroupForward(float2 enemyDir, in Perception perception)
+        {
+            if (math.lengthsq(perception.FriendlyAvgVelocity) > 0.1f)
+                return math.normalizesafe(perception.FriendlyAvgVelocity);
+            if (perception.HasEnemies)
+                return enemyDir;
+            return math.normalizesafe(perception.FriendlyAvgFacing, enemyDir);
         }
 
         // Slot pull with commitment semantics:
