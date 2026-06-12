@@ -42,7 +42,7 @@ public partial struct SlopeSystem : ISystem
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(Immobile))]   // Immobile (buildings): Height is set once at spawn (footprint max)
     private partial struct SlopeJob : IJobEntity
     {
         [ReadOnly] public TerrainHeightField Field;
@@ -51,6 +51,13 @@ public partial struct SlopeSystem : ISystem
         private void Execute(in LocalTransform xform, in DesiredDestination dest,
                              ref GroundSpeedMultiplier mul)
         {
+            // Height tracks the terrain ALWAYS (steering snaps y to it every
+            // tick, and external forces like knockback move idle units too).
+            // Previously this was only sampled while a destination was set, so
+            // an idle unit's Height could go stale (or stay at the spawn-time 0
+            // and pop the unit to y=0 on its first steering tick).
+            mul.Height = SampleHeight(xform.Position.xz);
+
             if (!dest.Has) { mul.Value = 1f; return; }
 
             float2 pos = new float2(xform.Position.x, xform.Position.z);
@@ -61,7 +68,6 @@ public partial struct SlopeSystem : ISystem
 
             // Climbing slows you, descending speeds you up. Clamp to sane range.
             mul.Value = math.clamp(1f - SlopeStrength * slopeAlong, 0.4f, 1.8f);
-            mul.Height = SampleHeight(xform.Position.xz);
         }
 
         private float SampleHeight(float2 worldPos)

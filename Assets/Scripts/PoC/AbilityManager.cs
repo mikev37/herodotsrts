@@ -22,7 +22,7 @@ using UnityEngine;
 //     the unit's view while any such modifier remains; destroys it on release.
 // ===========================================================================
 
-// Blittable sim-side snapshot of an AbilityDefinition (what apply needs).
+// Blittable sim-side snapshot of an AbilityDefinition (what commit/fire need).
 public struct AbilitySpec
 {
     public ShapeType   Shape;
@@ -32,6 +32,12 @@ public struct AbilitySpec
     public AffectFilter Affects;
     public float       Lifetime;
     public uint        CooldownTicks;
+    public uint        ChargeUpTicks;   // commit -> fire delay (0 = same tick)
+    public float       CastRange;       // WorldPoint max cast distance (0 = unlimited)
+    public float       ManaCost;
+    public int3        Cost;            // commander resources: x=Gold, y=Wood, z=Stone
+    public byte        HasSpawn;        // definition has a spawnUnit (resolved managed at fire)
+    public byte        AnchorToSpawn;   // banner/totem: bind the field to the spawned unit
 }
 
 public class AbilityManager : MonoBehaviour
@@ -86,6 +92,11 @@ public class AbilityManager : MonoBehaviour
         if (def == null) return -1;
         if (_idOf.TryGetValue(def, out int id)) return id;
 
+        // Runtime safety net: an asset that never went through OnValidate in
+        // the editor still carries its effects in the legacy list — fold them
+        // into the split lists before baking (not persisted; just this run).
+        def.MigrateLegacyModifiers();
+
         id = _defs.Count;
         _idOf[def] = id;
         _defs.Add(def);
@@ -100,21 +111,48 @@ public class AbilityManager : MonoBehaviour
             Affects = def.affects,
             Lifetime = def.lifetime,
             CooldownTicks = (uint)math.max(1, (int)math.ceil(def.cooldown * LockstepConfig.TickRate)),
+            ChargeUpTicks = (uint)math.max(0, (int)math.ceil(def.chargeUp * LockstepConfig.TickRate)),
+            CastRange = math.max(0f, def.castRange),
+            ManaCost = math.max(0f, def.manaCost),
+            Cost = new int3(math.max(0, def.costGold), math.max(0, def.costWood), math.max(0, def.costStone)),
+            HasSpawn = (byte)(def.spawnUnit != null ? 1 : 0),
+            AnchorToSpawn = (byte)(def.anchorFieldToSpawn && def.spawnUnit != null &&
+                                   def.applyMode == ApplyMode.PersistentArea ? 1 : 0),
         });
-        var arr = new FieldModifier[def.modifiers.Count];
-        for (int i = 0; i < def.modifiers.Count; i++)
+
+        // Bake the split lists into one FieldModifier payload: numeric rows
+        // first, then flag rows. The order is deterministic (asset-defined), so
+        // Slot identities match on every peer.
+        var arr = new FieldModifier[def.numericModifiers.Count + def.flagModifiers.Count];
+        int k = 0;
+        for (int i = 0; i < def.numericModifiers.Count; i++)
         {
-            var m = def.modifiers[i];
-            arr[i] = new FieldModifier
+            var m = def.numericModifiers[i];
+            arr[k++] = new FieldModifier
             {
-                Target = m.target,
+                Target = (ModTarget)m.target,                 // NumericTarget mirrors ModTarget's numeric range
                 Delta = m.delta,
                 Mode = m.mode,
                 Revert = (byte)(m.revert ? 1 : 0),
-                BoolValue = (byte)(m.boolValue ? 1 : 0),
+                BoolValue = 0,
                 CapMode = m.capMode,
                 CapRef = m.capRef,
-                CapValue = m.capValue
+                CapValue = m.capValue,
+            };
+        }
+        for (int i = 0; i < def.flagModifiers.Count; i++)
+        {
+            var m = def.flagModifiers[i];
+            arr[k++] = new FieldModifier
+            {
+                Target = ModTarget.FlagFormWall + (byte)m.target,   // FlagTarget mirrors ModTarget's flag range
+                Delta = 0f,
+                Mode = ModMode.Instant,
+                Revert = 1,
+                BoolValue = (byte)(m.on ? 1 : 0),
+                CapMode = CapMode.None,
+                CapRef = CapRef.Absolute,
+                CapValue = 0f,
             };
         }
         _mods.Add(arr);

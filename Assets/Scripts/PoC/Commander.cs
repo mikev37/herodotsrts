@@ -141,6 +141,25 @@ public abstract class Commander : MonoBehaviour
         lastOrder = $"Ability slot {slot} @ ({castPos.x:0.#},{castPos.y:0.#})";
     }
 
+    // Place building `defId` (this team's roster index; must be a
+    // BuildingDefinition) centered near `pos`. Snapping and validation happen
+    // deterministically at the execution tick (CommandApplySystem).
+    protected void IssuePlaceBuilding(int defId, float2 pos)
+    {
+        _selection.Clear();
+        Issue(CommandKind.PlaceBuilding, pos, defId, 0);
+        lastOrder = $"PlaceBuilding def {defId} @ ({pos.x:0.#},{pos.y:0.#})";
+    }
+
+    // Demolish an own-team building by StableId (sets its health to 0 at the
+    // execution tick; the normal death pipeline does the rest).
+    protected void IssueDemolishBuilding(int stableId)
+    {
+        _selection.Clear();
+        Issue(CommandKind.DemolishBuilding, default, stableId, 0);
+        lastOrder = $"Demolish building {stableId}";
+    }
+
     private void Issue(CommandKind kind, float2 pos, int targetId, byte abilitySlot)
     {
         if (Mode == LockstepMode.Playback) return;   // live input ignored during playback

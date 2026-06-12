@@ -44,8 +44,18 @@ public struct DesiredDestination : IComponentData
 
 // ---------------------------------------------------------------------------
 // Obstacles (buildings + terrain doodads). Created/destroyed at runtime.
+// Two shapes share the struct:
+//   * Extents > 0  -> rounded rectangle: Extents.x by Extents.y nav-grid cells,
+//     one cell cut from each corner (see BuildingFootprint). Buildings use this.
+//     The owning entity's position must be footprint-snapped (BuildingFootprint
+//     does the snapping at spawn) so the stamp is grid-aligned.
+//   * Extents == 0 -> circle of Radius world units (doodads, legacy path).
 // ---------------------------------------------------------------------------
-public struct Obstacle : IComponentData { public float Radius; }
+public struct Obstacle : IComponentData
+{
+    public float Radius;     // circle path (used only when Extents is zero)
+    public int2  Extents;    // rect footprint in cells; zero = circle
+}
 
 // ---------------------------------------------------------------------------
 // Projectiles. Travel straight horizontally; the vertical position follows an

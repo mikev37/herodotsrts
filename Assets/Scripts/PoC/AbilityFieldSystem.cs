@@ -32,6 +32,8 @@ public partial struct AbilityFieldSystem : ISystem
     {
         float dt = SystemAPI.Time.DeltaTime;
         var xforms = SystemAPI.GetComponentLookup<LocalTransform>(true);
+        var deadLk = SystemAPI.GetComponentLookup<Dead>(true);
+        var healthLk = SystemAPI.GetComponentLookup<Health>(false);
 
         var fields = new NativeList<FieldData>(8, state.WorldUpdateAllocator);
         var mods = new NativeList<FieldModifier>(32, state.WorldUpdateAllocator);
@@ -43,8 +45,20 @@ public partial struct AbilityFieldSystem : ISystem
         {
             var f = fieldRW.ValueRO;
 
-            // Hero-anchored fields follow their caster.
-            if (f.Anchor == AnchorType.Hero && xforms.HasComponent(f.AnchorEntity))
+            // Spawn-bound fields (banner/totem) live and die with their anchor:
+            // the anchor dying (or already destroyed) takes the aura with it.
+            bool anchorAlive = f.AnchorEntity != Entity.Null &&
+                               xforms.HasComponent(f.AnchorEntity) &&
+                               !deadLk.HasComponent(f.AnchorEntity);
+            if (f.BoundToSpawn == 1 && !anchorAlive)
+            {
+                ecb.DestroyEntity(entity);
+                continue;
+            }
+
+            // Entity-anchored fields follow their anchor (hero auras, totems).
+            if ((f.Anchor == AnchorType.Hero || f.BoundToSpawn == 1) &&
+                f.AnchorEntity != Entity.Null && xforms.HasComponent(f.AnchorEntity))
             {
                 var t = xforms[f.AnchorEntity];
                 f.Center = new float2(t.Position.x, t.Position.z);
@@ -64,7 +78,18 @@ public partial struct AbilityFieldSystem : ISystem
             else
             {
                 f.Lifetime -= dt;
-                if (f.Lifetime <= 0f) ecb.DestroyEntity(entity);
+                if (f.Lifetime <= 0f)
+                {
+                    ecb.DestroyEntity(entity);
+                    // A totem's aura expiring takes the totem with it — the
+                    // symmetric half of "destroyed along with the aura".
+                    if (f.BoundToSpawn == 1 && healthLk.HasComponent(f.AnchorEntity))
+                    {
+                        var hp = healthLk[f.AnchorEntity];
+                        hp.Current = 0f;
+                        healthLk[f.AnchorEntity] = hp;   // DeathSystem marks Dead next pass
+                    }
+                }
                 else fieldRW.ValueRW = f;
             }
         }
@@ -79,7 +104,7 @@ public partial struct AbilityFieldSystem : ISystem
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(AbilityImmune))]   // AbilityImmune: never receives ability modifiers
     private partial struct StampJob : IJobEntity
     {
         [ReadOnly] public NativeArray<FieldData> Fields;

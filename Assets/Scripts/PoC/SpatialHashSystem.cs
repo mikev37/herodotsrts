@@ -53,6 +53,7 @@ public partial struct SpatialHashSystem : ISystem
         {
             CellSize = cellSize,
             Writer = map.AsParallelWriter(),
+            BuildingLk = SystemAPI.GetComponentLookup<BuildingTag>(true),
         };
         // DETERMINISM: Schedule (single-thread), NOT ScheduleParallel. With a
         // parallel fill, the order of values within each cell's bucket depends on
@@ -75,6 +76,7 @@ public partial struct SpatialHashSystem : ISystem
     {
         public float CellSize;
         public NativeParallelMultiHashMap<int, UnitInfo>.ParallelWriter Writer;
+        [ReadOnly] public ComponentLookup<BuildingTag> BuildingLk;
 
         private void Execute(Entity entity, in LocalTransform xform, in Team team,
                              in Velocity velocity, in Mass mass, in Health health,
@@ -109,6 +111,7 @@ public partial struct SpatialHashSystem : ISystem
                 AttackRange = attack.Range,
                 StrikeArcDot = attack.ArcDot,
                 Cleave = attack.Cleave,
+                IsBuilding = BuildingLk.HasComponent(entity),
             });
         }    }
 }

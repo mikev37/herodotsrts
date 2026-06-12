@@ -44,6 +44,8 @@ public class UnitDefinition : ScriptableObject
     public float armor = 0f;
     [Tooltip("Extra armor that only applies when the attacker is in this unit's front half-arc.")]
     public float shield = 0f;
+    [Tooltip("Untick to make this entity ignore ability fields entirely (no modifiers are ever stamped onto it). Off by default for buildings.")]
+    public bool receivesAbilities = true;
 
     [Header("Attack")]
     public float attackInterval = 1f;
@@ -69,6 +71,12 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("If set, this unit is spawned as a hero (gets HeroTag). It's a normal unit " +
              "in every other way — selected, ordered, hit, and killed like one.")]
     public bool isHero = false;
+
+    [Header("Mana")]
+    [Tooltip("Caster resource pool. Abilities with a mana cost fail to cast (nothing consumed) when below their cost.")]
+    public float maxMana = 100f;
+    [Tooltip("Mana regenerated per second.")]
+    public float manaRegen = 2f;
 
     [Header("Abilities (Q/W/E/R slots; null = empty slot)")]
     [Tooltip("Abilities this unit can cast. When a selection is ordered to cast, the " +
@@ -98,23 +106,25 @@ public class UnitDefinition : ScriptableObject
     public bool formWedge = false;
     [Tooltip("Snap to 90-degree slots around the closest friendly, in their facing frame.")]
     public bool alignCardinal = false;
+    [Tooltip("Face the friendly facing consensus when not attacking.")]
+    public bool alignFacing = false;
     [Tooltip("Move with the friendly movement consensus when nothing else applies.")]
     public bool alignMovement = false;
     [Tooltip("Push apart from crowded allies at all times.")]
     public bool separate = false;
     [Tooltip("Push apart from crowded allies only when no enemies are near.")]
     public bool separateIdle = false;
-    [Tooltip("Spread perpendicular to the enemy axis while advancing — widens the group into a line.")]
-    public bool spreadLateral = false;
+    [Tooltip("Push apart into a rough line")]
+    public bool separateLateral = false;
 
     [Header("Behavior ranges")]
-    [Tooltip("AttackNearby aggression radius.")]
-    public float attackNearbyRange = 18f;
+    [Tooltip("Break formation and attack range")]
+    public float attackNearbyRange = 8;
     [Tooltip("AvoidMelee back-off radius.")]
     public float avoidMeleeRange = 6f;
     [Tooltip("RetreatLowHealth triggers below this health fraction.")]
     [Range(0f, 1f)] public float retreatHealthFraction = 0.25f;
-    [Tooltip("AdvanceIndividual and AdvanceOnEnemy only contribute within this distance of the enemy. " +
-             "Beyond it the unit holds and waits for the group to close together.")]
-    public float pursueDistance = 40f;
+    [Tooltip("Engage the enemy range")]
+    public float pursueDistance = 40;
+    
 }

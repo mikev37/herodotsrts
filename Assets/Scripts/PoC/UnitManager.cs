@@ -47,6 +47,11 @@ public class UnitManager : MonoBehaviour
         new Color(1.00f, 0.40f, 0.30f),   // team 1
     };
 
+    [Header("Starting commander resources (every team)")]
+    public int startingGold = 500;
+    public int startingWood = 500;
+    public int startingStone = 500;
+
     [Header("Debug (runtime, read-only)")]
     public bool worldReady;
     public int spawnedCount;
@@ -54,6 +59,7 @@ public class UnitManager : MonoBehaviour
 
     private EntityManager _em;
     private EntityQuery _viewQuery;
+    private EntityQuery _terrainQuery;
     private EntityArchetype _archetype;
 
     // view pooling, keyed by definition ID
@@ -81,6 +87,18 @@ public class UnitManager : MonoBehaviour
             ComponentType.ReadOnly<Health>(),
             ComponentType.ReadOnly<UnitDefId>(),
             ComponentType.ReadOnly<Team>());
+        _terrainQuery = _em.CreateEntityQuery(ComponentType.ReadOnly<TerrainHeightField>());
+
+        // Commander resource pool: one buffer entry per team, identical seed on
+        // every peer (it's authored scene data). Created BEFORE SpawnAll so
+        // tick 0 already has it.
+        var poolEntity = _em.CreateEntity(typeof(ResourcePoolTag));
+        var pool = _em.AddBuffer<TeamResources>(poolEntity);
+        for (int t = 0; t < teamCount; t++)
+            pool.Add(new TeamResources
+            {
+                Amounts = new int3(startingGold, startingWood, startingStone)
+            });
 
         SpawnAll();
     }
@@ -99,22 +117,17 @@ public class UnitManager : MonoBehaviour
             typeof(MoveTarget), typeof(AttackOrder), typeof(CombatTarget), typeof(DesiredDestination),
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
             typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
+            typeof(Mana), typeof(PendingCast),
             typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit),   // perception + contact/friendly lists
         };
         var archetype = _em.CreateArchetype(common);
 
         // Terrain height for spawn placement (baked by TerrainFieldBootstrap; if
         // it hasn't run yet, units spawn at 0 and Steering snaps them next tick).
-        var terrainQuery = _em.CreateEntityQuery(ComponentType.ReadOnly<TerrainHeightField>());
-        bool hasTerrain = false;
-        TerrainHeightField terrainField = default;
-        if (terrainQuery.HasSingleton<TerrainHeightField>())
-        {
-            terrainField = terrainQuery.GetSingleton<TerrainHeightField>();
-            hasTerrain = terrainField.IsValid;
-        }
+        bool hasTerrain = TryGetTerrain(out TerrainHeightField terrainField);
         _archetype = archetype;
 
+        
         float spacing = 2;
         for (int team = 0; team < teamCount; team++) {
             float teamSign = team == 0 ? -1f : 1f;
@@ -139,71 +152,112 @@ public class UnitManager : MonoBehaviour
                     int col = i / ranks;
                     int rank = i % ranks;
                     float x = xCursor + col * spacing;
-                    float z = zFront + teamSign * (sofarranks + rank) * spacing;
+                    float z = zFront + teamSign * (sofarranks+ rank) * spacing;   // extra ranks recede toward own side
+                    // Spawn at terrain height (Steering snaps to slope.Height every
+                    // tick anyway, but spawning at 0 made units pop on the first tick).
                     float y = hasTerrain ? NavTerrain.SampleHeight(terrainField, new float2(x, z)) : 0f;
                     SpawnUnit(def, id, team, new float3(x, y, z));
                 }
-                sofarranks += ranks + 1;
+                sofarranks+=ranks+1;
             }
         }
     }
-
     private int _nextStableId;
-
     // Creates one fully-configured unit entity. Heroes are just units that also
-    // get a HeroTag + HeroAura — no special movement/combat path.
+    // get a HeroTag + HeroAura — no special movement/combat path. Buildings are
+    // units too: same archetype and stat copy, plus BuildingTag (identity),
+    // Immobile (behavior/steering skip it), an Obstacle footprint (rasterized
+    // into the nav grid), a footprint-snapped position, and Y from the highest
+    // footprint cell. Only ever called from Start or from CommandApplySystem at
+    // a command's execution tick, so the structural adds are deterministic.
     public Entity SpawnUnit(UnitDefinition def, int defId, int team, float3 pos)
     {
+        var bdef = def as BuildingDefinition;
+        int2 extents = default;
+        if (bdef != null)
+        {
+            extents = new int2(math.max(1, bdef.footprintX), math.max(1, bdef.footprintZ));
+            int2 min = BuildingFootprint.MinCell(new float2(pos.x, pos.z), extents);
+            float2 snapped = BuildingFootprint.SnappedCenter(min, extents);
+            pos = new float3(snapped.x, FootprintMaxHeight(min, extents, pos.y), snapped.y);
+        }
+
         var e = _em.CreateEntity(_archetype);
-        _em.SetComponentData(e, new StableId { Value = _nextStableId++ });
-        _em.SetComponentEnabled<Selected>(e, false);
+        _em.SetComponentData(e, new StableId { Value = _nextStableId++ });   // deterministic identity
+        _em.SetComponentEnabled<Selected>(e, false);                          // archetype components start enabled
         _em.SetComponentData(e, LocalTransform.FromPosition(pos));
         _em.SetComponentData(e, new Team { Value = team });
         _em.SetComponentData(e, new UnitDefId { Value = defId });
         _em.SetComponentData(e, new BehaviorFlags { Value = PackFlags(def) });
         _em.SetComponentData(e, new UnitTuning
         {
-            TurnSpeed          = def.turnSpeed,
+            TurnSpeed = def.turnSpeed,
             SeparationStrength = def.separationStrength,
-            MeleeRange         = def.meleeRange,
-            CombatSpacing      = def.combatSpacing,
-            IdleSpacing        = def.idleSpacing,
-            AttackNearbyRange  = def.attackNearbyRange,
-            AvoidMeleeRange    = def.avoidMeleeRange,
-            RetreatHealthPct   = def.retreatHealthFraction,
-            PursueDistance     = def.pursueDistance,
+            MeleeRange = def.meleeRange,
+            CombatSpacing = def.combatSpacing,
+            IdleSpacing = def.idleSpacing,
+            AttackNearbyRange = def.attackNearbyRange,
+            PursueDistance = def.pursueDistance,
+            AvoidMeleeRange = def.avoidMeleeRange,
+            RetreatHealthPct = def.retreatHealthFraction,
         });
         _em.SetComponentData(e, BuildAttack(def));
         _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = def.shield });
         _em.SetComponentData(e, new Speed { Value = def.speed });
-        _em.SetComponentData(e, new UnitRadius { Value = def.radius });
+        // Buildings carry their footprint's INSCRIBED radius — consumers that
+        // know about buildings (gather, behavior, projectiles) measure range to
+        // the surface by subtracting it.
+        _em.SetComponentData(e, new UnitRadius
+        {
+            Value = bdef != null
+                ? math.min(extents.x, extents.y) * NavGrid.CellSize * 0.5f
+                : def.radius
+        });
         _em.SetComponentData(e, new Mass { Value = def.mass });
-        _em.SetComponentData(e, new GroundSpeedMultiplier { Value = 1f });
+        // Height starts at the spawn height: steering snaps mobile units to
+        // slope.Height every tick, so a zero here popped units to y=0 until the
+        // slope system's first write. Buildings keep this value forever (they
+        // skip both the slope and steering systems).
+        _em.SetComponentData(e, new GroundSpeedMultiplier { Value = 1f, Height = pos.y });
         _em.SetComponentData(e, new Health { Current = def.maxHealth, Max = def.maxHealth });
+        _em.SetComponentData(e, new Mana { Current = def.maxMana, Max = def.maxMana, Regen = def.manaRegen });
         _em.SetComponentData(e, new DeathTimer { Seconds = def.deathAnimSeconds });
         _em.SetComponentData(e, new Ranged { IsRanged = def.isRanged });
         _em.SetComponentData(e, new UnitAnim { State = AnimState.Idle });
         _em.SetComponentData(e, new BaseStats
         {
-            Speed        = def.speed,
-            TurnSpeed    = def.turnSpeed,
-            MeleeRange   = def.meleeRange,
+            Speed = def.speed,
+            TurnSpeed = def.turnSpeed,
+            MeleeRange = def.meleeRange,
             AttackDamage = def.attackDamage,
-            Armor        = def.armor,
-            Shield       = def.shield,
+            Armor = def.armor,
+            Shield = def.shield,
         });
         // BehaviorOverride / MoveTarget / AttackOrder / CombatTarget /
         // DesiredDestination default to zero (Has=false) — fine.
 
         if (def.isHero)
-            _em.AddComponent<HeroTag>(e);
+            _em.AddComponent<HeroTag>(e);   // abilities are cast at the hero via the ability system
 
+        if (bdef != null)
+        {
+            _em.AddComponent<BuildingTag>(e);                          // identity (perception/targeting/info)
+            _em.AddComponent<Immobile>(e);                             // movement gate (behavior/slope/steering/knockback skip)
+            _em.AddComponentData(e, new Obstacle { Extents = extents });  // nav-grid footprint (rasterized next ObstacleGrid pass)
+        }
+
+        if (!def.receivesAbilities)
+            _em.AddComponent<AbilityImmune>(e);                        // ability fields never stamp onto this entity
+
+        // Ability slots: register each AbilityDefinition with the AbilityManager
+        // (idempotent; roster order => deterministic ids) and store the ids.
         var slots = new AbilitySlots { Ids = new int4(-1, -1, -1, -1) };
         if (def.abilities != null && AbilityManager.Instance != null)
             for (int s = 0; s < 4 && s < def.abilities.Length; s++)
                 slots.Ids[s] = AbilityManager.Instance.Register(def.abilities[s]);
         _em.AddComponentData(e, slots);
         _em.AddComponentData(e, new AbilityCooldowns { ReadyTick = uint4.zero });
+
 
         spawnedCount++;
         return e;
@@ -212,6 +266,48 @@ public class UnitManager : MonoBehaviour
     // View accessor for effect attachment (AbilityManager). Null while dead/unspawned.
     public GameObject GetView(Entity e)
         => _views.TryGetValue(e, out var v) && v != null ? v.gameObject : null;
+
+    // Roster lookups (index = UnitDefId). Used by CommandApplySystem to resolve
+    // a PlaceBuilding command's defId, and by commanders to find a def's id.
+    public UnitDefinition GetDefinition(int team, int defId)
+        => team >= 0 && team < roster.Count && defId >= 0 && defId < roster[team].Count
+            ? roster[team][defId].definition : null;
+
+    public int GetDefId(int team, UnitDefinition def)
+    {
+        if (def == null || team < 0 || team >= roster.Count) return -1;
+        for (int i = 0; i < roster[team].Count; i++)
+            if (roster[team][i].definition == def) return i;
+        return -1;
+    }
+
+    private bool TryGetTerrain(out TerrainHeightField field)
+    {
+        // _terrainQuery is created in Start before any spawn path can run.
+        field = default;
+        if (!_terrainQuery.HasSingleton<TerrainHeightField>()) return false;
+        field = _terrainQuery.GetSingleton<TerrainHeightField>();
+        return field.IsValid;
+    }
+
+    // Highest terrain height under a footprint's (non-cut) cells — the building
+    // sits at its highest corner and the model's basement skirt covers the rest.
+    // Same cells, same sample points as CommandApplySystem's validation pass, so
+    // the two can never disagree.
+    private float FootprintMaxHeight(int2 minCell, int2 extents, float fallback)
+    {
+        if (!TryGetTerrain(out var terrain)) return fallback;
+        float maxH = float.MinValue;
+        for (int ly = 0; ly < extents.y; ly++)
+        for (int lx = 0; lx < extents.x; lx++)
+        {
+            if (BuildingFootprint.CornerCut(lx, ly, extents)) continue;
+            int x = minCell.x + lx, y = minCell.y + ly;
+            if (!NavGrid.InBounds(x, y)) continue;
+            maxH = math.max(maxH, NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)));
+        }
+        return maxH > float.MinValue ? maxH : fallback;
+    }
 
     private static uint PackFlags(UnitDefinition d)
     {
@@ -230,10 +326,9 @@ public class UnitManager : MonoBehaviour
         if (d.alignMovement)      f |= (uint)BehaviorFlag.AlignMovement;
         if (d.separate)           f |= (uint)BehaviorFlag.Separate;
         if (d.separateIdle)       f |= (uint)BehaviorFlag.SeparateIdle;
-        if (d.spreadLateral)      f |= (uint)BehaviorFlag.SpreadLateral;
+        if (d.separateLateral)    f |= (uint)BehaviorFlag.SpreadLateral;
         return f;
     }
-
     private Color TeamColor(int team)
         => (teamColors != null && team >= 0 && team < teamColors.Length) ? teamColors[team] : Color.white;
 
@@ -257,37 +352,37 @@ public class UnitManager : MonoBehaviour
     {
         var a = new Attack
         {
-            ArcDot      = Mathf.Cos(Mathf.Deg2Rad * def.meleeStrikeArc * 0.5f),
-            Cleave      = def.meleeCleave,
-            Phase       = AttackPhase.Ready,
-            isRange     = def.isRanged,
-            Timer       = 0f,
-            Pulse       = 0f,
+            ArcDot = Mathf.Cos(Mathf.Deg2Rad * def.meleeStrikeArc * 0.5f),
+            Cleave = def.meleeCleave,
+            Phase = AttackPhase.Ready,
+            isRange = def.isRanged,
+            Timer = 0f,
+            Pulse = 0f,
             ProjectileId = -1,
         };
         if (def.isRanged)
         {
-            a.Range    = def.attackRange;
+            a.Range = def.attackRange;
             a.ChargeUp = def.attackInterval;
             a.Cooldown = def.attackCooldown;
-            a.Damage   = def.attackDamage;
+            a.Damage = def.attackDamage;
             var pd = def.projectile;
             if (pd != null)
             {
-                a.ProjectileId       = ResolveProjectileId(pd);
-                a.ProjSpeed          = pd.speed;
-                a.ProjRise           = pd.riseHeight;
-                a.ProjLaunchHeight   = pd.launchHeight;
-                a.ProjHitRadius      = pd.hitRadius;
+                a.ProjectileId = ResolveProjectileId(pd);
+                a.ProjSpeed = pd.speed;
+                a.ProjRise = pd.riseHeight;
+                a.ProjLaunchHeight = pd.launchHeight;
+                a.ProjHitRadius = pd.hitRadius;
                 a.ProjCollisionHeight = pd.collisionHeight;
             }
         }
         else
         {
-            a.Range    = def.meleeRange;
+            a.Range = def.meleeRange;
             a.ChargeUp = def.attackInterval;
             a.Cooldown = def.attackCooldown;
-            a.Damage   = def.attackDamage;
+            a.Damage = def.attackDamage;
         }
         return a;
     }
@@ -314,12 +409,13 @@ public class UnitManager : MonoBehaviour
         for (int i = 0; i < entities.Length; i++)
         {
             var e = entities[i];
+           
             alive.Add(e);
             if (!_views.TryGetValue(e, out var view))
             {
-                view = Acquire(teams[i].Value, ids[i].Value);
+                view = Acquire(teams[i].Value,ids[i].Value);
                 if (view == null) continue;
-                view.SetTeamColor(TeamColor(teams[i].Value));
+                view.SetTeamColor(TeamColor(teams[i].Value));   // tint on (re)assignment
                 _views[e] = view;
             }
             var t = view.transform;

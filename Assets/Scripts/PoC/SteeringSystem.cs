@@ -70,6 +70,7 @@ public partial struct SteeringSystem : ISystem
         [ReadOnly] public NativeArray<byte> CellComp;
 
         private void Execute(
+            Entity self,
             ref LocalTransform xform,
             ref Velocity vel,
             in Speed speed,

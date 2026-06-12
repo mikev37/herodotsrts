@@ -85,7 +85,7 @@ public partial struct BehaviorSystem : ISystem
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(Immobile))]   // Immobile (buildings): no decisions, no movement intent
     private partial struct BehaviorJob : IJobEntity
     {
         [ReadOnly] public NativeArray<byte> Passable;
@@ -287,16 +287,19 @@ public partial struct BehaviorSystem : ISystem
             // the friendly center projected laterally — widens the group into a
             // line. No depth component, so it composes cleanly with advance and
             // with the wall's depth constraint (each owns one axis).
-            if ((E & (uint)BehaviorFlag.SpreadLateral) != 0 &&
-                perception.HasEnemies)
-            {
+            if ((E & (uint)BehaviorFlag.SpreadLateral) != 0 && perception.HasFriendlies && perception.HasEnemies) {
                 float2 forward = enemyDir;
-                  
                 float2 lateral = new float2(-forward.y, forward.x);
-                float2 center = perception.HasFriendlies ? perception.FriendlyCenter : position;
-                float myLateral = math.dot(position - center, lateral);
-                float2 spreadDir = myLateral >= 0f ? lateral : -lateral;
-                sum += spreadDir * WeightSpreadLat;
+
+                float2 push = float2.zero;
+                for (int i = 0; i < friendlies.Length; i++) {
+                    float2 toAlly = position - friendlies[i].Info.Position;
+                    float lateralDist = math.dot(toAlly, lateral);   // signed lateral separation
+                    float absLat = math.abs(lateralDist);
+                    if (absLat > 0.01f && absLat < spacing * 1.5f)
+                        push += lateral * math.sign(lateralDist) * (1f - absLat / (spacing * 1.5f));
+                }
+                sum += Cap(push) * WeightSpreadLat;
             }
 
             // FormWall as a LINE constraint: pull only on the perpendicular

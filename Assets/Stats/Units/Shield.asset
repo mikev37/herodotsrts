@@ -25,6 +25,7 @@ MonoBehaviour:
   deathAnimSeconds: 2
   armor: 10
   shield: 10
+  receivesAbilities: 1
   attackInterval: 0.75
   attackCooldown: 0.25
   attackDamage: 20
@@ -35,6 +36,8 @@ MonoBehaviour:
   projectile: {fileID: 0}
   attackRange: 10
   isHero: 0
+  maxMana: 100
+  manaRegen: 2
   abilities:
   - {fileID: 0}
   - {fileID: 0}
@@ -46,17 +49,16 @@ MonoBehaviour:
   formWall: 1
   standBehindFriend: 0
   advanceOnEnemy: 1
-  advanceIndividual: 0
+  advanceIndividual: 1
   avoidMelee: 0
   retreatLowHealth: 1
   formWedge: 0
   alignCardinal: 1
-  alignFacing: 1
+  alignFacing: 0
   alignMovement: 0
   separate: 0
   separateIdle: 1
-  spreadLateral: 1
   attackNearbyRange: 6
   avoidMeleeRange: 8
   retreatHealthFraction: 0.25
-  pursueDistance: 40
+  pursueDistance: 30

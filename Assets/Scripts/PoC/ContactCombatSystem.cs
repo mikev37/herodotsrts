@@ -52,6 +52,7 @@ public partial struct ContactCombatSystem : ISystem
             ImpactScale = 6f,        // global: ramming-impact damage multiplier
             KnockbackScale = 0.4f,   // global: knockback strength
             BodyContactScale = 1.2f, // global: bodies "touch" within (rA + rB) * this
+            ImmobileLk = SystemAPI.GetComponentLookup<Immobile>(true),
             Ecb = ecb,
         }.ScheduleParallel();
     }
@@ -61,6 +62,7 @@ public partial struct ContactCombatSystem : ISystem
     private partial struct CombatJob : IJobEntity
     {
         public float Dt, ImpactScale, KnockbackScale, BodyContactScale;
+        [ReadOnly] public ComponentLookup<Immobile> ImmobileLk;
         public EntityCommandBuffer.ParallelWriter Ecb;
 
         private void Execute(
@@ -128,7 +130,9 @@ public partial struct ContactCombatSystem : ISystem
             status.InContactWithEnemy = inContact;
 
             // Apply knockback directly to position (steering already ran).
-            xform.Position += new float3(knockback.x, 0f, knockback.y) * Dt;
+            // Immobile entities (buildings) take the damage but never move.
+            if (!ImmobileLk.HasComponent(self))
+                xform.Position += new float3(knockback.x, 0f, knockback.y) * Dt;
 
             if (incoming > 0f)
             {

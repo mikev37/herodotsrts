@@ -17,6 +17,10 @@ using UnityEngine;
 // ===========================================================================
 public class PlayerCommander : Commander
 {
+    [Header("Buildings")]
+    [Tooltip("Building placed with B. Must appear in this team's UnitManager roster (countPerTeam 0 is fine).")]
+    [SerializeField] private BuildingDefinition placeBuilding;
+
     [Header("Player debug (runtime, read-only)")]
     public int selectedCount;
     public bool dragging;
@@ -24,6 +28,8 @@ public class PlayerCommander : Commander
 
     private EntityQuery _selectedQuery;
     private EntityQuery _clockQuery2;
+    private EntityQuery _buildingQuery;
+    private EntityQuery _resourceQuery;
     private Vector2 _dragStart;
 
     private static readonly KeyCode[] SlotKeys = { KeyCode.Q, KeyCode.W, KeyCode.E, KeyCode.R };
@@ -34,6 +40,12 @@ public class PlayerCommander : Commander
         if (!worldReady) return;
         _selectedQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<Selected>());
         _clockQuery2 = Em.CreateEntityQuery(ComponentType.ReadOnly<SimClock>());
+        _buildingQuery = Em.CreateEntityQuery(
+            ComponentType.ReadOnly<BuildingTag>(),
+            ComponentType.ReadOnly<Team>(),
+            ComponentType.ReadOnly<StableId>(),
+            ComponentType.ReadOnly<LocalTransform>());
+        _resourceQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<ResourcePoolTag>());
     }
 
     private void Update()
@@ -50,6 +62,14 @@ public class PlayerCommander : Commander
 
         if (Input.GetKeyDown(KeyCode.S))
             SaveNow();
+
+        // B = place the configured building under the cursor; N = demolish the
+        // nearest own building. Both are commands (tick-scheduled, validated at
+        // apply), replacing the old BuildingManager's direct entity creation.
+        if (Input.GetKeyDown(KeyCode.B) && GroundPoint(out float2 buildPos))
+            TryPlaceBuilding(buildPos);
+        if (Input.GetKeyDown(KeyCode.N) && GroundPoint(out float2 demoPos))
+            TryDemolishNearest(demoPos);
 
         if (Input.GetMouseButtonDown(1))
         {
@@ -106,6 +126,36 @@ public class PlayerCommander : Commander
             castPos = new float2(xf.Position.x, xf.Position.z);
         }
         IssueAbility(caster, armedIndex, castPos);
+    }
+
+    // --- buildings ------------------------------------------------------------
+
+    private void TryPlaceBuilding(float2 pos)
+    {
+        if (placeBuilding == null) { lastOrder = "(B ignored: no placeBuilding assigned)"; return; }
+        int defId = UnitManager.Instance != null ? UnitManager.Instance.GetDefId(team, placeBuilding) : -1;
+        if (defId < 0) { lastOrder = $"(B ignored: '{placeBuilding.displayName}' not in team {team} roster)"; return; }
+        IssuePlaceBuilding(defId, pos);
+    }
+
+    private void TryDemolishNearest(float2 pos)
+    {
+        var entities = _buildingQuery.ToEntityArray(Allocator.Temp);
+        var teams = _buildingQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var sids = _buildingQuery.ToComponentDataArray<StableId>(Allocator.Temp);
+        var xforms = _buildingQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
+
+        int best = -1; float bestD = float.MaxValue;
+        for (int i = 0; i < entities.Length; i++)
+        {
+            if (teams[i].Value != team) continue;
+            float d = math.distancesq(pos, new float2(xforms[i].Position.x, xforms[i].Position.z));
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        if (best >= 0) IssueDemolishBuilding(sids[best].Value);
+        else lastOrder = "(N ignored: no own building found)";
+
+        entities.Dispose(); teams.Dispose(); sids.Dispose(); xforms.Dispose();
     }
 
     // --- selection / orders ----------------------------------------------------
@@ -193,15 +243,20 @@ public class PlayerCommander : Commander
             var ids = Em.GetComponentData<AbilitySlots>(caster).Ids;
             var cds = Em.GetComponentData<AbilityCooldowns>(caster).ReadyTick;
             uint tick = _clockQuery2.HasSingleton<SimClock>() ? _clockQuery2.GetSingleton<SimClock>().Tick : 0u;
-            float hp = 0f, hpMax = 0f;
+            float hp = 0f, hpMax = 0f, mp = 0f, mpMax = 0f;
             if (Em.HasComponent<Health>(caster))
             {
                 var h = Em.GetComponentData<Health>(caster);
                 hp = h.Current; hpMax = h.Max;
             }
+            if (Em.HasComponent<Mana>(caster))
+            {
+                var m = Em.GetComponentData<Mana>(caster);
+                mp = m.Current; mpMax = m.Max;
+            }
 
             var sb = new System.Text.StringBuilder();
-            sb.Append($"Caster HP {hp:0}/{hpMax:0}  |  ");
+            sb.Append($"Caster HP {hp:0}/{hpMax:0}  MP {mp:0}/{mpMax:0}  |  ");
             var mgr = AbilityManager.Instance;
             for (int s = 0; s < 4; s++)
             {
@@ -214,6 +269,19 @@ public class PlayerCommander : Commander
                 sb.Append(armedIndex == s ? "] " : "  ");
             }
             GUI.Label(new Rect(10, Screen.height - 30, 900, 22), sb.ToString());
+        }
+
+        // Team resource readout (always shown; reads the sim's pool directly).
+        if (WorldOk && !_resourceQuery.IsEmpty)
+        {
+            var poolEntity = _resourceQuery.GetSingletonEntity();
+            var pool = Em.GetBuffer<TeamResources>(poolEntity);
+            if (team >= 0 && team < pool.Length)
+            {
+                var res = pool[team].Amounts;
+                GUI.Label(new Rect(10, Screen.height - 52, 900, 22),
+                          $"Gold {res.x}   Wood {res.y}   Stone {res.z}");
+            }
         }
 
         if (!dragging) return;

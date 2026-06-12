@@ -16,7 +16,12 @@ using UnityEngine;
 // client/replay, produces the same sim.
 // ===========================================================================
 
-public enum CommandKind : byte { None = 0, Move = 1, AttackMove = 2, Stop = 3, AttackTarget = 4, Ability = 5 }
+public enum CommandKind : byte
+{
+    None = 0, Move = 1, AttackMove = 2, Stop = 3, AttackTarget = 4, Ability = 5,
+    PlaceBuilding = 6,      // TargetPos = desired center (snapped at apply), TargetStableId = roster defId of the BuildingDefinition
+    DemolishBuilding = 7,   // TargetStableId = StableId of an own-team building; flows through normal death
+}
 
 // One order. The struct is fully unmanaged/blittable (FixedList included), so it
 // uses NGO's INetworkSerializeByMemcpy contract: a marker interface (no methods)
@@ -139,6 +144,15 @@ public partial struct CommandApplySystem : ISystem
         var qe  = SystemAPI.GetSingletonEntity<CommandQueueTag>();
         var em  = state.EntityManager;
 
+        // Shared validation inputs, fetched once. The Passable array and the
+        // resource ENTITY survive structural changes within the loop (the
+        // resource BUFFER is re-fetched at use, since spawns invalidate it).
+        bool hasGrid = SystemAPI.HasSingleton<ObstacleField>();
+        NativeArray<byte> passable = hasGrid ? SystemAPI.GetSingleton<ObstacleField>().Passable : default;
+        bool hasTerrain = SystemAPI.TryGetSingleton<TerrainHeightField>(out var terrain) && terrain.IsValid;
+        Entity resourceEntity = SystemAPI.HasSingleton<ResourcePoolTag>()
+            ? SystemAPI.GetSingletonEntity<ResourcePoolTag>() : Entity.Null;
+
         // 1) Pull this tick's commands out of the buffer (and drop expired ones)
         //    BEFORE applying anything: ability casts are structural changes that
         //    would invalidate the buffer mid-iteration.
@@ -157,7 +171,30 @@ public partial struct CommandApplySystem : ISystem
 
             if (c.Kind == CommandKind.Ability)
             {
-                ApplyAbility(ref state, c, tick, map, qe);
+                CommitAbility(ref state, c, tick, map, hasGrid, passable, hasTerrain, terrain, resourceEntity);
+                continue;
+            }
+
+            if (c.Kind == CommandKind.PlaceBuilding)
+            {
+                if (hasGrid)
+                    ApplyPlaceBuilding(c, passable, hasTerrain, terrain);
+                continue;
+            }
+
+            if (c.Kind == CommandKind.DemolishBuilding)
+            {
+                // Own-team buildings only; "demolish" is just health -> 0 so the
+                // normal death pipeline (anim, view recycle, obstacle unblock,
+                // checksum) handles everything.
+                if (map.TryGetValue(c.TargetStableId, out Entity b) &&
+                    em.HasComponent<BuildingTag>(b) && em.HasComponent<Health>(b) &&
+                    em.GetComponentData<Team>(b).Value == c.PlayerId)
+                {
+                    var hp = em.GetComponentData<Health>(b);
+                    hp.Current = 0f;
+                    em.SetComponentData(b, hp);
+                }
                 continue;
             }
 
@@ -168,6 +205,7 @@ public partial struct CommandApplySystem : ISystem
             {
                 if (!map.TryGetValue(c.Units[u], out Entity e)) continue;
                 if (!em.HasComponent<MoveTarget>(e) || !em.HasComponent<AttackOrder>(e)) continue;
+                if (em.HasComponent<Immobile>(e)) continue;   // buildings ignore movement/attack orders
 
                 MoveTarget mv  = em.GetComponentData<MoveTarget>(e);
                 AttackOrder ao = em.GetComponentData<AttackOrder>(e);
@@ -190,19 +228,67 @@ public partial struct CommandApplySystem : ISystem
         due.Dispose();
     }
 
+    // Spawns a building at the command's execution tick, with validation done
+    // HERE — not at issue time — so every peer accepts or rejects identically
+    // from identical sim state. Any client-side check (placement preview) is
+    // advisory only. Reads ObstacleField.Passable as-is: depending on system
+    // sort order it may be one tick stale, but it is the SAME staleness on
+    // every peer, so the decision stays deterministic.
+    //
+    // Rules (per the footprint's non-corner cells): in grid bounds, currently
+    // passable (covers obstacles AND slope-blocked cells), and terrain height
+    // spread <= the definition's maxHeightDelta. Y = the highest sampled cell
+    // height — the model's basement skirt covers the lower side.
+    private void ApplyPlaceBuilding(in SimCommand c, NativeArray<byte> passable,
+                                    bool hasTerrain, in TerrainHeightField terrain)
+    {
+        var um = UnitManager.Instance;
+        if (um == null) { Debug.LogWarning("[Building] placement dropped: no UnitManager in the scene."); return; }
+
+        int team = c.PlayerId;
+        var def = um.GetDefinition(team, c.TargetStableId) as BuildingDefinition;
+        if (def == null)
+        {
+            Debug.LogWarning($"[Building] placement dropped: roster def {c.TargetStableId} (team {team}) is not a BuildingDefinition.");
+            return;
+        }
+
+        int2 extents = new int2(math.max(1, def.footprintX), math.max(1, def.footprintZ));
+        if (!BuildingFootprint.ValidatePlacement(c.TargetPos, extents, def.maxHeightDelta,
+                                                 passable, hasTerrain, terrain, out float3 spawnPos))
+            return;   // off grid / blocked / too steep — identical verdict on every peer
+
+        um.SpawnUnit(def, c.TargetStableId, team, spawnPos);
+    }
+
     // Spawns the AbilityField entity for an Ability command, exactly like the old
     // HeroController.TryCast — but on a deterministic tick, with tick-based
     // cooldowns, from the AbilityManager's baked spec.
-    private void ApplyAbility(ref SystemState state, in SimCommand c, uint tick,
-                              NativeParallelHashMap<int, Entity> map, Entity qe)
+    // COMMIT — the gate. All checks happen here, at the execution tick, from
+    // sim state, so every peer reaches the same verdict; costs are consumed
+    // only when EVERY check passes (an over-range or unaffordable cast fizzles
+    // with nothing spent). On success the cooldown starts and a PendingCast is
+    // armed; AbilityCastSystem fires it ChargeUpTicks later (same tick for 0).
+    //
+    // Checks, in order: caster alive & able, slot registered, not already
+    // charging, off cooldown, mana, commander resources, cast range
+    // (WorldPoint), and — for spawn abilities — that the spawn point is valid
+    // (building footprint rule, or a passable cell for units) and the spawned
+    // definition is in the team roster.
+    private void CommitAbility(ref SystemState state, in SimCommand c, uint tick,
+                               NativeParallelHashMap<int, Entity> map,
+                               bool hasGrid, NativeArray<byte> passable,
+                               bool hasTerrain, in TerrainHeightField terrain,
+                               Entity resourceEntity)
     {
         var em = state.EntityManager;
         var mgr = AbilityManager.Instance;
         if (mgr == null) { Debug.LogWarning("[Ability] cast dropped: no AbilityManager in the scene."); return; }
         if (c.Units.Length == 0) { Debug.LogWarning("[Ability] cast dropped: command carried no caster id."); return; }
         if (!map.TryGetValue(c.Units[0], out Entity caster)) return;        // caster died before execution — normal, silent
-        if (!em.HasComponent<AbilitySlots>(caster) || !em.HasComponent<AbilityCooldowns>(caster))
-        { Debug.LogWarning($"[Ability] cast dropped: caster (StableId {c.Units[0]}) has no AbilitySlots/AbilityCooldowns."); return; }
+        if (!em.HasComponent<AbilitySlots>(caster) || !em.HasComponent<AbilityCooldowns>(caster) ||
+            !em.HasComponent<PendingCast>(caster) || !em.HasComponent<Mana>(caster))
+        { Debug.LogWarning($"[Ability] cast dropped: caster (StableId {c.Units[0]}) is missing ability components."); return; }
 
         int slot = c.AbilitySlot;
         if (slot < 0 || slot > 3) { Debug.LogWarning($"[Ability] cast dropped: bad slot {slot}."); return; }
@@ -212,51 +298,84 @@ public partial struct CommandApplySystem : ISystem
         if (abilityId < 0 || !mgr.TryGetSpec(abilityId, out var spec))
         { Debug.LogWarning($"[Ability] cast dropped: slot {slot} has no registered ability (id {abilityId})."); return; }
 
+        var pending = em.GetComponentData<PendingCast>(caster);
+        if (pending.Active != 0) return;                                    // already charging a cast — silent
+
         var cds = em.GetComponentData<AbilityCooldowns>(caster);
         if (cds.ReadyTick[slot] > tick) return;                             // still cooling down — normal, silent (HUD shows it)
-        cds.ReadyTick[slot] = tick + spec.CooldownTicks;
-        em.SetComponentData(caster, cds);
 
-        // Anchor geometry, from sim state at the execution tick (deterministic).
-        var xf = em.GetComponentData<LocalTransform>(caster);
-        float2 casterPos = new float2(xf.Position.x, xf.Position.z);
-        float3 fwd3 = math.forward(xf.Rotation);
-        float2 casterFwd = math.normalizesafe(new float2(fwd3.x, fwd3.z), new float2(0f, 1f));
-
-        float2 center, dir;
-        if (spec.Anchor == AnchorType.Hero) { center = casterPos; dir = casterFwd; }
-        else { center = c.TargetPos; dir = math.normalizesafe(c.TargetPos - casterPos, casterFwd); }
+        var mana = em.GetComponentData<Mana>(caster);
+        if (mana.Current < spec.ManaCost) return;                           // can't afford — fizzle, nothing consumed
 
         int team = em.HasComponent<Team>(caster) ? em.GetComponentData<Team>(caster).Value : c.PlayerId;
 
-        var seq = em.GetComponentData<FieldIdSeq>(qe);
-        int fieldId = seq.Next++;
-        em.SetComponentData(qe, seq);
-
-        var fe = em.CreateEntity();
-        em.AddComponentData(fe, new AbilityField
+        // Commander resources: check all three before consuming any.
+        bool hasResources = resourceEntity != Entity.Null && em.HasBuffer<TeamResources>(resourceEntity);
+        if (math.any(spec.Cost > 0))
         {
-            FieldId = fieldId,
-            AbilityId = abilityId,
-            Team = team,
-            Affects = spec.Affects,
-            Shape = spec.Shape,
-            Radius = spec.Radius,
-            Width = spec.Width,
-            Length = spec.Length,
-            Center = center,
-            Dir = dir,
-            Anchor = spec.Anchor,
-            AnchorEntity = spec.Anchor == AnchorType.Hero ? caster : Entity.Null,
-            Mode = spec.Mode,
-            Lifetime = spec.Lifetime,
-            RefreshWindow = 0.2f,
-        });
-        var fmods = em.AddBuffer<FieldModifier>(fe);
-        var src = mgr.GetModifiers(abilityId);
-        for (int i = 0; i < src.Length; i++) fmods.Add(src[i]);
+            if (!hasResources) return;                                      // no pool in the scene -> nothing to pay from
+            var pool = em.GetBuffer<TeamResources>(resourceEntity);
+            if (team < 0 || team >= pool.Length) return;
+            if (math.any(pool[team].Amounts < spec.Cost)) return;           // can't afford — fizzle, nothing consumed
+        }
 
-        // View event (the field entity may die the same tick for CastOnce).
-        em.GetBuffer<AbilityCastEvent>(qe).Add(new AbilityCastEvent { AbilityId = abilityId, Pos = center });
+        // Cast range: WorldPoint casts farther than CastRange from the caster fizzle.
+        var xf = em.GetComponentData<LocalTransform>(caster);
+        float2 casterPos = new float2(xf.Position.x, xf.Position.z);
+        if (spec.Anchor == AnchorType.WorldPoint && spec.CastRange > 0f &&
+            math.distance(casterPos, c.TargetPos) > spec.CastRange)
+            return;
+
+        // Spawn abilities: the spawn point must be valid NOW (a charge-up can
+        // still be beaten to the spot — fire spawns unconditionally; that
+        // window is the same accepted overlap as two same-tick placements).
+        if (spec.HasSpawn != 0)
+        {
+            var um = UnitManager.Instance;
+            var sdef = mgr.GetDefinition(abilityId) != null ? mgr.GetDefinition(abilityId).spawnUnit : null;
+            if (um == null || sdef == null || um.GetDefId(team, sdef) < 0)
+            {
+                Debug.LogWarning($"[Ability] cast dropped: spawn def missing or not in team {team} roster.");
+                return;
+            }
+            if (!hasGrid) return;
+            if (sdef is BuildingDefinition bdef)
+            {
+                int2 extents = new int2(math.max(1, bdef.footprintX), math.max(1, bdef.footprintZ));
+                if (!BuildingFootprint.ValidatePlacement(c.TargetPos, extents, bdef.maxHeightDelta,
+                                                         passable, hasTerrain, terrain, out _))
+                    return;                                                 // invalid spot — fizzle, nothing consumed
+            }
+            else
+            {
+                int2 cell = NavGrid.Cell(c.TargetPos);
+                if (!NavGrid.InBounds(cell.x, cell.y) || passable[NavGrid.Index(cell)] == 0)
+                    return;                                                 // invalid spot — fizzle, nothing consumed
+            }
+        }
+
+        // ---- every gate passed: consume and arm -------------------------------
+        mana.Current -= spec.ManaCost;
+        em.SetComponentData(caster, mana);
+
+        if (math.any(spec.Cost > 0))
+        {
+            var pool = em.GetBuffer<TeamResources>(resourceEntity);
+            var tr = pool[team];
+            tr.Amounts -= spec.Cost;
+            pool[team] = tr;
+        }
+
+        cds.ReadyTick[slot] = tick + spec.ChargeUpTicks + spec.CooldownTicks;   // cooldown runs from the fire tick
+        em.SetComponentData(caster, cds);
+
+        em.SetComponentData(caster, new PendingCast
+        {
+            Active = 1,
+            Slot = (byte)slot,
+            AbilityId = abilityId,
+            FireTick = tick + spec.ChargeUpTicks,
+            TargetPos = c.TargetPos,
+        });
     }
 }

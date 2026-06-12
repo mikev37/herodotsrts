@@ -219,9 +219,31 @@ public partial struct ObstacleGridSystem : ISystem
 
         for (int i = 0; i < passable.Length; i++) passable[i] = 1;
 
-        foreach (var (xform, obs) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Obstacle>>())
+        // Dead buildings stop blocking immediately (the corpse lingers for the
+        // death anim, but pathing opens up the tick health hits zero).
+        foreach (var (xform, obs) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Obstacle>>().WithNone<Dead>())
         {
             float2 p = new float2(xform.ValueRO.Position.x, xform.ValueRO.Position.z);
+            int2 e = obs.ValueRO.Extents;
+
+            if (e.x > 0 && e.y > 0)
+            {
+                // Rounded rectangle: e.x by e.y cells, one cut from each corner.
+                // The entity's position was footprint-snapped at spawn, so
+                // MinCell here recovers exactly the cells that were validated.
+                int2 min = BuildingFootprint.MinCell(p, e);
+                for (int ly = 0; ly < e.y; ly++)
+                for (int lx = 0; lx < e.x; lx++)
+                {
+                    if (BuildingFootprint.CornerCut(lx, ly, e)) continue;
+                    int x = min.x + lx, y = min.y + ly;
+                    if (!NavGrid.InBounds(x, y)) continue;
+                    passable[NavGrid.Index(x, y)] = 0;
+                }
+                continue;
+            }
+
+            // Circle (doodads / legacy).
             int2 c = NavGrid.Cell(p);
             int r = (int)math.ceil(obs.ValueRO.Radius / NavGrid.CellSize);
             for (int oy = -r; oy <= r; oy++)

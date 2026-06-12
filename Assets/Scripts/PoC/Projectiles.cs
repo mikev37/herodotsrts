@@ -87,7 +87,10 @@ public partial struct ProjectileSystem : ISystem
                 do
                 {
                     if (victim.Team == proj.ValueRO.Team) continue;
-                    if (math.distance(pos, victim.Position) > proj.ValueRO.HitRadius) continue;
+                    // Buildings have extent: a shot connects at the footprint
+                    // surface (inscribed radius), not only at the center.
+                    float hitRange = proj.ValueRO.HitRadius + (victim.IsBuilding ? victim.Radius : 0f);
+                    if (math.distance(pos, victim.Position) > hitRange) continue;
                     if (!healthLookup.HasComponent(victim.Entity)) continue;
 
                     // Mitigate using the victim's facing vs. where the shot came from
