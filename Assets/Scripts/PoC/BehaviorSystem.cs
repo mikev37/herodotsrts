@@ -55,7 +55,7 @@ public partial struct BehaviorSystem : ISystem
 
         new BehaviorJob
         {
-            ArriveRadius      = 10f,    // global: within this of an order target, the order is released
+            ArriveRadius      = 2f,    // global: within this of an order target, the order is released
             Lookahead         = 4f,    // global: how far ahead the summed maneuver direction aims
             HoldThreshold     = 1.7f,  // global: summed maneuver below this magnitude -> Hold (no creep, no turn)
             SlotDeadZone      = 0.2f,  // global: inside this of a slot, the slot is HELD (zero pull)
@@ -135,6 +135,11 @@ public partial struct BehaviorSystem : ISystem
             float targetDist = target.Has
                 ? math.distance(position, target.Info.Position)
                 : float.MaxValue;
+            // Buildings have extent: range checks run against the footprint
+            // surface, or melee can never "reach" a large building's center.
+            // (Restored — this adjustment was dropped in the merge.)
+            if (target.Has && target.Info.IsBuilding)
+                targetDist = math.max(0f, targetDist - target.Info.Radius);
             float2 enemyDir = target.Has
                 ? math.normalizesafe(target.Info.Position - position, new float2(0f, 1f))
                 : new float2(0f, 1f);
@@ -158,12 +163,29 @@ public partial struct BehaviorSystem : ISystem
                 float orderDist = math.distance(position, order.Value);
                 if (orderDist > ArriveRadius)
                 {
-                    float2 objective = math.normalizesafe(order.Value - position) * WeightOrder;
-                    float2 shaped = objective + Maneuver(E, position, enemyDir, spacing,
-                                                            in perception, in tuning, in friendlies, myFacing,
-                                                            target.Has, target.Info, targetDist, engageRange,
-                                                            includeNavigation: false);
-                    Act(ref dest, position, position + math.normalizesafe(shaped) * Lookahead);
+                    if (Los(position, order.Value))
+                    {
+                        // Goal directly visible: boid-shaped march toward a
+                        // lookahead carrot — formation shaping stays active.
+                        float2 objective = math.normalizesafe(order.Value - position) * WeightOrder;
+                        float2 shaped = objective + Maneuver(E, position, enemyDir, spacing,
+                                                                in perception, in tuning, in friendlies, myFacing,
+                                                                target.Has, target.Info, targetDist, engageRange,
+                                                                includeNavigation: false);
+                        Act(ref dest, position, position + math.normalizesafe(shaped) * Lookahead);
+                    }
+                    else
+                    {
+                        // Goal occluded (or beyond LoS range): NAVIGATE. The
+                        // destination must be the TRUE order point — Act derives
+                        // UseFlowField from LoS, and steering only routes when
+                        // the goal cell is stable. The lookahead carrot here
+                        // disabled pathfinding entirely: a nearby carrot is
+                        // almost always visible (UseFlowField = false), and when
+                        // it wasn't, its goal cell moved every tick and thrashed
+                        // the path slots.
+                        Act(ref dest, position, order.Value);
+                    }
                     bool engage = order.AttackMove && target.Has && Los(position, target.Info.Position);
                     if(!engage)
                         return;
@@ -176,12 +198,21 @@ public partial struct BehaviorSystem : ISystem
             {
                 if (target.Has && targetDist > engageRange)
                 {
-                    float2 objective = enemyDir * WeightOrder;
-                    float2 shaped = objective + Maneuver(E, position, enemyDir, spacing,
-                                                         in perception, in tuning, in friendlies, myFacing,
-                                                         target.Has, target.Info, targetDist, engageRange,
-                                                         includeNavigation: false);
-                    Act(ref dest, position, position + math.normalizesafe(shaped) * Lookahead);
+                    if (Los(position, target.Info.Position))
+                    {
+                        float2 objective = enemyDir * WeightOrder;
+                        float2 shaped = objective + Maneuver(E, position, enemyDir, spacing,
+                                                             in perception, in tuning, in friendlies, myFacing,
+                                                             target.Has, target.Info, targetDist, engageRange,
+                                                             includeNavigation: false);
+                        Act(ref dest, position, position + math.normalizesafe(shaped) * Lookahead);
+                    }
+                    else
+                    {
+                        // Same navigation rule as ordered moves: occluded target
+                        // -> route to its true position through the flow field.
+                        Act(ref dest, position, target.Info.Position);
+                    }
                     return;
                 }
                 attackOrder.Has = false;   // in range (or lost) -> release into instinct

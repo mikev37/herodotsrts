@@ -87,7 +87,7 @@ public static class NavGrid
 {
     public const int BigTilesPerAxis = 20;
     public const int SubPerAxis      = 50;
-    public const float CellSize      = 1f;
+    public const float CellSize      = 2f;
 
     public const int Res       = BigTilesPerAxis * SubPerAxis;
     public const int CellCount = Res * Res;

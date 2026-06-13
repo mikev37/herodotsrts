@@ -132,9 +132,20 @@ public class PlayerCommander : Commander
 
     private void TryPlaceBuilding(float2 pos)
     {
-        if (placeBuilding == null) { lastOrder = "(B ignored: no placeBuilding assigned)"; return; }
+        if (placeBuilding == null)
+        {
+            Debug.LogWarning("[Building] B ignored: no placeBuilding assigned on PlayerCommander.");
+            lastOrder = "(B ignored: no placeBuilding assigned)";
+            return;
+        }
         int defId = UnitManager.Instance != null ? UnitManager.Instance.GetDefId(team, placeBuilding) : -1;
-        if (defId < 0) { lastOrder = $"(B ignored: '{placeBuilding.displayName}' not in team {team} roster)"; return; }
+        if (defId < 0)
+        {
+            Debug.LogWarning($"[Building] B ignored: '{placeBuilding.displayName}' is not in team {team}'s UnitManager roster. " +
+                             "Add a roster entry for it (countPerTeam 0 is fine) — the roster index IS the network def id.");
+            lastOrder = $"(B ignored: '{placeBuilding.displayName}' not in team {team} roster)";
+            return;
+        }
         IssuePlaceBuilding(defId, pos);
     }
 
@@ -226,6 +237,16 @@ public class PlayerCommander : Commander
         p = default;
         var cam = Camera.main; if (cam == null) return false;
         var ray = cam.ScreenPointToRay(Input.mousePosition);
+        // Prefer the real ground: on raised terrain the y=0 plane lands the
+        // point long of where the cursor visually sits — moves merely arrive
+        // slightly off, but building placement then validates the WRONG cells.
+        // View-side only (the resulting point goes into the command), so this
+        // is lockstep-safe.
+        if (Physics.Raycast(ray, out RaycastHit hitInfo, 5000f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+        {
+            p = new float2(hitInfo.point.x, hitInfo.point.z);
+            return true;
+        }
         if (!new Plane(Vector3.up, Vector3.zero).Raycast(ray, out float enter)) return false;
         Vector3 hit = ray.GetPoint(enter);
         p = new float2(hit.x, hit.z);

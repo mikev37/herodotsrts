@@ -432,7 +432,7 @@ MonoBehaviour:
   configuresStream: 1
   lastOrder: (none)
   worldReady: 0
-  placeBuilding: {fileID: 0}
+  placeBuilding: {fileID: 11400000, guid: ff0be7765ce5ea14b973e65a545c1bd1, type: 2}
   selectedCount: 0
   dragging: 0
   armedIndex: -1
@@ -772,10 +772,18 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   teamone:
   - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
-    countPerTeam: 300
+    countPerTeam: 0
+  - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
+    countPerTeam: 0
+  - definition: {fileID: 11400000, guid: 0ba2a2468c7e07246bf7077fcf8c459e, type: 2}
+    countPerTeam: 20
+  - definition: {fileID: 11400000, guid: ff0be7765ce5ea14b973e65a545c1bd1, type: 2}
+    countPerTeam: 0
   teamtwo:
   - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 300
+    countPerTeam: 0
+  - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
+    countPerTeam: 0
   teamCount: 2
   fieldSize: 60
   teamColors:
@@ -968,54 +976,6 @@ MonoBehaviour:
   orbitSmoothing: 100
   panBoundsMin: {x: -500, y: -500}
   panBoundsMax: {x: 500, y: 500}
---- !u!1 &2012834996
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 2012834998}
-  - component: {fileID: 2012834997}
-  m_Layer: 0
-  m_Name: Buildings
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &2012834997
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2012834996}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: c779a609503281a4d94bbdd611014df8, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  buildingPrefab: {fileID: 4735678258241096891, guid: b076e0350c0ea7f448bcbd381bd00811, type: 3}
-  radius: 7
-  buildingCount: 0
-  worldReady: 0
---- !u!4 &2012834998
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2012834996}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 67.94485, y: 13.581925, z: 37.83006}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &2138677391
 GameObject:
   m_ObjectHideFlags: 0
@@ -1266,5 +1226,4 @@ SceneRoots:
   - {fileID: 1282320372}
   - {fileID: 1456942159446485426}
   - {fileID: 3367575877528022649}
-  - {fileID: 2012834998}
   - {fileID: 940009761}

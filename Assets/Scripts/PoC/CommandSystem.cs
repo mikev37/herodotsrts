@@ -254,9 +254,17 @@ public partial struct CommandApplySystem : ISystem
         }
 
         int2 extents = new int2(math.max(1, def.footprintX), math.max(1, def.footprintZ));
-        if (!BuildingFootprint.ValidatePlacement(c.TargetPos, extents, def.maxHeightDelta,
-                                                 passable, hasTerrain, terrain, out float3 spawnPos))
-            return;   // off grid / blocked / too steep — identical verdict on every peer
+        var verdict = BuildingFootprint.ValidatePlacement(c.TargetPos, extents, def.maxHeightDelta,
+                                                          passable, hasTerrain, terrain, out float3 spawnPos);
+        if (verdict != PlacementVerdict.Ok)
+        {
+            // Identical verdict on every peer (validation is pure sim state),
+            // so logging here is lockstep-safe. Loud on purpose: a silent
+            // reject is indistinguishable from a dropped command.
+            Debug.Log($"[Building] placement rejected at ({c.TargetPos.x:0.#},{c.TargetPos.y:0.#}): {verdict} " +
+                      $"(footprint {extents.x}x{extents.y}, maxHeightDelta {def.maxHeightDelta}).");
+            return;
+        }
 
         um.SpawnUnit(def, c.TargetStableId, team, spawnPos);
     }
@@ -342,15 +350,22 @@ public partial struct CommandApplySystem : ISystem
             if (sdef is BuildingDefinition bdef)
             {
                 int2 extents = new int2(math.max(1, bdef.footprintX), math.max(1, bdef.footprintZ));
-                if (!BuildingFootprint.ValidatePlacement(c.TargetPos, extents, bdef.maxHeightDelta,
-                                                         passable, hasTerrain, terrain, out _))
-                    return;                                                 // invalid spot — fizzle, nothing consumed
+                var verdict = BuildingFootprint.ValidatePlacement(c.TargetPos, extents, bdef.maxHeightDelta,
+                                                                  passable, hasTerrain, terrain, out _);
+                if (verdict != PlacementVerdict.Ok)
+                {
+                    Debug.Log($"[Ability] spawn cast fizzled at ({c.TargetPos.x:0.#},{c.TargetPos.y:0.#}): {verdict}. Nothing consumed.");
+                    return;
+                }
             }
             else
             {
                 int2 cell = NavGrid.Cell(c.TargetPos);
                 if (!NavGrid.InBounds(cell.x, cell.y) || passable[NavGrid.Index(cell)] == 0)
-                    return;                                                 // invalid spot — fizzle, nothing consumed
+                {
+                    Debug.Log($"[Ability] spawn cast fizzled at ({c.TargetPos.x:0.#},{c.TargetPos.y:0.#}): cell blocked or off grid. Nothing consumed.");
+                    return;
+                }
             }
         }
 

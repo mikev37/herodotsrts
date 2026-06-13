@@ -48,17 +48,21 @@ MonoBehaviour:
   bodyBlock: 1
   formWall: 1
   standBehindFriend: 0
+  standFrontline: 0
   advanceOnEnemy: 1
-  advanceIndividual: 1
+  advanceIndividual: 0
   avoidMelee: 0
   retreatLowHealth: 1
   formWedge: 0
   alignCardinal: 1
-  alignFacing: 0
-  alignMovement: 0
+  alignMovement: 1
   separate: 0
-  separateIdle: 1
+  separateIdle: 0
+  separateLateral: 1
+  groupCohesion: 0
+  followMoving: 0
   attackNearbyRange: 6
   avoidMeleeRange: 8
   retreatHealthFraction: 0.25
   pursueDistance: 30
+  cohesionRadius: 20

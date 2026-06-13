@@ -63,8 +63,10 @@ public static class BuildingFootprint
     // grid bounds, currently passable (covers obstacles AND slope-blocked
     // cells), and terrain height spread <= maxHeightDelta. On success,
     // spawnPos is the snapped center at the HIGHEST sampled cell height (the
-    // model's basement skirt covers the lower side).
-    public static bool ValidatePlacement(
+    // model's basement skirt covers the lower side). Returns a verdict so
+    // callers can report WHY a placement was rejected — silent rejection made
+    // failures undiagnosable.
+    public static PlacementVerdict ValidatePlacement(
         float2 desiredCenter, int2 extents, float maxHeightDelta,
         in Unity.Collections.NativeArray<byte> passable,
         bool hasTerrain, in TerrainHeightField terrain,
@@ -79,16 +81,24 @@ public static class BuildingFootprint
         {
             if (CornerCut(lx, ly, extents)) continue;
             int x = min.x + lx, y = min.y + ly;
-            if (!NavGrid.InBounds(x, y)) return false;                 // off the grid
-            if (passable[NavGrid.Index(x, y)] == 0) return false;      // blocked cell
+            if (!NavGrid.InBounds(x, y)) return PlacementVerdict.OffGrid;
+            if (passable[NavGrid.Index(x, y)] == 0) return PlacementVerdict.Blocked;
             float h = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
             minH = math.min(minH, h);
             maxH = math.max(maxH, h);
         }
-        if (maxH - minH > maxHeightDelta) return false;                // too steep
+        if (maxH - minH > maxHeightDelta) return PlacementVerdict.TooSteep;
 
         float2 snapped = SnappedCenter(min, extents);
         spawnPos = new float3(snapped.x, maxH, snapped.y);
-        return true;
+        return PlacementVerdict.Ok;
     }
+}
+
+public enum PlacementVerdict : byte
+{
+    Ok = 0,
+    OffGrid = 1,    // a footprint cell is outside the nav grid
+    Blocked = 2,    // a footprint cell is impassable (obstacle or slope-blocked)
+    TooSteep = 3,   // terrain height spread across the footprint exceeds maxHeightDelta
 }

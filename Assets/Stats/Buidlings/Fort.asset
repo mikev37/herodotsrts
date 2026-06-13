@@ -12,8 +12,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 371c4bb6cd491b7469497ac807c4f46e, type: 3}
   m_Name: Fort
   m_EditorClassIdentifier: 
-  displayName: Building
-  viewPrefab: {fileID: 0}
+  displayName: Fort
+  viewPrefab: {fileID: 4735678258241096891, guid: b076e0350c0ea7f448bcbd381bd00811, type: 3}
   speed: 0
   radius: 0.5
   mass: 50
@@ -48,20 +48,24 @@ MonoBehaviour:
   bodyBlock: 0
   formWall: 0
   standBehindFriend: 0
+  standFrontline: 0
   advanceOnEnemy: 0
   advanceIndividual: 0
   avoidMelee: 0
   retreatLowHealth: 0
   formWedge: 0
   alignCardinal: 0
-  alignFacing: 0
   alignMovement: 0
   separate: 0
   separateIdle: 0
+  separateLateral: 0
+  groupCohesion: 0
+  followMoving: 0
   attackNearbyRange: 8
   avoidMeleeRange: 6
   retreatHealthFraction: 0.25
   pursueDistance: 40
-  footprintX: 4
-  footprintZ: 4
+  cohesionRadius: 20
+  footprintX: 10
+  footprintZ: 10
   maxHeightDelta: 1

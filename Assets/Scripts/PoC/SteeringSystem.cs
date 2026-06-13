@@ -58,7 +58,10 @@ public partial struct SteeringSystem : ISystem
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(Immobile))]   // Immobile (buildings): position/rotation are spawn-fixed.
+                                                 // Critically, a building sits ON its own blocked footprint
+                                                 // cells — running this job would obstacle-push it out of
+                                                 // its own footprint every tick. (Restored after merge.)
     private partial struct SteerJob : IJobEntity
     {
         public float Dt, ObstacleStrength, ArriveRadius, FaceMinSpeed;
