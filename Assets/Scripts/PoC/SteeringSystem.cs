@@ -48,6 +48,7 @@ public partial struct SteeringSystem : ISystem
             ObstacleStrength = 14f,   // global: repulsion from blocked cells
             ArriveRadius     = 0.4f,  // global: stop distance when seeking
             FaceMinSpeed     = 0.3f,  // global: below this locomotion speed, movement doesn't drive facing
+            KnockbackDecay   = 5,
             PathMap          = lookup.Map,
             CoarseCost       = nf.CoarseCost,
             BlockOf          = nf.BlockOf,
@@ -65,7 +66,7 @@ public partial struct SteeringSystem : ISystem
                                                  // its own footprint every tick. (Restored after merge.)
     private partial struct SteerJob : IJobEntity
     {
-        public float Dt, ObstacleStrength, ArriveRadius, FaceMinSpeed;
+        public float Dt, ObstacleStrength, ArriveRadius, FaceMinSpeed, KnockbackDecay;
         [ReadOnly] public NativeParallelHashMap<int, int> PathMap;
         [ReadOnly] public NativeArray<int> CoarseCost;
         [ReadOnly] public NativeArray<int> BlockOf;
@@ -77,6 +78,7 @@ public partial struct SteeringSystem : ISystem
         private void Execute(
             Entity self,
             ref LocalTransform xform,
+            ref KnockbackVelocity kb,
             ref Velocity vel,
             ref NavContext navCtx,
             in Speed speed,
@@ -182,6 +184,11 @@ public partial struct SteeringSystem : ISystem
                 // gentle at the rim, firm at contact.
                 desired += normal * (penetration * penetration * ObstacleStrength);
             }
+
+            //3b. Knockback
+            desired += kb.Value;
+            kb.Value = math.lerp(kb.Value, float2.zero, Dt * KnockbackDecay);
+
 
             // --- 4. Integrate ------------------------------------------------
             // vel.Value is back-calculated from the actual step so that

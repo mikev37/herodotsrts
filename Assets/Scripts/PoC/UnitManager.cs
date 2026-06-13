@@ -112,7 +112,7 @@ public class UnitManager : MonoBehaviour
         {
             typeof(LocalTransform), typeof(UnitTag), typeof(Team), typeof(UnitDefId),
             typeof(BehaviorFlags), typeof(BehaviorOverride), typeof(UnitTuning), typeof(Attack),
-            typeof(Defense), typeof(Speed), typeof(Selected),
+            typeof(Defense), typeof(Speed), typeof(Selected), typeof(KnockbackVelocity),
             typeof(UnitRadius), typeof(Mass), typeof(Velocity), typeof(GroundSpeedMultiplier),
             typeof(MoveTarget), typeof(AttackOrder), typeof(CombatTarget), typeof(DesiredDestination),
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
