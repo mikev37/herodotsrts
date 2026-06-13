@@ -11,21 +11,6 @@ using Unity.Transforms;
 // It iterates the unit's ContactList — the SAME per-tick neighbor snapshot
 // Steering uses for separation (filled once by InformationGatherSystem) — so
 // physics and combat can never disagree about who is touching whom.
-//
-//   * BODY contact (radii-based, any range weapon irrelevant): continuous
-//     ramming damage from mass * closing speed, plus knockback. (Previously
-//     contact range scaled with WEAPON reach, so archers "rammed" from 20m.)
-//   * MELEE strikes: an attacker's published state decides who gets hit — the
-//     strike lands on the unit the attacker DECLARED as its target
-//     (UnitInfo.AttackTarget), or, for cleave attackers, on everyone inside
-//     the strike arc. Either way a body standing between attacker and victim
-//     blocks the hit (long weapons hit the first unit in line).
-//   * PROJECTILE hits: iterates the unit's IncomingProjectile buffer (filled
-//     by InformationGatherSystem from the ProjectileHash). Receiver-side, same
-//     pattern as melee. Marks the projectile Stale; ProjectileCleanupSystem
-//     destroys it after this system runs. Two threads may race to set Stale=true
-//     on the same projectile — both write the same value, always safe.
-//
 //   impact    = enemyMass * closingSpeed
 //   damage    = ImpactScale * impact * dt  (+ mitigated strike/projectile damage)
 //   knockback = away from the rammer, scaled by impact / ownMass
@@ -80,10 +65,11 @@ public partial struct ContactCombatSystem : ISystem
         private void Execute(
             [ChunkIndexInQuery] int sortKey,
             Entity self,
-            ref LocalTransform xform,
             ref Health health,
             ref CombatStatus status,
+            ref KnockbackVelocity kb,
             ref UnitAnim anim,
+            in LocalTransform xform,
             in Velocity velocity,
             in UnitRadius radius,
             in Mass mass,
@@ -161,7 +147,7 @@ public partial struct ContactCombatSystem : ISystem
             // Apply knockback directly to position (steering already ran).
             // Immobile entities (buildings) take the damage but never move.
             if (!ImmobileLk.HasComponent(self))
-                xform.Position += new float3(knockback.x, 0f, knockback.y) * Dt;
+                kb.Value += knockback; //xform.Position += new float3(knockback.x, 0f, knockback.y) * Dt;
 
             if (incoming > 0f)
             {

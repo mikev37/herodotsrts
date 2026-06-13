@@ -50,6 +50,13 @@ public struct Mass : IComponentData
     public float Value;
 }
 
+// Persistent knockback impulse accumulated by ContactCombatSystem and decayed
+// each tick by SteeringSystem. Units feel the push for multiple frames after
+// the impact, not just while directly in contact.
+public struct KnockbackVelocity : IComponentData {
+    public float2 Value;
+}
+
 // Set by the slope system each frame: <1 uphill, >1 downhill. Steering reads
 // it to scale locomotion. Because contact damage scales with actual velocity,
 // the "downhill hits harder" buff falls out for free.
