@@ -53,7 +53,7 @@ public partial struct InformationGatherSystem : ISystem {
             CellSize = hash.CellSize,
             ProjMap = projHash.Map,
             ProjCellSize = projHash.CellSize,
-            Passable = SystemAPI.GetSingleton<ObstacleField>().Passable,
+            CellType = SystemAPI.GetSingleton<ObstacleField>().CellType,
             SearchCells = 2,            // global: how many hash cells out to perceive
             ContactRadius = 6f,         // global: neighbors within this go into the ContactList
             FriendlyRadius = 8f,       // global: friendlies within this go into the FriendlyUnit buffer
@@ -61,6 +61,7 @@ public partial struct InformationGatherSystem : ISystem {
             ClusterRadius = 14f,        // global: trimmed mean spread above this -> "spread apart"
             LosRange = 10,              // global: max cells for LoS check
             NoLosMultiplier = 10f,       // global: effective distance penalty for enemies without LoS
+            HeightGate = 2.5f,           // global: melee can't engage across a height delta larger than this (wall-tops)
             BuildingDistanceBias = 30f,  // global: buildings count this many times farther in closest-enemy choice (units are preferred)
         }.ScheduleParallel();
     }
@@ -70,10 +71,10 @@ public partial struct InformationGatherSystem : ISystem {
     private partial struct GatherJob : IJobEntity {
         [ReadOnly] public NativeParallelMultiHashMap<int, UnitInfo> Map;
         [ReadOnly] public NativeParallelMultiHashMap<int, IncomingProjectile> ProjMap;
-        [ReadOnly] public NativeArray<byte> Passable;
+        [ReadOnly] public NativeArray<byte> CellType;
         public float CellSize, ContactRadius, FriendlyRadius, OutlierFactor, ClusterRadius;
         public float ProjCellSize;
-        public float NoLosMultiplier, BuildingDistanceBias;
+        public float NoLosMultiplier, BuildingDistanceBias, HeightGate;
         public int SearchCells, LosRange;
 
         private void Execute(
@@ -83,11 +84,15 @@ public partial struct InformationGatherSystem : ISystem {
             in UnitTuning meUnit,
             in Attack myAttack,
             in Defense myDefense,
+            in GroundSpeedMultiplier slope,
+            in NavContext navCtx,
             ref Perception perception,
             DynamicBuffer<UnitInfo> contacts,
             DynamicBuffer<FriendlyUnit> friendlies,
             DynamicBuffer<IncomingProjectile> incomingProjectiles) {
             float2 position = new float2(xform.Position.x, xform.Position.z);
+            float myHeight = slope.Height;
+            byte myCtx = navCtx.Value;
             float3 forward3 = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
 
@@ -122,14 +127,26 @@ public partial struct InformationGatherSystem : ISystem {
 
                         if (neighbor.IsBuilding)
                             distance = math.max(0f, distance - neighbor.Radius);
+
+                        // Height-delta MELEE gate: a melee unit can't fight (or
+                        // body-contact) something on a vastly different surface —
+                        // a defender on a wall-top vs an attacker at the base.
+                        // Ranged exempt (archers shoot down); buildings exempt
+                        // (tall but attackable from the ground). Keeps roof and
+                        // ground combat separate.
+                        bool heightBlocked = !myAttack.isRange && !neighbor.IsBuilding &&
+                                             math.abs(neighbor.Height - myHeight) > HeightGate;
+
                         bool los = neighbor.IsBuilding ||
-                                   NavTerrain.LineOfSight(position, neighbor.Position, Passable, LosRange);
+                                   NavTerrain.LineOfSight(position, neighbor.Position, CellType, myCtx, LosRange);
                         float effectiveDist = los ? distance : distance + NoLosMultiplier;
-                        if (effectiveDist <= ContactRadius)
+                        if (!heightBlocked && effectiveDist <= ContactRadius)
                             contacts.Add(neighbor);
 
                         if (neighbor.Team != team.Value) {
                             if (effectiveDist > meUnit.PursueDistance && !myAttack.isRange)
+                                continue;
+                            if (heightBlocked)
                                 continue;
                             enemies.Add(neighbor);
                             // Closest-enemy CHOICE prefers units: a building must

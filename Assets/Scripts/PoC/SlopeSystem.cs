@@ -21,6 +21,7 @@ public struct TerrainHeightField : IComponentData
     public int Resolution;
     public float WorldSize;              // square side length, world units
     public float2 Origin;                // world XZ of the (min, min) corner
+    public float WaterLevel;             // nav cells whose terrain is below this are Impassable (water)
     public bool IsValid;
 }
 
@@ -37,7 +38,20 @@ public partial struct SlopeSystem : ISystem
         if (!SystemAPI.TryGetSingleton<TerrainHeightField>(out var field) || !field.IsValid)
             return;
 
-        var job = new SlopeJob { Field = field, SlopeStrength = 1.5f };
+        // Surface override: roof/transition cells carry their own walk height, so
+        // a unit on a wall-top gets the wall's Y (not the terrain under it). Keeps
+        // slope.Height — read by combat, projectiles, the hash, the height gate —
+        // consistent with where the unit actually stands.
+        bool hasNav = SystemAPI.TryGetSingleton<ObstacleField>(out var obstacles);
+
+        var job = new SlopeJob
+        {
+            Field = field,
+            SlopeStrength = 1.5f,
+            HasNav = hasNav,
+            CellType = hasNav ? obstacles.CellType : default,
+            NavHeight = hasNav ? obstacles.NavHeight : default,
+        };
         state.Dependency = job.ScheduleParallel(state.Dependency);
     }
 
@@ -47,20 +61,34 @@ public partial struct SlopeSystem : ISystem
     {
         [ReadOnly] public TerrainHeightField Field;
         public float SlopeStrength;
+        public bool HasNav;
+        [ReadOnly] public NativeArray<byte> CellType;
+        [ReadOnly] public NativeArray<float> NavHeight;
 
         private void Execute(in LocalTransform xform, in DesiredDestination dest,
                              ref GroundSpeedMultiplier mul)
         {
-            // Height tracks the terrain ALWAYS (steering snaps y to it every
-            // tick, and external forces like knockback move idle units too).
-            // Previously this was only sampled while a destination was set, so
-            // an idle unit's Height could go stale (or stay at the spawn-time 0
-            // and pop the unit to y=0 on its first steering tick).
-            mul.Height = SampleHeight(xform.Position.xz);
+            float2 pos = new float2(xform.Position.x, xform.Position.z);
+
+            // Height tracks the surface the unit stands on. Roof/Transition cells
+            // override terrain with their baked NavHeight; everything else is
+            // terrain. Sampled ALWAYS (steering snaps y every tick, and external
+            // forces like knockback move idle units too).
+            float surfaceY = SampleHeight(pos);
+            if (HasNav)
+            {
+                int2 c = NavGrid.Cell(pos);
+                if (NavGrid.InBounds(c.x, c.y))
+                {
+                    byte t = CellType[NavGrid.Index(c.x, c.y)];
+                    if (t == NavCell.Roof || t == NavCell.Transition)
+                        surfaceY = NavHeight[NavGrid.Index(c.x, c.y)];
+                }
+            }
+            mul.Height = surfaceY;
 
             if (!dest.Has) { mul.Value = 1f; return; }
 
-            float2 pos = new float2(xform.Position.x, xform.Position.z);
             float2 heading = math.normalizesafe(dest.Value - pos);
 
             float2 grad = Gradient(pos);          // points uphill

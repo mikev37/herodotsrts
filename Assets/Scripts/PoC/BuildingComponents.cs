@@ -27,6 +27,27 @@ public struct BuildingTag : IComponentData { }
 public struct Immobile : IComponentData { }
 public struct AbilityImmune : IComponentData { }
 
+// A walkable wall. Like a building it's Immobile and selectable/damageable, but
+// instead of stamping Impassable it stamps a Roof top (walkable surface at
+// RoofHeight) with a Transition skirt one cell out, so units climb on from any
+// adjacent ground. Extents is the rectangular footprint in cells (no corner
+// cut — walls are solid rectangles). Stamped by ObstacleGridSystem.
+public struct Wall : IComponentData
+{
+    public int2  Extents;
+    public float RoofHeight;   // world Y of the walkable top
+}
+
+// A unit's current walking surface. Ground units sample terrain for Y and may
+// occupy Ground/Transition cells; Roof units sample NavHeight and may occupy
+// Roof/Transition cells. Flipped deterministically by SteeringSystem when the
+// unit steps off a Transition onto a pure cell of the opposite type. Sim state
+// — lives on every unit so changing surface never causes a structural change.
+public struct NavContext : IComponentData
+{
+    public byte Value;   // NavCell.ContextGround or NavCell.ContextRoof
+}
+
 // Footprint geometry shared by UnitManager (snap at spawn), CommandApplySystem
 // (placement validation), and ObstacleGridSystem (rasterization). One source of
 // truth so the stamped cells, the snapped position, and the validated cells can
@@ -68,9 +89,9 @@ public static class BuildingFootprint
     // failures undiagnosable.
     public static PlacementVerdict ValidatePlacement(
         float2 desiredCenter, int2 extents, float maxHeightDelta,
-        in Unity.Collections.NativeArray<byte> passable,
+        in Unity.Collections.NativeArray<byte> cellType,
         bool hasTerrain, in TerrainHeightField terrain,
-        out float3 spawnPos)
+        bool cutCorners, out float3 spawnPos)
     {
         spawnPos = default;
         int2 min = MinCell(desiredCenter, extents);
@@ -79,10 +100,12 @@ public static class BuildingFootprint
         for (int ly = 0; ly < extents.y; ly++)
         for (int lx = 0; lx < extents.x; lx++)
         {
-            if (CornerCut(lx, ly, extents)) continue;
+            if (cutCorners && CornerCut(lx, ly, extents)) continue;
             int x = min.x + lx, y = min.y + ly;
             if (!NavGrid.InBounds(x, y)) return PlacementVerdict.OffGrid;
-            if (passable[NavGrid.Index(x, y)] == 0) return PlacementVerdict.Blocked;
+            // Must be plain buildable Ground — not impassable (obstacle/slope/
+            // water) and not another structure's Roof/Transition surface.
+            if (cellType[NavGrid.Index(x, y)] != NavCell.Ground) return PlacementVerdict.Blocked;
             float h = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
             minH = math.min(minH, h);
             maxH = math.max(maxH, h);

@@ -8,10 +8,10 @@ using UnityEditor;
 // all exclude Immobile), so showing the fields would just invite confusion.
 // Reset() on BuildingDefinition sets the hidden fields to inert defaults.
 // ===========================================================================
-[CustomEditor(typeof(BuildingDefinition))]
+[CustomEditor(typeof(BuildingDefinition), editorForChildClasses: false)]
 public class BuildingDefinitionEditor : Editor
 {
-    private static readonly string[] Shown =
+    public static readonly string[] BuildingFields =
     {
         // identity & visuals
         "displayName", "viewPrefab",
@@ -28,7 +28,7 @@ public class BuildingDefinitionEditor : Editor
     public override void OnInspectorGUI()
     {
         serializedObject.Update();
-        foreach (var name in Shown)
+        foreach (var name in BuildingFields)
         {
             var prop = serializedObject.FindProperty(name);
             if (prop != null) EditorGUILayout.PropertyField(prop, true);

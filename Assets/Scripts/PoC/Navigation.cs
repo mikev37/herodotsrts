@@ -58,7 +58,16 @@ public static class NavTerrain
         return math.lerp(math.lerp(h00, h10, fx), math.lerp(h01, h11, fx), fy);
     }
 
-    public static bool LineOfSight(float2 a, float2 b, in NativeArray<byte> passable, int maxCells)
+    // Context-aware straight-line walkability: "can a unit currently on `context`
+    // walk straight from a to b without leaving cells it can stand on?" Ground
+    // units cross Ground+Transition; Roof units cross Roof+Transition; neither
+    // crosses the other's pure type or Impassable. This is the signal Behavior
+    // uses for straight-walk vs flow field, so ground->ramp->roof returns true
+    // (walk it, steering ramps height) while ground->sheer-roof returns false.
+    // Also closes diagonal seepage: a diagonal step is blocked unless both
+    // orthogonal shoulder cells are standable.
+    public static bool LineOfSight(float2 a, float2 b, in NativeArray<byte> cellType,
+                                   byte context, int maxCells)
     {
         int2 c0 = NavGrid.Cell(a), c1 = NavGrid.Cell(b);
         int dx = math.abs(c1.x - c0.x), dy = math.abs(c1.y - c0.y);
@@ -68,16 +77,22 @@ public static class NavTerrain
         int sy = c1.y >= c0.y ? 1 : -1;
         int x = c0.x, y = c0.y, err = dx - dy;
 
-        // No separate slope check needed: steep-slope cells are already marked
-        // impassable in ObstacleGridSystem, so the passable[] test covers them.
         for (int guard = 0; guard <= maxCells + 2; guard++)
         {
             if (!NavGrid.InBounds(x, y)) return false;
-            if (passable[NavGrid.Index(x, y)] == 0) return false;
+            if (!NavCell.CanStand(context, cellType[NavGrid.Index(x, y)])) return false;
             if (x == c1.x && y == c1.y) return true;
             int e2 = 2 * err;
-            if (e2 > -dy) { err -= dy; x += sx; }
-            if (e2 <  dx) { err += dx; y += sy; }
+            bool stepX = e2 > -dy, stepY = e2 < dx;
+            if (stepX && stepY)
+            {
+                int hx = x + sx, hy = y + sy;
+                bool shoulderX = NavGrid.InBounds(hx, y) && NavCell.CanStand(context, cellType[NavGrid.Index(hx, y)]);
+                bool shoulderY = NavGrid.InBounds(x, hy) && NavCell.CanStand(context, cellType[NavGrid.Index(x, hy)]);
+                if (!shoulderX || !shoulderY) return false;
+            }
+            if (stepX) { err -= dy; x += sx; }
+            if (stepY) { err += dx; y += sy; }
         }
         return true;
     }
@@ -129,7 +144,9 @@ public static class NavGrid
 
 public struct ObstacleField : IComponentData
 {
-    public NativeArray<byte> Passable;
+    public NativeArray<byte> Passable;   // UNION view: 0 = Impassable, 1 = walkable by someone (Ground/Roof/Transition)
+    public NativeArray<byte> CellType;   // NavCell.* per cell — the typed surface (read by LoS + steering repulsion)
+    public NativeArray<float> NavHeight; // walk-surface Y for Roof/Transition cells (Ground cells use terrain)
     public NativeArray<byte> CellComp;   // component id of each cell WITHIN its big tile (255 = impassable)
     public NativeArray<byte> CompCount;  // number of components per big tile
     public NativeArray<int>  BigVersion;
@@ -171,11 +188,22 @@ public struct PathLookup : IComponentData
 public partial struct ObstacleGridSystem : ISystem
 {
     private NativeArray<byte> _passable;
+    private NativeArray<byte> _cellType;
+    private NativeArray<float> _navHeight;
     private NativeArray<byte> _cellComp;
     private NativeArray<byte> _compCount;
     private NativeArray<int>  _bigVersion;
     private NativeArray<int>  _bigChecksum;
     private bool              _slopeStamped;
+
+    // Structural dirty tracking. The full grid rebuild (reset + stamp every
+    // obstacle/wall + re-checksum a million cells) only needs to run when the
+    // SET of structures changes — a build, a death, or (defensively) a move.
+    // We hash the obstacle+wall set cheaply each frame and skip the entire
+    // rebuild when it matches last frame. _forceRebuild covers the first frame
+    // and the one-time slope/water bake.
+    private uint              _structSignature;
+    private bool              _forceRebuild;
     // Cells marked impassable by terrain slope, computed once at first valid
     // terrain and OR'd into passable[] each frame after the obstacle pass.
     private NativeArray<byte> _slopeBlock;
@@ -183,17 +211,21 @@ public partial struct ObstacleGridSystem : ISystem
     public void OnCreate(ref SystemState state)
     {
         _passable    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
+        _cellType    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
+        _navHeight   = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
         _cellComp    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _compCount   = new NativeArray<byte>(NavGrid.BigCount, Allocator.Persistent);
         _bigVersion  = new NativeArray<int>(NavGrid.BigCount, Allocator.Persistent);
         _bigChecksum = new NativeArray<int>(NavGrid.BigCount, Allocator.Persistent);
         _slopeBlock  = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         for (int i = 0; i < _bigChecksum.Length; i++) _bigChecksum[i] = int.MinValue;
+        _forceRebuild = true;   // first frame always builds
 
         state.EntityManager.AddComponentData(state.EntityManager.CreateEntity(),
             new ObstacleField
             {
-                Passable = _passable, CellComp = _cellComp, CompCount = _compCount,
+                Passable = _passable, CellType = _cellType, NavHeight = _navHeight,
+                CellComp = _cellComp, CompCount = _compCount,
                 BigVersion = _bigVersion, Version = 0, CoarseVersion = 0,
             });
     }
@@ -201,6 +233,8 @@ public partial struct ObstacleGridSystem : ISystem
     public void OnDestroy(ref SystemState state)
     {
         if (_passable.IsCreated)    _passable.Dispose();
+        if (_cellType.IsCreated)    _cellType.Dispose();
+        if (_navHeight.IsCreated)   _navHeight.Dispose();
         if (_cellComp.IsCreated)    _cellComp.Dispose();
         if (_compCount.IsCreated)   _compCount.Dispose();
         if (_bigVersion.IsCreated)  _bigVersion.Dispose();
@@ -213,11 +247,48 @@ public partial struct ObstacleGridSystem : ISystem
     {
         var fieldRef = SystemAPI.GetSingletonRW<ObstacleField>();
         var passable = fieldRef.ValueRO.Passable;
+        var cellType = fieldRef.ValueRO.CellType;
+        var navHeight = fieldRef.ValueRO.NavHeight;
         var cellComp = fieldRef.ValueRO.CellComp;
         var compCount = fieldRef.ValueRO.CompCount;
         var bigVer   = fieldRef.ValueRO.BigVersion;
 
-        for (int i = 0; i < passable.Length; i++) passable[i] = 1;
+        bool hasTerrain = SystemAPI.TryGetSingleton<TerrainHeightField>(out var terrain) && terrain.IsValid;
+
+        // ---- structural dirty check -------------------------------------------
+        // Hash the obstacle+wall SET (position cell + extents + shape). This is a
+        // walk over a handful of structure entities, not the million-cell grid.
+        // If it matches last frame and nothing forces a rebuild (first frame, or
+        // the one-time slope/water bake becoming available), skip the entire
+        // reset/stamp/checksum/relabel pass — the grid can't have changed.
+        uint sig = 2166136261u;   // FNV-1a seed
+        foreach (var (xform, obs) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Obstacle>>().WithNone<Dead>())
+        {
+            int2 c = NavGrid.Cell(new float2(xform.ValueRO.Position.x, xform.ValueRO.Position.z));
+            sig = Fnv(sig, (uint)c.x); sig = Fnv(sig, (uint)c.y);
+            sig = Fnv(sig, (uint)obs.ValueRO.Extents.x); sig = Fnv(sig, (uint)obs.ValueRO.Extents.y);
+            sig = Fnv(sig, math.asuint(obs.ValueRO.Radius));
+        }
+        foreach (var (xform, wall) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Wall>>().WithNone<Dead>())
+        {
+            int2 c = NavGrid.Cell(new float2(xform.ValueRO.Position.x, xform.ValueRO.Position.z));
+            sig = Fnv(sig, (uint)c.x); sig = Fnv(sig, (uint)c.y);
+            sig = Fnv(sig, (uint)wall.ValueRO.Extents.x); sig = Fnv(sig, (uint)wall.ValueRO.Extents.y);
+            sig = Fnv(sig, math.asuint(wall.ValueRO.RoofHeight));
+            sig = Fnv(sig, 0x5A5A5A5Au);   // domain-separate walls from obstacles
+        }
+        // The slope/water bake becomes available the first frame terrain exists;
+        // force one rebuild then so it gets applied.
+        bool slopeNowAvailable = !_slopeStamped && hasTerrain;
+        if (!_forceRebuild && !slopeNowAvailable && sig == _structSignature)
+            return;   // nothing changed — the expensive rebuild is skipped entirely
+
+        _structSignature = sig;
+        _forceRebuild = false;
+
+        // ---- full rebuild (only reached on a structural change) ----------------
+        // Reset: every cell is plain Ground with no nav-height override.
+        for (int i = 0; i < cellType.Length; i++) { cellType[i] = NavCell.Ground; navHeight[i] = 0f; }
 
         // Dead buildings stop blocking immediately (the corpse lingers for the
         // death anim, but pathing opens up the tick health hits zero).
@@ -228,9 +299,6 @@ public partial struct ObstacleGridSystem : ISystem
 
             if (e.x > 0 && e.y > 0)
             {
-                // Rounded rectangle: e.x by e.y cells, one cut from each corner.
-                // The entity's position was footprint-snapped at spawn, so
-                // MinCell here recovers exactly the cells that were validated.
                 int2 min = BuildingFootprint.MinCell(p, e);
                 for (int ly = 0; ly < e.y; ly++)
                 for (int lx = 0; lx < e.x; lx++)
@@ -238,7 +306,7 @@ public partial struct ObstacleGridSystem : ISystem
                     if (BuildingFootprint.CornerCut(lx, ly, e)) continue;
                     int x = min.x + lx, y = min.y + ly;
                     if (!NavGrid.InBounds(x, y)) continue;
-                    passable[NavGrid.Index(x, y)] = 0;
+                    cellType[NavGrid.Index(x, y)] = NavCell.Impassable;
                 }
                 continue;
             }
@@ -251,22 +319,68 @@ public partial struct ObstacleGridSystem : ISystem
             {
                 int x = c.x + ox, y = c.y + oy;
                 if (!NavGrid.InBounds(x, y)) continue;
-                if (ox * ox + oy * oy <= r * r) passable[NavGrid.Index(x, y)] = 0;
+                if (ox * ox + oy * oy <= r * r) cellType[NavGrid.Index(x, y)] = NavCell.Impassable;
             }
         }
 
-        // Stamp steep-slope cells once (terrain never changes after construction).
-        // _slopeBlock[i] == 1 means the cell is blocked by slope; we apply it after
-        // the obstacle pass so the full obstacle reset cycle is unaffected.
-        if (!_slopeStamped && SystemAPI.TryGetSingleton<TerrainHeightField>(out var slopeField) && slopeField.IsValid)
+        // Walls: a Roof top (walkable) with a Transition skirt one cell out on
+        // every cardinal side, so units climb on from any approachable ground
+        // cell with no designated entrance. Stamped AFTER obstacles so a wall
+        // wins over an overlapping plain building footprint.
+        foreach (var (xform, wall) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Wall>>().WithNone<Dead>())
         {
+            float2 p = new float2(xform.ValueRO.Position.x, xform.ValueRO.Position.z);
+            int2 e = wall.ValueRO.Extents;
+            int2 min = BuildingFootprint.MinCell(p, e);
+            float topY = wall.ValueRO.RoofHeight;
+
+            for (int ly = 0; ly < e.y; ly++)
+            for (int lx = 0; lx < e.x; lx++)
+            {
+                int x = min.x + lx, y = min.y + ly;
+                if (!NavGrid.InBounds(x, y)) continue;
+                int idx = NavGrid.Index(x, y);
+                cellType[idx] = NavCell.Roof;
+                navHeight[idx] = topY;
+            }
+
+            // Transition skirt: the cardinal ring one cell outside the footprint,
+            // only over cells that are currently Ground (don't carve a ramp
+            // through another wall's roof or a building). NavHeight is the
+            // midpoint so the unit visibly ramps.
+            for (int ly = -1; ly <= e.y; ly++)
+            for (int lx = -1; lx <= e.x; lx++)
+            {
+                bool insideFootprint = lx >= 0 && lx < e.x && ly >= 0 && ly < e.y;
+                if (insideFootprint) continue;
+                bool xEdge = lx == -1 || lx == e.x;
+                bool yEdge = ly == -1 || ly == e.y;
+                if (xEdge && yEdge) continue;   // skip diagonal corners
+                int x = min.x + lx, y = min.y + ly;
+                if (!NavGrid.InBounds(x, y)) continue;
+                int idx = NavGrid.Index(x, y);
+                if (cellType[idx] != NavCell.Ground) continue;
+                float groundY = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
+                cellType[idx] = NavCell.Transition;
+                navHeight[idx] = (groundY + topY) * 0.5f;
+            }
+        }
+
+        // Stamp steep-slope AND below-waterline cells once (terrain never changes
+        // after construction). _slopeBlock[i] == 1 means terrain-blocked; applied
+        // below as Impassable, after the obstacle/wall pass.
+        if (!_slopeStamped && hasTerrain)
+        {
+            float waterLevel = terrain.WaterLevel;
             for (int y = 0; y < NavGrid.Res; y++)
             for (int x = 0; x < NavGrid.Res; x++)
             {
-                float hR = NavTerrain.SampleHeight(slopeField, NavGrid.CellCenter(math.min(x + 1, NavGrid.Res - 1), y));
-                float hL = NavTerrain.SampleHeight(slopeField, NavGrid.CellCenter(math.max(x - 1, 0), y));
-                float hU = NavTerrain.SampleHeight(slopeField, NavGrid.CellCenter(x, math.min(y + 1, NavGrid.Res - 1)));
-                float hD = NavTerrain.SampleHeight(slopeField, NavGrid.CellCenter(x, math.max(y - 1, 0)));
+                float hC = NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y));
+                if (hC < waterLevel) { _slopeBlock[NavGrid.Index(x, y)] = 1; continue; }
+                float hR = NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(math.min(x + 1, NavGrid.Res - 1), y));
+                float hL = NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(math.max(x - 1, 0), y));
+                float hU = NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, math.min(y + 1, NavGrid.Res - 1)));
+                float hD = NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, math.max(y - 1, 0)));
                 float grad = math.max(math.abs(hR - hL), math.abs(hU - hD)) * 0.5f;
                 if (grad > NavTerrain.SlopeCut)
                     _slopeBlock[NavGrid.Index(x, y)] = 1;
@@ -274,12 +388,17 @@ public partial struct ObstacleGridSystem : ISystem
             _slopeStamped = true;
         }
 
-        // Apply slope mask (zero out any cell blocked by slope).
+        // Apply terrain mask: a slope/water cell is Impassable unless a wall or
+        // ramp deliberately made it Roof/Transition (a wall may cross water).
         if (_slopeStamped)
         {
-            for (int i = 0; i < passable.Length; i++)
-                if (_slopeBlock[i] == 1) passable[i] = 0;
+            for (int i = 0; i < cellType.Length; i++)
+                if (_slopeBlock[i] == 1 && cellType[i] == NavCell.Ground)
+                    cellType[i] = NavCell.Impassable;
         }
+
+        // Derive the UNION passability the connectivity machinery consumes.
+        for (int i = 0; i < passable.Length; i++) passable[i] = NavCell.ToPassable(cellType[i]);
 
         bool anyMoved = false;
         var floodStack = new NativeArray<int>(NavGrid.SubCells, Allocator.Temp);
@@ -317,6 +436,16 @@ public partial struct ObstacleGridSystem : ISystem
     // More than MaxComp components in an 8x8 tile is pathological; overflow
     // regions merge into the last id (may create false intra-tile connectivity
     // there, never false blockage).
+    // FNV-1a step — folds one uint into the running structural signature hash.
+    private static uint Fnv(uint h, uint v)
+    {
+        h ^= v & 0xFF;          h *= 16777619u;
+        h ^= (v >> 8) & 0xFF;   h *= 16777619u;
+        h ^= (v >> 16) & 0xFF;  h *= 16777619u;
+        h ^= (v >> 24) & 0xFF;  h *= 16777619u;
+        return h;
+    }
+
     private static void LabelTile(NativeArray<byte> passable, NativeArray<byte> cellComp,
                                   NativeArray<byte> compCount, int2 origin, int b,
                                   NativeArray<int> stack)

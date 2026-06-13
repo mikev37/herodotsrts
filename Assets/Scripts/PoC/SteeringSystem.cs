@@ -48,12 +48,12 @@ public partial struct SteeringSystem : ISystem
             ObstacleStrength = 14f,   // global: repulsion from blocked cells
             ArriveRadius     = 0.4f,  // global: stop distance when seeking
             FaceMinSpeed     = 0.3f,  // global: below this locomotion speed, movement doesn't drive facing
-            KnockbackDecay   = 5,
             PathMap          = lookup.Map,
             CoarseCost       = nf.CoarseCost,
             BlockOf          = nf.BlockOf,
             FineDir          = nf.FineDir,
-            Passable         = obstacles.Passable,
+            CellType         = obstacles.CellType,
+            NavHeight        = obstacles.NavHeight,
             CellComp         = obstacles.CellComp,
         }.ScheduleParallel();
     }
@@ -65,19 +65,20 @@ public partial struct SteeringSystem : ISystem
                                                  // its own footprint every tick. (Restored after merge.)
     private partial struct SteerJob : IJobEntity
     {
-        public float Dt, ObstacleStrength, ArriveRadius, FaceMinSpeed, KnockbackDecay;
+        public float Dt, ObstacleStrength, ArriveRadius, FaceMinSpeed;
         [ReadOnly] public NativeParallelHashMap<int, int> PathMap;
         [ReadOnly] public NativeArray<int> CoarseCost;
         [ReadOnly] public NativeArray<int> BlockOf;
         [ReadOnly] public NativeArray<float2> FineDir;
-        [ReadOnly] public NativeArray<byte> Passable;
+        [ReadOnly] public NativeArray<byte> CellType;
+        [ReadOnly] public NativeArray<float> NavHeight;
         [ReadOnly] public NativeArray<byte> CellComp;
 
         private void Execute(
             Entity self,
             ref LocalTransform xform,
-            ref KnockbackVelocity kb,
             ref Velocity vel,
+            ref NavContext navCtx,
             in Speed speed,
             in UnitRadius radius,
             in GroundSpeedMultiplier slope,
@@ -85,6 +86,7 @@ public partial struct SteeringSystem : ISystem
             in DesiredDestination dest,
             DynamicBuffer<UnitInfo> contacts)
         {
+            byte ctx = navCtx.Value;
             float2 pos = new float2(xform.Position.x, xform.Position.z);
             float locomotion = speed.Value * slope.Value;
             float2 desired = float2.zero;
@@ -153,7 +155,11 @@ public partial struct SteeringSystem : ISystem
             {
                 int nx = cell.x + ox, ny = cell.y + oy;
                 if (!NavGrid.InBounds(nx, ny)) continue;
-                if (Passable[NavGrid.Index(nx, ny)] != 0) continue;
+                // A cell repels me if MY context can't stand on it. For a ground
+                // unit that's impassable + roof; for a roof unit that's
+                // impassable + ground (the wall edge), which fences it onto the
+                // wall-top so it can't be pushed off.
+                if (NavCell.CanStand(ctx, CellType[NavGrid.Index(nx, ny)])) continue;
                 float2 away = pos - NavGrid.CellCenter(nx, ny);
                 float dist = math.length(away);
                 if (dist < 1e-3f) continue;
@@ -177,11 +183,6 @@ public partial struct SteeringSystem : ISystem
                 desired += normal * (penetration * penetration * ObstacleStrength);
             }
 
-            //3b. Knockback
-            desired += kb.Value;
-            kb.Value = math.lerp(kb.Value, float2.zero, Dt * KnockbackDecay);
-
-
             // --- 4. Integrate ------------------------------------------------
             // vel.Value is back-calculated from the actual step so that
             // ContactCombat's closing-speed math reflects what really moved.
@@ -194,7 +195,26 @@ public partial struct SteeringSystem : ISystem
             float currentLen = math.min(math.length(vel.desiredValue), locomotion); // clamp to current top speed (handles cresting hills)
             float projectedLen = math.max(0f, math.dot(vel.Value, desiredDir));
             vel.desiredValue = desiredDir * math.min(currentLen, projectedLen);     // only bleed down, never boost
-            xform.Position = new float3(xform.Position.x + step.x, slope.Height, xform.Position.z + step.y);
+            // Surface + context. Resolve the destination cell AFTER the step.
+            // Context flips when the unit commits to a pure cell of the opposite
+            // type; on a Transition it's retained. Y comes from the surface:
+            // terrain (slope.Height) for Ground, NavHeight for Roof/Transition.
+            float newX = xform.Position.x + step.x;
+            float newZ = xform.Position.z + step.y;
+            int2 destCell = NavGrid.Cell(new float2(newX, newZ));
+            byte destType = NavGrid.InBounds(destCell.x, destCell.y)
+                ? CellType[NavGrid.Index(destCell.x, destCell.y)] : NavCell.Ground;
+
+            if (destType == NavCell.Ground) ctx = NavCell.ContextGround;
+            else if (destType == NavCell.Roof) ctx = NavCell.ContextRoof;
+            navCtx.Value = ctx;
+
+            float y = (destType == NavCell.Roof || destType == NavCell.Transition)
+                      && NavGrid.InBounds(destCell.x, destCell.y)
+                ? NavHeight[NavGrid.Index(destCell.x, destCell.y)]
+                : slope.Height;
+
+            xform.Position = new float3(newX, y, newZ);
 
             // --- 5. Facing ---------------------------------------------------
             // Three rules, in priority order:

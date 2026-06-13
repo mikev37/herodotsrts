@@ -112,12 +112,12 @@ public class UnitManager : MonoBehaviour
         {
             typeof(LocalTransform), typeof(UnitTag), typeof(Team), typeof(UnitDefId),
             typeof(BehaviorFlags), typeof(BehaviorOverride), typeof(UnitTuning), typeof(Attack),
-            typeof(Defense), typeof(Speed), typeof(Selected), typeof(KnockbackVelocity),
+            typeof(Defense), typeof(Speed), typeof(Selected),
             typeof(UnitRadius), typeof(Mass), typeof(Velocity), typeof(GroundSpeedMultiplier),
             typeof(MoveTarget), typeof(AttackOrder), typeof(CombatTarget), typeof(DesiredDestination),
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
             typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
-            typeof(Mana), typeof(PendingCast),
+            typeof(Mana), typeof(PendingCast), typeof(NavContext),
             typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit), typeof(IncomingProjectile),   // perception + contact/friendly lists
         };
         var archetype = _em.CreateArchetype(common);
@@ -220,6 +220,7 @@ public class UnitManager : MonoBehaviour
         // slope system's first write. Buildings keep this value forever (they
         // skip both the slope and steering systems).
         _em.SetComponentData(e, new GroundSpeedMultiplier { Value = 1f, Height = pos.y });
+        _em.SetComponentData(e, new NavContext { Value = NavCell.ContextGround });   // spawn on the ground
         _em.SetComponentData(e, new Health { Current = def.maxHealth, Max = def.maxHealth });
         _em.SetComponentData(e, new Mana { Current = def.maxMana, Max = def.maxMana, Regen = def.manaRegen });
         _em.SetComponentData(e, new DeathTimer { Seconds = def.deathAnimSeconds });
@@ -244,7 +245,18 @@ public class UnitManager : MonoBehaviour
         {
             _em.AddComponent<BuildingTag>(e);                          // identity (perception/targeting/info)
             _em.AddComponent<Immobile>(e);                             // movement gate (behavior/slope/steering/knockback skip)
-            _em.AddComponentData(e, new Obstacle { Extents = extents });  // nav-grid footprint (rasterized next ObstacleGrid pass)
+
+            if (bdef is WallDefinition wdef)
+            {
+                // A wall stamps a walkable Roof top + Transition skirt instead of
+                // a solid Impassable footprint. RoofHeight sits the configured
+                // amount above the footprint's highest terrain cell.
+                _em.AddComponentData(e, new Wall { Extents = extents, RoofHeight = pos.y + wdef.wallHeight });
+            }
+            else
+            {
+                _em.AddComponentData(e, new Obstacle { Extents = extents });  // nav-grid footprint
+            }
         }
 
         if (!def.receivesAbilities)

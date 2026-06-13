@@ -15,6 +15,8 @@ using UnityEngine;
 public class TerrainFieldBootstrap : MonoBehaviour
 {
     [SerializeField] private int resolution = 129;   // grid samples per side
+    [Tooltip("Nav cells whose sampled terrain height is below this become impassable (water). Set well below the terrain min to disable.")]
+    [SerializeField] private float waterLevel = -1000f;
 
     [Header("Debug (runtime, read-only)")]
     public bool terrainFound;
@@ -62,6 +64,7 @@ public class TerrainFieldBootstrap : MonoBehaviour
             Resolution = resolution,
             WorldSize = worldSize,
             Origin = new float2(origin.x, origin.z),
+            WaterLevel = waterLevel,
             IsValid = true,
         });
         fieldValid = true;

@@ -82,7 +82,7 @@ public partial struct BehaviorSystem : ISystem
             WeightCohesion    = 1.2f,  // global: pull toward the friendly center when too far
             WeightFollowMov   = 0.8f,  // global: align movement with friendlies that have a target
 
-            Passable = obstacles.Passable,
+            CellType = obstacles.CellType,
             LosRange = 20,             // global: max cells to test LOS; farther -> just use the field
         }.ScheduleParallel();
     }
@@ -91,7 +91,7 @@ public partial struct BehaviorSystem : ISystem
     [WithNone(typeof(Dead), typeof(Immobile))]   // Immobile (buildings): no decisions, no movement intent
     private partial struct BehaviorJob : IJobEntity
     {
-        [ReadOnly] public NativeArray<byte> Passable;
+        [ReadOnly] public NativeArray<byte> CellType;
         public float ArriveRadius, Lookahead, HoldThreshold;
         public float SlotDeadZone, SlotCaptureRadius, SlotMaxRange, HeightRangeBonus;
         public float FlankDistance, BodyBlockDistance, WallForwardOffset;
@@ -99,6 +99,12 @@ public partial struct BehaviorSystem : ISystem
                      WeightBehind, WeightFrontline, WeightWall, WeightWedge, WeightCardinal,
                      WeightAlignMove, WeightSeparate, WeightSpreadLat, WeightCohesion, WeightFollowMov;
         public int LosRange;
+
+        // Set at the top of every Execute to the current unit's surface context,
+        // so the Los helper (via Act/Attack) tests walkability for THIS unit.
+        // IJobEntity runs Execute to completion per entity, so a shared field
+        // written first thing each call is safe.
+        private byte _ctx;
 
         private void Execute(
             in LocalTransform xform,
@@ -110,6 +116,7 @@ public partial struct BehaviorSystem : ISystem
             in Ranged ranged,
             in Health health,
             in GroundSpeedMultiplier slope,
+            in NavContext navCtx,
             in DynamicBuffer<FriendlyUnit> friendlies,
             ref CombatTarget target,
             ref CombatStatus status,
@@ -117,6 +124,7 @@ public partial struct BehaviorSystem : ISystem
             ref MoveTarget order,
             ref DesiredDestination dest)
         {
+            _ctx = navCtx.Value;
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 forward3 = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
@@ -634,7 +642,7 @@ public partial struct BehaviorSystem : ISystem
         }
 
         private bool Los(float2 from, float2 to) =>
-            NavTerrain.LineOfSight(from, to, Passable, LosRange);
+            NavTerrain.LineOfSight(from, to, CellType, _ctx, LosRange);
 
         // Act: move to value. Facing is NOT set here — steering faces the
         // movement direction on its own (see facing rules in the header).

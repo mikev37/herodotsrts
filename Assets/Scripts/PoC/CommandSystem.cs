@@ -149,6 +149,7 @@ public partial struct CommandApplySystem : ISystem
         // resource BUFFER is re-fetched at use, since spawns invalidate it).
         bool hasGrid = SystemAPI.HasSingleton<ObstacleField>();
         NativeArray<byte> passable = hasGrid ? SystemAPI.GetSingleton<ObstacleField>().Passable : default;
+        NativeArray<byte> cellType = hasGrid ? SystemAPI.GetSingleton<ObstacleField>().CellType : default;
         bool hasTerrain = SystemAPI.TryGetSingleton<TerrainHeightField>(out var terrain) && terrain.IsValid;
         Entity resourceEntity = SystemAPI.HasSingleton<ResourcePoolTag>()
             ? SystemAPI.GetSingletonEntity<ResourcePoolTag>() : Entity.Null;
@@ -171,14 +172,14 @@ public partial struct CommandApplySystem : ISystem
 
             if (c.Kind == CommandKind.Ability)
             {
-                CommitAbility(ref state, c, tick, map, hasGrid, passable, hasTerrain, terrain, resourceEntity);
+                CommitAbility(ref state, c, tick, map, hasGrid, passable, cellType, hasTerrain, terrain, resourceEntity);
                 continue;
             }
 
             if (c.Kind == CommandKind.PlaceBuilding)
             {
                 if (hasGrid)
-                    ApplyPlaceBuilding(c, passable, hasTerrain, terrain);
+                    ApplyPlaceBuilding(c, cellType, hasTerrain, terrain);
                 continue;
             }
 
@@ -239,7 +240,7 @@ public partial struct CommandApplySystem : ISystem
     // passable (covers obstacles AND slope-blocked cells), and terrain height
     // spread <= the definition's maxHeightDelta. Y = the highest sampled cell
     // height — the model's basement skirt covers the lower side.
-    private void ApplyPlaceBuilding(in SimCommand c, NativeArray<byte> passable,
+    private void ApplyPlaceBuilding(in SimCommand c, NativeArray<byte> cellType,
                                     bool hasTerrain, in TerrainHeightField terrain)
     {
         var um = UnitManager.Instance;
@@ -254,8 +255,9 @@ public partial struct CommandApplySystem : ISystem
         }
 
         int2 extents = new int2(math.max(1, def.footprintX), math.max(1, def.footprintZ));
+        bool cutCorners = !(def is WallDefinition);   // walls are solid rectangles
         var verdict = BuildingFootprint.ValidatePlacement(c.TargetPos, extents, def.maxHeightDelta,
-                                                          passable, hasTerrain, terrain, out float3 spawnPos);
+                                                          cellType, hasTerrain, terrain, cutCorners, out float3 spawnPos);
         if (verdict != PlacementVerdict.Ok)
         {
             // Identical verdict on every peer (validation is pure sim state),
@@ -285,7 +287,7 @@ public partial struct CommandApplySystem : ISystem
     // definition is in the team roster.
     private void CommitAbility(ref SystemState state, in SimCommand c, uint tick,
                                NativeParallelHashMap<int, Entity> map,
-                               bool hasGrid, NativeArray<byte> passable,
+                               bool hasGrid, NativeArray<byte> passable, NativeArray<byte> cellType,
                                bool hasTerrain, in TerrainHeightField terrain,
                                Entity resourceEntity)
     {
@@ -350,8 +352,9 @@ public partial struct CommandApplySystem : ISystem
             if (sdef is BuildingDefinition bdef)
             {
                 int2 extents = new int2(math.max(1, bdef.footprintX), math.max(1, bdef.footprintZ));
+                bool cutCorners = !(bdef is WallDefinition);
                 var verdict = BuildingFootprint.ValidatePlacement(c.TargetPos, extents, bdef.maxHeightDelta,
-                                                                  passable, hasTerrain, terrain, out _);
+                                                                  cellType, hasTerrain, terrain, cutCorners, out _);
                 if (verdict != PlacementVerdict.Ok)
                 {
                     Debug.Log($"[Ability] spawn cast fizzled at ({c.TargetPos.x:0.#},{c.TargetPos.y:0.#}): {verdict}. Nothing consumed.");

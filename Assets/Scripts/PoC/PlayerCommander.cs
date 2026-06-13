@@ -20,6 +20,8 @@ public class PlayerCommander : Commander
     [Header("Buildings")]
     [Tooltip("Building placed with B. Must appear in this team's UnitManager roster (countPerTeam 0 is fine).")]
     [SerializeField] private BuildingDefinition placeBuilding;
+    [Tooltip("Wall placed with V. A WallDefinition; must appear in this team's roster.")]
+    [SerializeField] private WallDefinition placeWall;
 
     [Header("Player debug (runtime, read-only)")]
     public int selectedCount;
@@ -67,7 +69,9 @@ public class PlayerCommander : Commander
         // nearest own building. Both are commands (tick-scheduled, validated at
         // apply), replacing the old BuildingManager's direct entity creation.
         if (Input.GetKeyDown(KeyCode.B) && GroundPoint(out float2 buildPos))
-            TryPlaceBuilding(buildPos);
+            TryPlaceBuilding(placeBuilding, buildPos);
+        if (Input.GetKeyDown(KeyCode.V) && GroundPoint(out float2 wallPos))
+            TryPlaceBuilding(placeWall, wallPos);
         if (Input.GetKeyDown(KeyCode.N) && GroundPoint(out float2 demoPos))
             TryDemolishNearest(demoPos);
 
@@ -130,20 +134,15 @@ public class PlayerCommander : Commander
 
     // --- buildings ------------------------------------------------------------
 
-    private void TryPlaceBuilding(float2 pos)
+    private void TryPlaceBuilding(BuildingDefinition def, float2 pos)
     {
-        if (placeBuilding == null)
-        {
-            Debug.LogWarning("[Building] B ignored: no placeBuilding assigned on PlayerCommander.");
-            lastOrder = "(B ignored: no placeBuilding assigned)";
-            return;
-        }
-        int defId = UnitManager.Instance != null ? UnitManager.Instance.GetDefId(team, placeBuilding) : -1;
+        if (def == null) { lastOrder = "(place ignored: no definition assigned)"; return; }
+        int defId = UnitManager.Instance != null ? UnitManager.Instance.GetDefId(team, def) : -1;
         if (defId < 0)
         {
-            Debug.LogWarning($"[Building] B ignored: '{placeBuilding.displayName}' is not in team {team}'s UnitManager roster. " +
-                             "Add a roster entry for it (countPerTeam 0 is fine) — the roster index IS the network def id.");
-            lastOrder = $"(B ignored: '{placeBuilding.displayName}' not in team {team} roster)";
+            Debug.LogWarning($"[Place] ignored: '{def.displayName}' is not in team {team}'s UnitManager roster. " +
+                             "Add a roster entry for it (countPerTeam 0 is fine) — the roster index is the network def id.");
+            lastOrder = $"(place ignored: '{def.displayName}' not in team {team} roster)";
             return;
         }
         IssuePlaceBuilding(defId, pos);

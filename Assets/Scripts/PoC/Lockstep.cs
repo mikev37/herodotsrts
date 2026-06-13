@@ -195,17 +195,19 @@ public partial struct SimChecksumSystem : ISystem
             in Health health,
             in Velocity velocity,
             in Team team,
-            in StableId stableId)
+            in StableId stableId,
+            in NavContext navCtx)
         {
             uint a = math.hash(new uint4(
                 math.asuint(xform.Position.x),
                 math.asuint(xform.Position.z),
                 math.asuint(health.Current),
                 math.asuint(velocity.Value.x)));
-            uint b = math.hash(new uint3(
+            uint b = math.hash(new uint4(
                 math.asuint(velocity.Value.y),
                 (uint)team.Value,
-                (uint)stableId.Value));
+                (uint)stableId.Value,
+                navCtx.Value));   // surface context — a roof/ground divergence shows here
             Partials[_threadIndex] += a ^ b;   // '+' is commutative -> independent of iteration order
         }
     }
