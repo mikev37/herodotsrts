@@ -22,14 +22,30 @@ public struct SimDebug : IComponentData
     public int2 FlowGoalCell;
 }
 
+// Gate: SimDebugSystem only runs while this singleton exists. DebugOverlay
+// creates it while the overlay component is enabled and destroys it on disable,
+// so the (main-thread, scan-heavy) debug tally never runs when nothing is
+// watching it.
+public struct SimDebugRequest : IComponentData { }
+
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 [UpdateAfter(typeof(DeathSystem))]
 public partial struct SimDebugSystem : ISystem
 {
+    // Cached blocked-cell count: rescanning the whole passability grid (Res^2)
+    // every frame dominated this system's cost. The count only changes when
+    // obstacles change, which bumps ObstacleField.Version — so we rescan only
+    // on a version change and serve the cached value otherwise.
+    private int _cachedBlockedCells;
+    private int _cachedObstacleVersion;
+
     public void OnCreate(ref SystemState state)
     {
         state.EntityManager.AddComponentData(state.EntityManager.CreateEntity(), new SimDebug());
+        // Don't run unless something (the DebugOverlay) is asking for stats.
+        state.RequireForUpdate<SimDebugRequest>();
+        _cachedObstacleVersion = -1;
     }
 
     [BurstCompile]
@@ -61,12 +77,15 @@ public partial struct SimDebugSystem : ISystem
         if (SystemAPI.TryGetSingleton<ObstacleField>(out var obs))
         {
             d.ObstacleVersion = obs.Version;
-            if (obs.Passable.IsCreated)
+            // Rescan only when obstacles actually changed; serve cache otherwise.
+            if (obs.Version != _cachedObstacleVersion && obs.Passable.IsCreated)
             {
                 int blocked = 0;
                 for (int i = 0; i < obs.Passable.Length; i++) if (obs.Passable[i] == 0) blocked++;
-                d.BlockedCells = blocked;
+                _cachedBlockedCells = blocked;
+                _cachedObstacleVersion = obs.Version;
             }
+            d.BlockedCells = _cachedBlockedCells;
         }
         if (SystemAPI.TryGetSingleton<NavFields>(out var nf))
         {

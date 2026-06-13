@@ -5,119 +5,141 @@ using Unity.Mathematics;
 using Unity.Transforms;
 
 // ===========================================================================
-// PROJECTILE SIM — move along an arc, expire, and on contact with an enemy unit
-// apply mitigated damage and despawn. Firing/cadence lives in AttackTimerSystem;
-// this only flies the projectiles that already exist.
+// PROJECTILE SIM — two passes:
 //
-// Arc: horizontal position advances straight at Velocity; the vertical position
-// interpolates from the SHOOTER's launch height to the TARGET's ground height,
-// plus the bulge: y(u) = lerp(StartY, EndY, u) + 4*Rise*u*(1-u), u = 1-Life/TotalLife.
-// So shots fired downhill descend onto the target and uphill shots climb to it.
+//   1. MoveAndHashJob (this system, before InformationGatherSystem):
+//      Move each projectile along its arc, build the ProjectileHash singleton
+//      so InformationGatherSystem can fill each unit's IncomingProjectile buffer.
 //
-// Collision only happens at/below CollisionHeight, so a high arc clears nearer
-// units and connects as it comes down. Damage uses the same armor/shield/backstab
-// mitigation as melee (CombatMath), with the projectile's travel direction as the
-// incoming-hit direction.
+//   2. Cleanup pass (after ContactCombatSystem):
+//      Destroy any projectile marked Stale (hit by a unit receiver-side in
+//      ContactCombatSystem) or whose Life has expired.
 //
-// Runs on the main thread: applying damage is a cross-entity write (Health on
-// another unit), same reason melee stays receiver-side. Fine at modest counts.
+// Hit detection has moved to ContactCombatSystem (receiver-side, parallel),
+// matching the melee/contact pattern. Cross-entity Health writes are gone.
 // ===========================================================================
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
-[UpdateAfter(typeof(ContactCombatSystem))]
+[UpdateAfter(typeof(SpatialHashSystem))]
+[UpdateBefore(typeof(InformationGatherSystem))]
 public partial struct ProjectileSystem : ISystem
 {
     public void OnCreate(ref SystemState state)
     {
-        state.RequireForUpdate<SpatialHash>();
+        var e = state.EntityManager.CreateEntity();
+        state.EntityManager.AddComponentData(e, new ProjectileHash
+        {
+            Map = default,
+            CellSize = 12f,   // global: match SpatialHash.CellSize
+        });
         state.RequireForUpdate<EndSimulationEntityCommandBufferSystem.Singleton>();
     }
 
     [BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
-        var hash = SystemAPI.GetSingleton<SpatialHash>();
-        if (!hash.Map.IsCreated) return;
-
-        var ecb = SystemAPI
-            .GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>()
-            .CreateCommandBuffer(state.WorldUnmanaged);
-        var healthLookup = SystemAPI.GetComponentLookup<Health>(false);
-        var animLookup = SystemAPI.GetComponentLookup<UnitAnim>(false);
-        var defenseLookup = SystemAPI.GetComponentLookup<Defense>(true);
-
         float dt = SystemAPI.Time.DeltaTime;
-        float cell = hash.CellSize;
 
-        foreach (var (xform, proj, entity) in
-                 SystemAPI.Query<RefRW<LocalTransform>, RefRW<Projectile>>().WithEntityAccess())
+        var projQuery = SystemAPI.QueryBuilder()
+            .WithAll<ProjectileTag, LocalTransform, Projectile>().Build();
+        int count = math.max(projQuery.CalculateEntityCount(), 1);
+
+        var hashRef = SystemAPI.GetSingletonRW<ProjectileHash>();
+        // Rewindable allocator: auto-freed each frame, no manual Dispose.
+        hashRef.ValueRW.Map = new NativeParallelMultiHashMap<int, IncomingProjectile>(
+            count, state.WorldUpdateAllocator);
+
+        // Single-threaded for the same determinism reason as SpatialHashSystem:
+        // insertion order into the hash must be stable across runs.
+        state.Dependency = new MoveAndHashJob
         {
-            proj.ValueRW.Life -= dt;
-            if (proj.ValueRO.Life <= 0f) { ecb.DestroyEntity(entity); continue; }
+            Dt       = dt,
+            Map      = hashRef.ValueRW.Map,
+            CellSize = hashRef.ValueRO.CellSize,
+        }.Schedule(state.Dependency);
+    }
 
-            // Horizontal advance.
-            float2 step = proj.ValueRO.Velocity * dt;
-            float3 np = xform.ValueRO.Position + new float3(step.x, 0f, step.y);
+    [BurstCompile]
+    private partial struct MoveAndHashJob : IJobEntity
+    {
+        public float Dt;
+        public float CellSize;
+        public NativeParallelMultiHashMap<int, IncomingProjectile> Map;
 
-            // Vertical arc.
-            float total = math.max(proj.ValueRO.TotalLife, 1e-4f);
-            float u = math.saturate(1f - proj.ValueRO.Life / total);
-            np.y = math.lerp(proj.ValueRO.StartY, proj.ValueRO.EndY, u)
-                 + 4f * proj.ValueRO.Rise * u * (1f - u);
+        private void Execute(Entity entity, ref LocalTransform xform, ref Projectile proj)
+        {
+            if (proj.Stale) return;
 
-            xform.ValueRW.Position = np;
-            xform.ValueRW.Rotation = quaternion.LookRotationSafe(
-                new float3(proj.ValueRO.Velocity.x, 0f, proj.ValueRO.Velocity.y), math.up());
+            proj.Life -= Dt;
+            if (proj.Life <= 0f) { proj.Stale = true; return; }
 
-            // Only collide once the shot is low enough over the DESTINATION
-            // terrain (lets high arcs clear nearer units on any slope).
-            if (np.y > proj.ValueRO.EndY + proj.ValueRO.CollisionHeight) continue;
+            float2 step = proj.Velocity * Dt;
+            float3 np   = xform.Position + new float3(step.x, 0f, step.y);
+
+            float total = math.max(proj.TotalLife, 1e-4f);
+            float u     = math.saturate(1f - proj.Life / total);
+            np.y = math.lerp(proj.StartY, proj.EndY, u)
+                 + 4f * proj.Rise * u * (1f - u);
+
+            xform.Position = np;
+            xform.Rotation = quaternion.LookRotationSafe(
+                new float3(proj.Velocity.x, 0f, proj.Velocity.y), math.up());
+
+            // Only hash projectiles that are low enough to be hittable this frame.
+            if (np.y > proj.EndY + proj.CollisionHeight) return;
 
             float2 pos = new float2(np.x, np.z);
-            float2 dir = math.normalizesafe(proj.ValueRO.Velocity, new float2(0f, 1f));
-            int cx = (int)math.floor(pos.x / cell);
-            int cy = (int)math.floor(pos.y / cell);
-            bool consumed = false;
+            int key = ((int)math.floor(pos.x / CellSize) * 73856093)
+                    ^ ((int)math.floor(pos.y / CellSize) * 19349663);
 
-            for (int oy = -1; oy <= 1 && !consumed; oy++)
-            for (int ox = -1; ox <= 1 && !consumed; ox++)
+            Map.Add(key, new IncomingProjectile
             {
-                int key = ((cx + ox) * 73856093) ^ ((cy + oy) * 19349663);
-                if (!hash.Map.TryGetFirstValue(key, out var victim, out var iterator)) continue;
-                do
-                {
-                    if (victim.Team == proj.ValueRO.Team) continue;
-                    // Buildings have extent: a shot connects at the footprint
-                    // surface (inscribed radius), not only at the center.
-                    float hitRange = proj.ValueRO.HitRadius + (victim.IsBuilding ? victim.Radius : 0f);
-                    if (math.distance(pos, victim.Position) > hitRange) continue;
-                    if (!healthLookup.HasComponent(victim.Entity)) continue;
+                Entity    = entity,
+                Position  = pos,
+                Velocity  = proj.Velocity,
+                Direction = math.normalizesafe(proj.Velocity, new float2(0f, 1f)),
+                Damage    = proj.Damage,
+                HitRadius = proj.HitRadius,
+                Team      = proj.Team,
+            });
+        }
+    }
+}
 
-                    // Mitigate using the victim's facing vs. where the shot came from
-                    // (toThreat = -travel direction). victim.Facing is the victim's facing.
-                    float armor = 0f, shield = 0f;
-                    if (defenseLookup.HasComponent(victim.Entity))
-                    {
-                        var d = defenseLookup[victim.Entity];
-                        armor = d.Armor; shield = d.Shield;
-                    }
-                    float dealt = CombatMath.Mitigate(proj.ValueRO.Damage, victim.Facing, -dir, armor, shield);
+// ===========================================================================
+// Destroys projectiles marked Stale (hit) or expired. Runs after
+// ContactCombatSystem so all Stale flags from this frame are set.
+// ===========================================================================
+[BurstCompile]
+[UpdateInGroup(typeof(SimulationSystemGroup))]
+[UpdateAfter(typeof(ContactCombatSystem))]
+public partial struct ProjectileCleanupSystem : ISystem
+{
+    public void OnCreate(ref SystemState state)
+    {
+        state.RequireForUpdate<EndSimulationEntityCommandBufferSystem.Singleton>();
+    }
 
-                    var hp = healthLookup[victim.Entity];
-                    hp.Current -= dealt;
-                    healthLookup[victim.Entity] = hp;
-                    if (hp.Current <= 0f && animLookup.HasComponent(victim.Entity))
-                    {
-                        var a = animLookup[victim.Entity]; a.State = AnimState.Die;
-                        animLookup[victim.Entity] = a;
-                        ecb.AddComponent<Dead>(victim.Entity);
-                    }
-                    ecb.DestroyEntity(entity);
-                    consumed = true;
-                    break;
-                }
-                while (hash.Map.TryGetNextValue(out victim, ref iterator));
-            }
+    [BurstCompile]
+    public void OnUpdate(ref SystemState state)
+    {
+        var ecb = SystemAPI
+            .GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>()
+            .CreateCommandBuffer(state.WorldUnmanaged)
+            .AsParallelWriter();
+
+        state.Dependency = new CleanupJob { Ecb = ecb }.ScheduleParallel(state.Dependency);
+    }
+
+    [BurstCompile]
+    private partial struct CleanupJob : IJobEntity
+    {
+        public EntityCommandBuffer.ParallelWriter Ecb;
+
+        private void Execute([ChunkIndexInQuery] int sortKey, Entity entity, in Projectile proj)
+        {
+            if (proj.Stale)
+                Ecb.DestroyEntity(sortKey, entity);
         }
     }
 }

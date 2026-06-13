@@ -22,7 +22,7 @@ using Unity.Transforms;
 // ---------------------------------------------------------------------------
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
-[UpdateAfter(typeof(ProjectileSystem))]
+[UpdateAfter(typeof(ContactCombatSystem))]
 public partial struct AnimationStateSystem : ISystem
 {
     [BurstCompile]

@@ -19,6 +19,9 @@ using Unity.Transforms;
 //     behaviors (wall/wedge/cardinal/align).
 //   ContactList (UnitInfo buffer) — everyone physically near, shared by
 //     Steering (separation) and ContactCombat (impacts/strikes/blocking).
+//   IncomingProjectile buffer — enemy projectiles within HitRadius that are
+//     low enough to collide this frame. ContactCombatSystem applies damage
+//     receiver-side; behaviors can read this buffer to dodge slow shots.
 //
 // Perception supplies facts; BehaviorSystem makes decisions (it owns target
 // CHOICE — CombatTarget is written there, not here). Ties break by lowest
@@ -39,13 +42,21 @@ public partial struct InformationGatherSystem : ISystem {
         var hash = SystemAPI.GetSingleton<SpatialHash>();
         if (!hash.Map.IsCreated) return;
 
+        // ProjectileHash is created by ProjectileSystem.OnCreate; guard in case
+        // it isn't up yet on the first frame.
+        var projHash = SystemAPI.HasSingleton<ProjectileHash>()
+            ? SystemAPI.GetSingleton<ProjectileHash>()
+            : default;
+
         new GatherJob {
             Map = hash.Map,
             CellSize = hash.CellSize,
+            ProjMap = projHash.Map,
+            ProjCellSize = projHash.CellSize,
             Passable = SystemAPI.GetSingleton<ObstacleField>().Passable,
-            SearchCells = 4,            // global: how many hash cells out to perceive
+            SearchCells = 2,            // global: how many hash cells out to perceive
             ContactRadius = 6f,         // global: neighbors within this go into the ContactList
-            FriendlyRadius = 14f,       // global: friendlies within this go into the FriendlyUnit buffer
+            FriendlyRadius = 8f,       // global: friendlies within this go into the FriendlyUnit buffer
             OutlierFactor = 1.75f,      // global: CoM pass 2 drops units beyond mean dist * this
             ClusterRadius = 14f,        // global: trimmed mean spread above this -> "spread apart"
             LosRange = 10,              // global: max cells for LoS check
@@ -58,8 +69,10 @@ public partial struct InformationGatherSystem : ISystem {
     [WithNone(typeof(Dead))]
     private partial struct GatherJob : IJobEntity {
         [ReadOnly] public NativeParallelMultiHashMap<int, UnitInfo> Map;
+        [ReadOnly] public NativeParallelMultiHashMap<int, IncomingProjectile> ProjMap;
         [ReadOnly] public NativeArray<byte> Passable;
         public float CellSize, ContactRadius, FriendlyRadius, OutlierFactor, ClusterRadius;
+        public float ProjCellSize;
         public float NoLosMultiplier, BuildingDistanceBias;
         public int SearchCells, LosRange;
 
@@ -72,7 +85,8 @@ public partial struct InformationGatherSystem : ISystem {
             in Defense myDefense,
             ref Perception perception,
             DynamicBuffer<UnitInfo> contacts,
-            DynamicBuffer<FriendlyUnit> friendlies) {
+            DynamicBuffer<FriendlyUnit> friendlies,
+            DynamicBuffer<IncomingProjectile> incomingProjectiles) {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 forward3 = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
@@ -83,6 +97,7 @@ public partial struct InformationGatherSystem : ISystem {
             perception = default;
             contacts.Clear();
             friendlies.Clear();
+            incomingProjectiles.Clear();
 
             var enemies = new NativeList<UnitInfo>(32, Allocator.Temp);
             var allies = new NativeList<UnitInfo>(32, Allocator.Temp);
@@ -170,6 +185,24 @@ public partial struct InformationGatherSystem : ISystem {
                     }
                     while (Map.TryGetNextValue(out neighbor, ref iterator));
                 }
+
+            // ---- incoming projectiles: 3x3 cell walk around my position -----
+            if (ProjMap.IsCreated)
+            {
+                int projCellX = (int)math.floor(position.x / ProjCellSize);
+                int projCellY = (int)math.floor(position.y / ProjCellSize);
+                for (int offsetY = -1; offsetY <= 1; offsetY++)
+                    for (int offsetX = -1; offsetX <= 1; offsetX++) {
+                        int key = ((projCellX + offsetX) * 73856093) ^ ((projCellY + offsetY) * 19349663);
+                        if (!ProjMap.TryGetFirstValue(key, out IncomingProjectile proj, out var pit)) continue;
+                        do {
+                            if (proj.Team == team.Value) continue;
+                            if (math.distance(position, proj.Position) > proj.HitRadius) continue;
+                            incomingProjectiles.Add(proj);
+                        }
+                        while (ProjMap.TryGetNextValue(out proj, ref pit));
+                    }
+            }
 
             // ---- group structure: outlier-trimmed centers of mass -------------
             perception.HasEnemies = enemies.Length > 0;

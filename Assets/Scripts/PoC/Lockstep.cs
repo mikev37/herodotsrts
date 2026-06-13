@@ -1,5 +1,9 @@
 using Unity.Burst;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using Unity.Entities;
+using Unity.Jobs;
+using Unity.Jobs.LowLevel.Unsafe;
 using Unity.Mathematics;
 using Unity.Transforms;
 using UnityEngine;
@@ -141,6 +145,13 @@ public partial struct SimClockSystem : ISystem
 // hashes) so it does NOT depend on ECS iteration/job order — only on the actual
 // state. Identity (StableId) is folded in, so two units swapping places changes
 // the hash. Floats are hashed by their exact bit pattern, so ANY drift shows up.
+//
+// Runs as a parallel job rather than a main-thread foreach: the old foreach read
+// LocalTransform/Velocity/Health on the main thread at OrderLast, which forced a
+// sync of all in-flight tick jobs (the profiler then blamed this system for that
+// wait). Each worker accumulates a per-thread partial; a tiny finalize job sums
+// the partials and writes the singleton. Integer add is associative/commutative
+// mod 2^32, so the combined result is bit-identical to the serial sum.
 [UpdateInGroup(typeof(SimulationSystemGroup), OrderLast = true)]
 public partial struct SimChecksumSystem : ISystem
 {
@@ -154,24 +165,68 @@ public partial struct SimChecksumSystem : ISystem
     public void OnUpdate(ref SystemState state)
     {
         uint tick = SystemAPI.HasSingleton<SimClock>() ? SystemAPI.GetSingleton<SimClock>().Tick : 0u;
-        uint sum = 0;
-        foreach (var (xf, h, v, t, s) in
-                 SystemAPI.Query<RefRO<LocalTransform>, RefRO<Health>, RefRO<Velocity>, RefRO<Team>, RefRO<StableId>>())
+
+        // One slot per possible worker thread; zero-initialized, auto-freed.
+        // Custom (rewindable) allocators require CollectionHelper, not new NativeArray.
+        var partials = CollectionHelper.CreateNativeArray<uint>(
+            JobsUtility.ThreadIndexCount, state.WorldUpdateAllocator, NativeArrayOptions.ClearMemory);
+
+        state.Dependency = new ChecksumJob { Partials = partials }.ScheduleParallel(state.Dependency);
+
+        state.Dependency = new FinalizeJob
+        {
+            Partials = partials,
+            Tick = tick,
+            ChecksumEntity = SystemAPI.GetSingletonEntity<SimChecksum>(),
+            ChecksumLookup = SystemAPI.GetComponentLookup<SimChecksum>(false),
+        }.Schedule(state.Dependency);
+    }
+
+    [BurstCompile]
+    private partial struct ChecksumJob : IJobEntity
+    {
+        // Each worker writes only its own slot (indexed by thread), so the
+        // shared-array write is safe despite the parallel-for restriction.
+        [NativeDisableParallelForRestriction] public NativeArray<uint> Partials;
+        [NativeSetThreadIndex] private int _threadIndex;
+
+        private void Execute(
+            in LocalTransform xform,
+            in Health health,
+            in Velocity velocity,
+            in Team team,
+            in StableId stableId)
         {
             uint a = math.hash(new uint4(
-                math.asuint(xf.ValueRO.Position.x),
-                math.asuint(xf.ValueRO.Position.z),
-                math.asuint(h.ValueRO.Current),
-                math.asuint(v.ValueRO.Value.x)));
+                math.asuint(xform.Position.x),
+                math.asuint(xform.Position.z),
+                math.asuint(health.Current),
+                math.asuint(velocity.Value.x)));
             uint b = math.hash(new uint3(
-                math.asuint(v.ValueRO.Value.y),
-                (uint)t.ValueRO.Value,
-                (uint)s.ValueRO.Value));
-            sum += a ^ b;   // '+' is commutative -> independent of iteration order
+                math.asuint(velocity.Value.y),
+                (uint)team.Value,
+                (uint)stableId.Value));
+            Partials[_threadIndex] += a ^ b;   // '+' is commutative -> independent of iteration order
         }
+    }
 
-        var cs = SystemAPI.GetSingletonRW<SimChecksum>();
-        cs.ValueRW.Tick = tick;
-        cs.ValueRW.Value = sum;
+    [BurstCompile]
+    private struct FinalizeJob : IJob
+    {
+        [ReadOnly] public NativeArray<uint> Partials;
+        public uint Tick;
+        public Entity ChecksumEntity;
+        public ComponentLookup<SimChecksum> ChecksumLookup;
+
+        public void Execute()
+        {
+            uint sum = 0;
+            for (int i = 0; i < Partials.Length; i++) sum += Partials[i];
+
+            var cs = ChecksumLookup[ChecksumEntity];
+            cs.Tick = Tick;
+            cs.Value = sum;
+            ChecksumLookup[ChecksumEntity] = cs;
+        }
     }
 }

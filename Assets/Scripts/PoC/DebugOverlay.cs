@@ -67,7 +67,7 @@ public class DebugOverlay : MonoBehaviour
     private readonly List<UnitGiz> _units = new();
 
     private EntityManager _em;
-    private EntityQuery _debugQuery, _unitQuery, _flowQuery, _obstacleQuery;
+    private EntityQuery _debugQuery, _unitQuery, _flowQuery, _obstacleQuery, _requestQuery;
     private bool _ready;
     private float _fpsSmooth;
 
@@ -80,6 +80,7 @@ public class DebugOverlay : MonoBehaviour
         _debugQuery = _em.CreateEntityQuery(typeof(SimDebug));
         _flowQuery = _em.CreateEntityQuery(typeof(NavFields));
         _obstacleQuery = _em.CreateEntityQuery(typeof(ObstacleField));
+        _requestQuery = _em.CreateEntityQuery(typeof(SimDebugRequest));
         _unitQuery = _em.CreateEntityQuery(
             ComponentType.ReadOnly<UnitTag>(),
             ComponentType.ReadOnly<LocalTransform>(),
@@ -97,8 +98,24 @@ public class DebugOverlay : MonoBehaviour
         if (!_ready || _em.World == null || !_em.World.IsCreated) { worldReady = false; return; }
         worldReady = true;
 
+        // Keep SimDebugSystem alive only while this overlay is enabled. The
+        // system gates on SimDebugRequest, so without this it would never run.
+        if (_requestQuery.IsEmptyIgnoreFilter)
+            _em.CreateEntity(typeof(SimDebugRequest));
+
         PullStats();
         SnapshotGizmos();
+    }
+
+    // Disabling the overlay (or play-mode exit) removes the request so the
+    // scan-heavy SimDebugSystem stops running.
+    private void OnDisable()
+    {
+        var world = World.DefaultGameObjectInjectionWorld;
+        if (world == null || !world.IsCreated) return;
+        var em = world.EntityManager;
+        var q = em.CreateEntityQuery(typeof(SimDebugRequest));
+        if (!q.IsEmptyIgnoreFilter) em.DestroyEntity(q);
     }
 
     private void PullStats()

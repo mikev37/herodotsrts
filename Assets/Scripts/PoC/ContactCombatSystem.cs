@@ -20,9 +20,14 @@ using Unity.Transforms;
 //     (UnitInfo.AttackTarget), or, for cleave attackers, on everyone inside
 //     the strike arc. Either way a body standing between attacker and victim
 //     blocks the hit (long weapons hit the first unit in line).
+//   * PROJECTILE hits: iterates the unit's IncomingProjectile buffer (filled
+//     by InformationGatherSystem from the ProjectileHash). Receiver-side, same
+//     pattern as melee. Marks the projectile Stale; ProjectileCleanupSystem
+//     destroys it after this system runs. Two threads may race to set Stale=true
+//     on the same projectile — both write the same value, always safe.
 //
 //   impact    = enemyMass * closingSpeed
-//   damage    = ImpactScale * impact * dt  (+ mitigated strike damage)
+//   damage    = ImpactScale * impact * dt  (+ mitigated strike/projectile damage)
 //   knockback = away from the rammer, scaled by impact / ownMass
 //
 // Downhill units close faster -> hit harder. Emergent, not special-cased.
@@ -53,6 +58,7 @@ public partial struct ContactCombatSystem : ISystem
             KnockbackScale = 0.4f,   // global: knockback strength
             BodyContactScale = 1.2f, // global: bodies "touch" within (rA + rB) * this
             ImmobileLk = SystemAPI.GetComponentLookup<Immobile>(true),
+            ProjLookup = SystemAPI.GetComponentLookup<Projectile>(false),
             Ecb = ecb,
         }.ScheduleParallel();
     }
@@ -63,6 +69,12 @@ public partial struct ContactCombatSystem : ISystem
     {
         public float Dt, ImpactScale, KnockbackScale, BodyContactScale;
         [ReadOnly] public ComponentLookup<Immobile> ImmobileLk;
+
+        // Write Stale on hit projectiles. Race-safe: two threads writing true
+        // simultaneously on the same projectile always produce true.
+        [NativeDisableParallelForRestriction]
+        public ComponentLookup<Projectile> ProjLookup;
+
         public EntityCommandBuffer.ParallelWriter Ecb;
 
         private void Execute(
@@ -77,7 +89,8 @@ public partial struct ContactCombatSystem : ISystem
             in Mass mass,
             in Defense defense,
             in Team team,
-            DynamicBuffer<UnitInfo> contacts)
+            DynamicBuffer<UnitInfo> contacts,
+            DynamicBuffer<IncomingProjectile> incomingProjectiles)
         {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 forward3 = math.forward(xform.Rotation);
@@ -125,6 +138,22 @@ public partial struct ContactCombatSystem : ISystem
                                                         defense.Armor, defense.Shield);
                     }
                 }
+            }
+
+            // --- PROJECTILE hits (receiver-side) ---
+            for (int i = 0; i < incomingProjectiles.Length; i++)
+            {
+                IncomingProjectile proj = incomingProjectiles[i];
+                if (!ProjLookup.HasComponent(proj.Entity)) continue;
+
+                var projComp = ProjLookup[proj.Entity];
+                if (projComp.Stale) continue;
+
+                projComp.Stale = true;
+                ProjLookup[proj.Entity] = projComp;
+
+                incoming += CombatMath.Mitigate(proj.Damage, myFacing, -proj.Direction,
+                                                defense.Armor, defense.Shield);
             }
 
             status.InContactWithEnemy = inContact;

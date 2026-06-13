@@ -61,6 +61,11 @@ public struct Obstacle : IComponentData
 // Projectiles. Travel straight horizontally; the vertical position follows an
 // arc that launches at LaunchHeight, bulges up by Rise, and lands at 0 exactly
 // at end of life (which is set so that point is where it was aimed).
+//
+// Stale is set by the receiver-side hit pass in ContactCombatSystem. Two threads
+// may race to set Stale=true on the same projectile; both write the same value
+// so the outcome is always correct. ProjectileSystem destroys stale entities
+// after ContactCombatSystem runs.
 // ---------------------------------------------------------------------------
 public struct Projectile : IComponentData
 {
@@ -74,8 +79,35 @@ public struct Projectile : IComponentData
     public float EndY;            // world ground height at the aimed point
     public float HitRadius;
     public float CollisionHeight; // only collide at/below this height
+    public bool Stale;            // hit this frame; ProjectileSystem will destroy it
 }
 public struct ProjectileTag : IComponentData { }
+
+// ---------------------------------------------------------------------------
+// Per-frame projectile snapshot, filled by InformationGatherSystem into each
+// unit's IncomingProjectile buffer. Mirrors the UnitInfo/ContactList pattern so
+// ContactCombatSystem can apply hits receiver-side (parallel, no cross-entity
+// Health writes). Also exposes velocity so future behaviors can dodge slow shots.
+// ---------------------------------------------------------------------------
+public struct IncomingProjectile : IBufferElementData
+{
+    public Entity Entity;
+    public float2 Position;   // XZ position this frame
+    public float2 Velocity;   // horizontal velocity (for dodge behaviors)
+    public float2 Direction;  // normalized travel direction (for backstab mitigation)
+    public float  Damage;
+    public float  HitRadius;
+    public int    Team;
+}
+
+// Per-frame projectile spatial hash. Built by ProjectileSystem before
+// InformationGatherSystem runs; consumed by GatherJob to fill IncomingProjectile
+// buffers. Mirrors SpatialHash so the same cell-walk pattern works.
+public struct ProjectileHash : IComponentData
+{
+    public NativeParallelMultiHashMap<int, IncomingProjectile> Map;
+    public float CellSize;
+}
 
 // ---------------------------------------------------------------------------
 // Hero marker. The hero is a normal unit entity that also carries HeroTag, so
