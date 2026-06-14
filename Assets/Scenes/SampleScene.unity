@@ -686,8 +686,8 @@ MonoBehaviour:
   showTargetLines: 0
   showDestinationLines: 0
   showSelection: 1
-  flowFieldStride: 3
-  fineFieldStride: 4
+  flowFieldStride: 1
+  fineFieldStride: 1
   maxGizmoUnits: 400
   gizmoY: 0.2
   fps: 0
@@ -897,11 +897,11 @@ MonoBehaviour:
     countPerTeam: 0
   teamtwo:
   - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
-    countPerTeam: 30
+    countPerTeam: 0
   - definition: {fileID: 11400000, guid: b8851015bbae30842b88c05c5a5dae5d, type: 2}
-    countPerTeam: 30
+    countPerTeam: 0
   - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
-    countPerTeam: 30
+    countPerTeam: 0
   teamCount: 2
   fieldSize: 60
   teamColors:

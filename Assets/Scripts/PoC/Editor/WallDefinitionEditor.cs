@@ -15,8 +15,11 @@ public class WallDefinitionEditor : Editor
             if (prop != null) EditorGUILayout.PropertyField(prop, true);
         }
         EditorGUILayout.Space();
-        var wh = serializedObject.FindProperty("wallHeight");
-        if (wh != null) EditorGUILayout.PropertyField(wh, true);
+        foreach (var name in new[] { "wallHeight", "rampCells", "rampSide" })
+        {
+            var prop = serializedObject.FindProperty(name);
+            if (prop != null) EditorGUILayout.PropertyField(prop, true);
+        }
         serializedObject.ApplyModifiedProperties();
     }
 }

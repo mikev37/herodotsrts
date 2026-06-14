@@ -74,4 +74,5 @@ public static class NavCell
     // Transition (ramp) is not, Ground is open. Used by the context-aware LoS
     // and available to projectile blocking.
     public static bool BlocksGroundSight(byte type) => type == Impassable || type == Roof;
+
 }

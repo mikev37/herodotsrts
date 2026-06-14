@@ -128,12 +128,13 @@ public partial struct SteeringSystem : ISystem
             }
 
             // --- 2. Separation from units ------------------------------------
-            // Iterates the gather system's contact buffer — the same snapshot
-            // ContactCombat resolves impacts from, so physics and combat agree.
+
             float2 separation = float2.zero;
             for (int i = 0; i < contacts.Length; i++)
             {
                 UnitInfo neighbor = contacts[i];
+
+                if (neighbor.IsBuilding) continue;
                 float2 away = pos - neighbor.Position;
                 float dist = math.length(away);
                 if (dist < 1e-4f) { away = new float2(0.01f, 0f); dist = 0.01f; }
@@ -143,27 +144,16 @@ public partial struct SteeringSystem : ISystem
             desired += separation * tuning.SeparationStrength;
 
             // --- 3. Obstacle response: composite normal + smooth slide -------
-            // Every blocked neighbor cell contributes an away-vector weighted by
-            // proximity. The weighted SUM is a surface normal: two stacked
-            // vertical blocked cells beside the unit cancel vertically and
-            // reinforce horizontally -> one clean sideways normal instead of two
-            // point-bounces. Diagonals fall out of the same sum.
+  
             float2 normalSum = float2.zero;
             float penetration = 0f;   // 0 = clear, 1 = pressed against a cell center
             float falloff = radius.Value + NavGrid.CellSize;   // response ramps in within this of a blocked center
             int2 cell = NavGrid.Cell(pos);
-            // While standing ON a ramp the unit is mid-climb: the Roof it's
-            // walking onto and the Ground it came from are both destinations, not
-            // walls. Suppress repulsion from those surfaces here (only Impassable
-            // still repels), or the one-cell-wide ramp shoves the unit back off
-            // before it can commit to the roof -> the rim jitter.
-            // Detect a climb point: the unit is ON a ramp, or ADJACENT to one.
-            // beyond the one-cell skirt before it reaches the ramp, or it stalls
-            // at the rim (the skirt is one cell and repulsion falloff reaches
-            // across it). At a climb point, only Impassable repels.
-            bool nearRamp = CellType[NavGrid.Index(cell.x, cell.y)] == NavCell.Transition;
-            for (int ox = -1; ox <= 1 && !nearRamp; ox++)
-            for (int oy = -1; oy <= 1 && !nearRamp; oy++)
+
+            int rampSearch = (int)math.ceil(falloff / NavGrid.CellSize) + 1;
+            bool nearRamp = false;
+            for (int ox = -rampSearch; ox <= rampSearch && !nearRamp; ox++)
+            for (int oy = -rampSearch; oy <= rampSearch && !nearRamp; oy++)
             {
                 int ax = cell.x + ox, ay = cell.y + oy;
                 if (NavGrid.InBounds(ax, ay) &&
@@ -176,11 +166,7 @@ public partial struct SteeringSystem : ISystem
                 int nx = cell.x + ox, ny = cell.y + oy;
                 if (!NavGrid.InBounds(nx, ny)) continue;
                 byte nType = CellType[NavGrid.Index(nx, ny)];
-                // A cell repels me if MY context can't stand on it. For a ground
-                // unit that's impassable + roof; for a roof unit that's
-                // impassable + ground (the wall edge), which fences it onto the
-                // wall-top so it can't be pushed off. At a climb point (on or
-                // beside a ramp) only Impassable repels — the roof is the goal.
+
                 bool blocks = nearRamp ? (nType == NavCell.Impassable)
                                        : !NavCell.CanStand(ctx, nType);
                 if (!blocks) continue;
@@ -195,15 +181,10 @@ public partial struct SteeringSystem : ISystem
             if (penetration > 0f)
             {
                 float2 normal = math.normalizesafe(normalSum);
-                // SLIDE: cancel only the into-wall component of motion, scaled
-                // by penetration. Tangential motion is untouched, so units slide
-                // along edges instead of bouncing off every cell corner. At full
-                // penetration the into-component is fully canceled — a wall
-                // still stops a unit dead head-on.
+                // SLIDE: cancel only the into-wall component of motion, 
                 float into = math.dot(desired, normal);
                 if (into < 0f) desired -= normal * (into * penetration);
-                // PUSH: smooth repulsion out of the surface. Quadratic ramp:
-                // gentle at the rim, firm at contact.
+                // PUSH: smooth repulsion out of the surface. Quadratic ramp
                 desired += normal * (penetration * penetration * ObstacleStrength);
             }
 
@@ -213,37 +194,26 @@ public partial struct SteeringSystem : ISystem
 
 
             // --- 4. Integrate ------------------------------------------------
-            // vel.Value is back-calculated from the actual step so that
-            // ContactCombat's closing-speed math reflects what really moved.
-            // desiredValue is then bled back to match actual speed in the
-            // locomotion direction — blocked units decelerate, clear units
-            // re-accelerate from wherever they actually are.
+          
             vel.Value = desired;
             float2 step = desired * Dt;
             float2 desiredDir = math.normalizesafe(vel.desiredValue);
             float currentLen = math.min(math.length(vel.desiredValue), locomotion); // clamp to current top speed (handles cresting hills)
             float projectedLen = math.max(0f, math.dot(vel.Value, desiredDir));
             vel.desiredValue = desiredDir * math.min(currentLen, projectedLen);     // only bleed down, never boost
-            // Surface + context. Resolve the destination cell AFTER the step.
-            // Context flips when the unit commits to a pure cell of the opposite
-            // type; on a Transition it's retained. Y comes from the surface:
-            // terrain (slope.Height) for Ground, NavHeight for Roof/Transition.
+            // Surface + context, from the destination cell AFTER the step.
             float newX = xform.Position.x + step.x;
             float newZ = xform.Position.z + step.y;
             int2 destCell = NavGrid.Cell(new float2(newX, newZ));
             byte destType = NavGrid.InBounds(destCell.x, destCell.y)
                 ? CellType[NavGrid.Index(destCell.x, destCell.y)] : NavCell.Ground;
 
-            if (destType == NavCell.Ground) ctx = NavCell.ContextGround;
-            else if (destType == NavCell.Roof) ctx = NavCell.ContextRoof;
+            ctx = destType == NavCell.Impassable ? ctx : destType;   // context = the surface I'm on
             navCtx.Value = ctx;
 
-            float y = (destType == NavCell.Roof || destType == NavCell.Transition)
-                      && NavGrid.InBounds(destCell.x, destCell.y)
-                ? NavHeight[NavGrid.Index(destCell.x, destCell.y)]
-                : slope.Height;
+            // Y comes from slope.Height — exactly as for terrain. SlopeSystem is
 
-            xform.Position = new float3(newX, y, newZ);
+            xform.Position = new float3(newX, slope.Height, newZ);
 
             // --- 5. Facing ---------------------------------------------------
             // Three rules, in priority order:
@@ -251,8 +221,6 @@ public partial struct SteeringSystem : ISystem
             //   moving at speed -> face the movement direction (smooth
             //                      desiredValue, not the noisy force sum)
             //   otherwise       -> no turn at all; facing holds where it is
-            // The speed gate applies only to movement-facing — an explicit
-            // Face (planted ranged unit) turns even while standing still.
             float2 faceDir;
             if (dest.HasFace)
                 faceDir = dest.Face;

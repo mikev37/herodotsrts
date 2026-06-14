@@ -70,22 +70,11 @@ public partial struct SlopeSystem : ISystem
         {
             float2 pos = new float2(xform.Position.x, xform.Position.z);
 
-            // Height tracks the surface the unit stands on. Roof/Transition cells
-            // override terrain with their baked NavHeight; everything else is
-            // terrain. Sampled ALWAYS (steering snaps y every tick, and external
-            // forces like knockback move idle units too).
-            float surfaceY = SampleHeight(pos);
-            if (HasNav)
-            {
-                int2 c = NavGrid.Cell(pos);
-                if (NavGrid.InBounds(c.x, c.y))
-                {
-                    byte t = CellType[NavGrid.Index(c.x, c.y)];
-                    if (t == NavCell.Roof || t == NavCell.Transition)
-                        surfaceY = NavHeight[NavGrid.Index(c.x, c.y)];
-                }
-            }
-            mul.Height = surfaceY;
+            // Height and slope both come from SampleHeight/Gradient, which now
+            // return the SURFACE (terrain or wall Roof/Transition) at the source —
+            // walls behave exactly like terrain. Sampled ALWAYS (steering snaps y
+            // every tick; knockback moves idle units too).
+            mul.Height = SampleHeight(pos);
 
             if (!dest.Has) { mul.Value = 1f; return; }
 
@@ -98,7 +87,49 @@ public partial struct SlopeSystem : ISystem
             mul.Value = math.clamp(1f - SlopeStrength * slopeAlong, 0.4f, 1.8f);
         }
 
+        // Surface height at a world position — terrain, OR a wall's Roof/Transition
+        // NavHeight where one is stamped. This is THE height source: mul.Height
+        // (the unit's Y) and Gradient (the slope) both come from here, so walls
+        // behave exactly like terrain — no separate sampling anywhere else.
+        //
+        // Nav-height blends bilinearly like terrain, but a corner is excluded from
+        // the blend if it's across a sheer ground<->roof boundary from the base
+        // cell (a Roof beside a Ground with no Transition). Without that, the
+        // blend would invent a slope down a vertical wall face. Cells on the same
+        // surface (or bridged by Transition) blend normally, giving the smooth
+        // ramp; the sheer face stays a clean step.
         private float SampleHeight(float2 worldPos)
+        {
+            float terrainH = SampleTerrain(worldPos);
+            if (!HasNav) return terrainH;
+
+            int2 baseCell = NavGrid.Cell(worldPos);
+            if (!NavGrid.InBounds(baseCell.x, baseCell.y)) return terrainH;
+            byte baseType = CellType[NavGrid.Index(baseCell.x, baseCell.y)];
+
+            // On a wall surface (Roof/Transition): height is the nav surface,
+            // bilinear over the nav grid.
+            if (baseType == NavCell.Roof || baseType == NavCell.Transition)
+                return SampleNav(worldPos, baseType, terrainH);
+
+            if (baseType == NavCell.Ground && AdjacentTransition(baseCell))
+                return SampleNav(worldPos, NavCell.Transition, terrainH);
+
+            return terrainH;
+        }
+
+        // True if a cardinal neighbour of `cell` is a Transition (ramp foot).
+        private bool AdjacentTransition(int2 cell)
+        {
+            return IsTransition(cell.x + 1, cell.y) || IsTransition(cell.x - 1, cell.y)
+                || IsTransition(cell.x, cell.y + 1) || IsTransition(cell.x, cell.y - 1);
+        }
+
+        private bool IsTransition(int x, int y)
+            => NavGrid.InBounds(x, y) && CellType[NavGrid.Index(x, y)] == NavCell.Transition;
+
+        // Terrain-only bilinear (unchanged from before walls existed).
+        private float SampleTerrain(float2 worldPos)
         {
             float spacing = Field.WorldSize / (Field.Resolution - 1);
             float2 local = (worldPos - Field.Origin) / spacing;
@@ -106,12 +137,36 @@ public partial struct SlopeSystem : ISystem
             int y = math.clamp((int)local.y, 0, Field.Resolution - 2);
             float fx = math.saturate(local.x - x);
             float fy = math.saturate(local.y - y);
-
             float h00 = Field.Heights[y * Field.Resolution + x];
             float h10 = Field.Heights[y * Field.Resolution + x + 1];
             float h01 = Field.Heights[(y + 1) * Field.Resolution + x];
             float h11 = Field.Heights[(y + 1) * Field.Resolution + x + 1];
             return math.lerp(math.lerp(h00, h10, fx), math.lerp(h01, h11, fx), fy);
+        }
+
+        // Nav-surface bilinear over the four nav cells around worldPos. A corner
+        // that's across a sheer ground<->roof boundary from the unit's cell is
+        // excluded (clamped to terrain), so the blend follows the ramp but never
+        // invents a slope down a vertical face.
+        private float SampleNav(float2 worldPos, byte baseType, float terrainH)
+        {
+            float2 g = (worldPos - NavGrid.Origin) / NavGrid.CellSize - 0.5f;   // nav cell-center space
+            int x0 = (int)math.floor(g.x), y0 = (int)math.floor(g.y);
+            float fx = math.saturate(g.x - x0), fy = math.saturate(g.y - y0);
+            float h00 = NavCorner(x0,     y0,     baseType, terrainH);
+            float h10 = NavCorner(x0 + 1, y0,     baseType, terrainH);
+            float h01 = NavCorner(x0,     y0 + 1, baseType, terrainH);
+            float h11 = NavCorner(x0 + 1, y0 + 1, baseType, terrainH);
+            return math.lerp(math.lerp(h00, h10, fx), math.lerp(h01, h11, fx), fy);
+        }
+
+        private float NavCorner(int x, int y, byte baseType, float terrainH)
+        {
+            if (!NavGrid.InBounds(x, y)) return terrainH;
+            byte t = CellType[NavGrid.Index(x, y)];
+            if (t != NavCell.Roof && t != NavCell.Transition) return terrainH;   // ground corner
+            if (!NavCell.Connected(baseType, t)) return terrainH;                // across a sheer face
+            return NavHeight[NavGrid.Index(x, y)];
         }
 
         // Central-difference gradient (rise over run) in world units.

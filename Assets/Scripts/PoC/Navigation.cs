@@ -344,25 +344,46 @@ public partial struct ObstacleGridSystem : ISystem
                 navHeight[idx] = topY;
             }
 
-            // Transition skirt: the cardinal ring one cell outside the footprint,
-            // only over cells that are currently Ground (don't carve a ramp
-            // through another wall's roof or a building). NavHeight is the
-            // midpoint so the unit visibly ramps.
-            for (int ly = -1; ly <= e.y; ly++)
-            for (int lx = -1; lx <= e.x; lx++)
+            // Transition skirt: rampCells concentric cardinal rings stepping out
+            // from the footprint, each at a graduated height so the climb eases
+            // from ground up to the roof instead of jumping. Ring 1 (closest to
+            // the wall) is highest, the outermost ring lowest. Only Ground cells
+            // become ramp (don't carve through another wall's roof/footprint).
+            int ramp = math.max(1, wall.ValueRO.RampCells);
+            byte rampSide = wall.ValueRO.RampSide;
+            const byte SIDE_ALL = 0, SIDE_PX = 1, SIDE_MX = 2, SIDE_PZ = 3, SIDE_MZ = 4, SIDE_NONE = 5;
+            if (rampSide != SIDE_NONE)
+            for (int r = 1; r <= ramp; r++)
             {
-                bool insideFootprint = lx >= 0 && lx < e.x && ly >= 0 && ly < e.y;
-                if (insideFootprint) continue;
-                bool xEdge = lx == -1 || lx == e.x;
-                bool yEdge = ly == -1 || ly == e.y;
-                if (xEdge && yEdge) continue;   // skip diagonal corners
-                int x = min.x + lx, y = min.y + ly;
-                if (!NavGrid.InBounds(x, y)) continue;
-                int idx = NavGrid.Index(x, y);
-                if (cellType[idx] != NavCell.Ground) continue;
-                float groundY = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
-                cellType[idx] = NavCell.Transition;
-                navHeight[idx] = (groundY + topY) * 0.5f;
+                // Height for this ring: fraction 1.0 just inside the wall, down
+                // toward the ground at the outer edge.
+                float inner = (ramp - r + 1) / (float)(ramp + 1);
+                for (int ly = -r; ly <= e.y - 1 + r; ly++)
+                for (int lx = -r; lx <= e.x - 1 + r; lx++)
+                {
+                    int dxOut = lx < 0 ? -lx : (lx >= e.x ? lx - (e.x - 1) : 0);
+                    int dyOut = ly < 0 ? -ly : (ly >= e.y ? ly - (e.y - 1) : 0);
+                    int ringDist = math.max(dxOut, dyOut);
+                    if (ringDist != r) continue;
+                    if (dxOut > 0 && dyOut > 0) continue;   // skip diagonal corners
+
+                    // Which face is this skirt cell on? (cardinal, so exactly one)
+                    bool onPX = lx >= e.x, onMX = lx < 0, onPZ = ly >= e.y, onMZ = ly < 0;
+                    bool sideAllowed = rampSide == SIDE_ALL
+                        || (rampSide == SIDE_PX && onPX)
+                        || (rampSide == SIDE_MX && onMX)
+                        || (rampSide == SIDE_PZ && onPZ)
+                        || (rampSide == SIDE_MZ && onMZ);
+                    if (!sideAllowed) continue;
+
+                    int x = min.x + lx, y = min.y + ly;
+                    if (!NavGrid.InBounds(x, y)) continue;
+                    int idx = NavGrid.Index(x, y);
+                    if (cellType[idx] != NavCell.Ground) continue;
+                    float groundY = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
+                    cellType[idx] = NavCell.Transition;
+                    navHeight[idx] = math.lerp(groundY, topY, inner);
+                }
             }
         }
 

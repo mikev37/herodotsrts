@@ -36,6 +36,8 @@ public struct Wall : IComponentData
 {
     public int2  Extents;
     public float RoofHeight;   // world Y of the walkable top
+    public int   RampCells;    // depth of the graduated transition skirt, in cells
+    public byte  RampSide;     // WallDefinition.RampSide: which face(s) get a ramp
 }
 
 // A unit's current walking surface. Ground units sample terrain for Y and may
@@ -105,7 +107,11 @@ public static class BuildingFootprint
             if (!NavGrid.InBounds(x, y)) return PlacementVerdict.OffGrid;
             // Must be plain buildable Ground — not impassable (obstacle/slope/
             // water) and not another structure's Roof/Transition surface.
-            if (cellType[NavGrid.Index(x, y)] != NavCell.Ground) return PlacementVerdict.Blocked;
+            // Buildable on plain Ground or on another structure's Transition
+            // skirt (a ramp can be overwritten — this is what lets walls be
+            // placed flush against each other). Roof and Impassable are blocked.
+            byte t = cellType[NavGrid.Index(x, y)];
+            if (t != NavCell.Ground && t != NavCell.Transition) return PlacementVerdict.Blocked;
             float h = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
             minH = math.min(minH, h);
             maxH = math.max(maxH, h);

@@ -60,9 +60,8 @@ public partial struct InformationGatherSystem : ISystem {
             OutlierFactor = 1.75f,      // global: CoM pass 2 drops units beyond mean dist * this
             ClusterRadius = 14f,        // global: trimmed mean spread above this -> "spread apart"
             LosRange = 10,              // global: max cells for LoS check
-            NoLosMultiplier = 10f,       // global: effective distance penalty for enemies without LoS
+            NoLosMultiplier = 20f,       // global: effective distance penalty for enemies without LoS
             HeightGate = 2.5f,           // global: melee can't engage across a height delta larger than this (wall-tops)
-            BuildingDistanceBias = 30f,  // global: buildings count this many times farther in closest-enemy choice (units are preferred)
         }.ScheduleParallel();
     }
 
@@ -74,7 +73,7 @@ public partial struct InformationGatherSystem : ISystem {
         [ReadOnly] public NativeArray<byte> CellType;
         public float CellSize, ContactRadius, FriendlyRadius, OutlierFactor, ClusterRadius;
         public float ProjCellSize;
-        public float NoLosMultiplier, BuildingDistanceBias, HeightGate;
+        public float NoLosMultiplier, HeightGate;
         public int SearchCells, LosRange;
 
         private void Execute(
@@ -128,19 +127,13 @@ public partial struct InformationGatherSystem : ISystem {
                         if (neighbor.IsBuilding)
                             distance = math.max(0f, distance - neighbor.Radius);
 
-                        // Height-delta MELEE gate: a melee unit can't fight (or
-                        // body-contact) something on a vastly different surface —
-                        // a defender on a wall-top vs an attacker at the base.
-                        // Ranged exempt (archers shoot down); buildings exempt
-                        // (tall but attackable from the ground). Keeps roof and
-                        // ground combat separate.
                         bool heightBlocked = !myAttack.isRange && !neighbor.IsBuilding &&
                                              math.abs(neighbor.Height - myHeight) > HeightGate;
 
                         bool los = neighbor.IsBuilding ||
                                    NavTerrain.LineOfSight(position, neighbor.Position, CellType, myCtx, LosRange);
                         float effectiveDist = los ? distance : distance + NoLosMultiplier;
-                        if (!heightBlocked && effectiveDist <= ContactRadius)
+                        if (!neighbor.IsBuilding && !heightBlocked && effectiveDist <= ContactRadius)
                             contacts.Add(neighbor);
 
                         if (neighbor.Team != team.Value) {

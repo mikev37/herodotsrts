@@ -70,3 +70,5 @@ MonoBehaviour:
   footprintZ: 3
   maxHeightDelta: 1
   wallHeight: 6
+  rampCells: 1
+  rampSide: 2

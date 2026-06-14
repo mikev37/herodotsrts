@@ -19,6 +19,13 @@ public class WallDefinition : BuildingDefinition
     [Tooltip("Height of the walkable top above the footprint's highest terrain cell. Units on the parapet stand at this elevation.")]
     public float wallHeight = 4f;
 
+    [Tooltip("Depth of the climbable ramp skirt in cells. The skirt steps up from ground to the wall top over this many cells on each ramped side, so the height eases in instead of jumping. 1 = a single mid-height cell (steep); 2-3 reads as a real ramp.")]
+    public int rampCells = 2;
+
+    public enum RampSide : byte { All = 0, PlusX = 1, MinusX = 2, PlusZ = 3, MinusZ = 4, None = 5 }
+    [Tooltip("Which face(s) get a climbable ramp. All = climb from any side. Pick a single side to test units climbing the ramp on one face while the other three are sheer, unclimbable wall.")]
+    public RampSide rampSide = RampSide.All;
+
     private void Reset()
     {
         displayName = "Wall";
