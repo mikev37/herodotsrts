@@ -64,6 +64,8 @@ public class DebugOverlay : MonoBehaviour
     private readonly List<(Vector3 pos, Vector3 dir)> _flowArrows = new();
     private readonly List<(Vector3 pos, Vector3 dir)> _fineArrows = new();
     private readonly List<Vector3> _blocked = new();
+    private readonly List<Vector3> _roof = new();
+    private readonly List<Vector3> _ramp = new();
     private readonly List<UnitGiz> _units = new();
 
     private EntityManager _em;
@@ -133,7 +135,7 @@ public class DebugOverlay : MonoBehaviour
 
     private void SnapshotGizmos()
     {
-        _flowArrows.Clear(); _fineArrows.Clear(); _blocked.Clear(); _units.Clear();
+        _flowArrows.Clear(); _fineArrows.Clear(); _blocked.Clear(); _roof.Clear(); _ramp.Clear(); _units.Clear();
 
         // Flow field + blocked cells (read native arrays here, on the main thread,
         // after the sim frame; copy into managed lists for the gizmo pass).
@@ -141,17 +143,24 @@ public class DebugOverlay : MonoBehaviour
             _flowQuery.TryGetSingleton<NavFields>(out var nf) &&
             _obstacleQuery.TryGetSingleton<ObstacleField>(out var obs))
         {
-            // Blocked fine cells.
-            if (showBlockedCells && obs.Passable.IsCreated)
+            // Blocked fine cells, plus walkable wall surfaces (Roof / Transition)
+            // drawn at their NavHeight so you can SEE a wall and its ramps.
+            if (showBlockedCells && obs.CellType.IsCreated)
             {
                 int stride = Mathf.Max(1, flowFieldStride);
+                bool hasNav = obs.NavHeight.IsCreated;
                 for (int y = 0; y < NavGrid.Res; y += stride)
                 for (int x = 0; x < NavGrid.Res; x += stride)
-                    if (obs.Passable[NavGrid.Index(x, y)] == 0)
-                    {
-                        float2 c = NavGrid.CellCenter(x, y);
-                        _blocked.Add(new Vector3(c.x, gizmoY, c.y));
-                    }
+                {
+                    byte t = obs.CellType[NavGrid.Index(x, y)];
+                    if (t == NavCell.Ground) continue;
+                    float2 c = NavGrid.CellCenter(x, y);
+                    float h = (hasNav && (t == NavCell.Roof || t == NavCell.Transition))
+                        ? obs.NavHeight[NavGrid.Index(x, y)] : gizmoY;
+                    if (t == NavCell.Impassable) _blocked.Add(new Vector3(c.x, gizmoY, c.y));
+                    else if (t == NavCell.Roof) _roof.Add(new Vector3(c.x, h, c.y));
+                    else if (t == NavCell.Transition) _ramp.Add(new Vector3(c.x, h, c.y));
+                }
             }
 
             // Coarse big-tile heading for the most-recently-used path (the fine
@@ -292,6 +301,12 @@ public class DebugOverlay : MonoBehaviour
         {
             Gizmos.color = new Color(1f, 0.2f, 0.2f, 0.5f);
             foreach (var c in _blocked) Gizmos.DrawCube(c, new Vector3(0.8f, 0.4f, 0.8f) * flowFieldStride);
+
+            // Walkable wall surfaces: cyan roof tops, green ramps, at their height.
+            Gizmos.color = new Color(0.2f, 0.8f, 1f, 0.55f);
+            foreach (var c in _roof) Gizmos.DrawCube(c, new Vector3(0.85f, 0.3f, 0.85f) * NavGrid.CellSize);
+            Gizmos.color = new Color(0.3f, 1f, 0.4f, 0.6f);
+            foreach (var c in _ramp) Gizmos.DrawCube(c, new Vector3(0.85f, 0.3f, 0.85f) * NavGrid.CellSize);
         }
         foreach (var u in _units)
         {

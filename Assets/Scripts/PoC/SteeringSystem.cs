@@ -152,16 +152,38 @@ public partial struct SteeringSystem : ISystem
             float penetration = 0f;   // 0 = clear, 1 = pressed against a cell center
             float falloff = radius.Value + NavGrid.CellSize;   // response ramps in within this of a blocked center
             int2 cell = NavGrid.Cell(pos);
+            // While standing ON a ramp the unit is mid-climb: the Roof it's
+            // walking onto and the Ground it came from are both destinations, not
+            // walls. Suppress repulsion from those surfaces here (only Impassable
+            // still repels), or the one-cell-wide ramp shoves the unit back off
+            // before it can commit to the roof -> the rim jitter.
+            // Detect a climb point: the unit is ON a ramp, or ADJACENT to one.
+            // beyond the one-cell skirt before it reaches the ramp, or it stalls
+            // at the rim (the skirt is one cell and repulsion falloff reaches
+            // across it). At a climb point, only Impassable repels.
+            bool nearRamp = CellType[NavGrid.Index(cell.x, cell.y)] == NavCell.Transition;
+            for (int ox = -1; ox <= 1 && !nearRamp; ox++)
+            for (int oy = -1; oy <= 1 && !nearRamp; oy++)
+            {
+                int ax = cell.x + ox, ay = cell.y + oy;
+                if (NavGrid.InBounds(ax, ay) &&
+                    CellType[NavGrid.Index(ax, ay)] == NavCell.Transition)
+                    nearRamp = true;
+            }
             for (int ox = -1; ox <= 1; ox++)
             for (int oy = -1; oy <= 1; oy++)
             {
                 int nx = cell.x + ox, ny = cell.y + oy;
                 if (!NavGrid.InBounds(nx, ny)) continue;
+                byte nType = CellType[NavGrid.Index(nx, ny)];
                 // A cell repels me if MY context can't stand on it. For a ground
                 // unit that's impassable + roof; for a roof unit that's
                 // impassable + ground (the wall edge), which fences it onto the
-                // wall-top so it can't be pushed off.
-                if (NavCell.CanStand(ctx, CellType[NavGrid.Index(nx, ny)])) continue;
+                // wall-top so it can't be pushed off. At a climb point (on or
+                // beside a ramp) only Impassable repels — the roof is the goal.
+                bool blocks = nearRamp ? (nType == NavCell.Impassable)
+                                       : !NavCell.CanStand(ctx, nType);
+                if (!blocks) continue;
                 float2 away = pos - NavGrid.CellCenter(nx, ny);
                 float dist = math.length(away);
                 if (dist < 1e-3f) continue;
@@ -173,6 +195,11 @@ public partial struct SteeringSystem : ISystem
             if (penetration > 0f)
             {
                 float2 normal = math.normalizesafe(normalSum);
+                // SLIDE: cancel only the into-wall component of motion, scaled
+                // by penetration. Tangential motion is untouched, so units slide
+                // along edges instead of bouncing off every cell corner. At full
+                // penetration the into-component is fully canceled — a wall
+                // still stops a unit dead head-on.
                 float into = math.dot(desired, normal);
                 if (into < 0f) desired -= normal * (into * penetration);
                 // PUSH: smooth repulsion out of the surface. Quadratic ramp:

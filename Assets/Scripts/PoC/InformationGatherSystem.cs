@@ -149,12 +149,14 @@ public partial struct InformationGatherSystem : ISystem {
                             if (heightBlocked)
                                 continue;
                             enemies.Add(neighbor);
-                            // Closest-enemy CHOICE prefers units: a building must
-                            // be BuildingDistanceBias times closer to win.
-                            float targetScore = neighbor.IsBuilding
-                                ? effectiveDist * BuildingDistanceBias : effectiveDist;
-                            if (Better(targetScore, neighbor.StableId, closestEnemyDist, closestEnemyId)) {
-                                closestEnemyDist = targetScore; closestEnemyId = neighbor.StableId;
+                            // Instinct never PICKS a building/wall as its target —
+                            // units only attack structures on an explicit order
+                            // (AttackTarget resolves directly, not via ClosestEnemy).
+                            // Buildings still populate enemies/contacts so an
+                            // ordered attack and threat awareness work.
+                            if (!neighbor.IsBuilding &&
+                                Better(effectiveDist, neighbor.StableId, closestEnemyDist, closestEnemyId)) {
+                                closestEnemyDist = effectiveDist; closestEnemyId = neighbor.StableId;
                                 perception.ClosestEnemy = neighbor; perception.HasClosestEnemy = true;
                             }
 
