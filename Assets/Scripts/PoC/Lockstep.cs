@@ -1,3 +1,4 @@
+using System;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
@@ -27,6 +28,77 @@ public struct SimClock : IComponentData { public uint Tick; }
 
 // Rolling, order-independent hash of the simulation state at a given tick.
 public struct SimChecksum : IComponentData { public uint Tick; public uint Value; }
+
+// THE per-unit state hash. One formula, three callers: SimChecksumSystem (live,
+// per tick, Burst job), SimSnapshot.ComputeStateHash (managed, after a restore),
+// and the snapshot self-verify. Keeping it in one place is what lets a freshly
+// restored world be VERIFIED against the live checksum — if the formulas drifted
+// apart, resync verification would report false desyncs (or worse, miss real
+// ones). navCtx (surface context: a unit on a wall-top vs the ground) is folded
+// in so a roof/ground divergence surfaces in the hash like any other state.
+[BurstCompile]
+public static class LockstepHash
+{
+    public static uint Unit(float3 pos, float hp, float2 vel, int team, int stableId, byte navCtx)
+    {
+        uint a = math.hash(new uint4(
+            math.asuint(pos.x),
+            math.asuint(pos.z),
+            math.asuint(hp),
+            math.asuint(vel.x)));
+        uint b = math.hash(new uint4(
+            math.asuint(vel.y),
+            (uint)team,
+            (uint)stableId,
+            navCtx));          // surface context — a roof/ground divergence shows here
+        return a ^ b;
+    }
+}
+
+// Per-tick checksum history (managed, ring buffer). The desync detector needs
+// the hash of EVERY executed tick, not just the latest — peers run at slightly
+// different ticks, so the host compares a client's report against its own hash
+// AT THAT TICK. Sampling the SimChecksum singleton once per frame would skip
+// ticks whenever the sim steps more than once per frame; ChecksumHistorySystem
+// records every step instead. Cleared on snapshot restore: pre-restore hashes
+// belong to a dead timeline.
+public static class ChecksumHistory
+{
+    public const int Capacity = 1024;   // ~34 s at 30 ticks/s
+
+    private static readonly uint[] _ticks  = new uint[Capacity];
+    private static readonly uint[] _values = new uint[Capacity];
+
+    public static uint LatestTick  { get; private set; }   // 0 = nothing recorded yet
+    public static uint LatestValue { get; private set; }
+
+    public static void Record(uint tick, uint value)
+    {
+        int i = (int)(tick % Capacity);
+        _ticks[i]  = tick;
+        _values[i] = value;
+        LatestTick  = tick;
+        LatestValue = value;
+    }
+
+    // True iff this exact tick is still in the window (ticks start at 1, so a
+    // zeroed slot can never false-positive).
+    public static bool TryGet(uint tick, out uint value)
+    {
+        int i = (int)(tick % Capacity);
+        if (tick != 0 && _ticks[i] == tick) { value = _values[i]; return true; }
+        value = 0;
+        return false;
+    }
+
+    public static void Clear()
+    {
+        Array.Clear(_ticks, 0, Capacity);
+        Array.Clear(_values, 0, Capacity);
+        LatestTick = 0;
+        LatestValue = 0;
+    }
+}
 
 // Custom rate manager: advances the sim at a fixed real-time rate using an
 // accumulator, regardless of frame rate.
@@ -76,13 +148,15 @@ public class LockstepRateManager : Unity.Entities.IRateManager
             _stepsThisFrame = 0;
         }
 
-        // Lobby gate: networked but not started -> sim frozen, AND the bank is
-        // cleared. Lobby wall-time is not owed simulation time; without this,
-        // the accumulator grows during Host/Connect/Start-Game and the match
-        // opens with a multi-second fast-forward at the catch-up cap (observed
-        // as a sustained ~45-55 ticks/s after Start until the bank drained).
+        // Lobby / resync gate: networked but not started, OR paused for a
+        // snapshot sync -> sim frozen, AND the bank is cleared. Lobby/pause
+        // wall-time is not owed simulation time; without this, the accumulator
+        // grows during Host/Connect/Start-Game (or during a resync) and the
+        // match opens with a multi-second fast-forward at the catch-up cap
+        // (observed as a sustained ~45-55 ticks/s after Start until the bank
+        // drained).
         var net = LockstepNet.Instance;
-        if (net != null && !net.IsRunning)
+        if (net != null && (!net.IsRunning || net.IsPaused))
         {
             _accumulator = 0;
             return false;
@@ -123,6 +197,7 @@ public class LockstepRateManager : Unity.Entities.IRateManager
 public partial struct SimClockSystem : ISystem
 {
     // Last completed tick, readable from managed code without an EntityQuery.
+    // SimSnapshot.Restore writes this directly when it rewinds/forwards the clock.
     public static uint LastCompletedTick;
 
     public void OnCreate(ref SystemState state)
@@ -198,17 +273,9 @@ public partial struct SimChecksumSystem : ISystem
             in StableId stableId,
             in NavContext navCtx)
         {
-            uint a = math.hash(new uint4(
-                math.asuint(xform.Position.x),
-                math.asuint(xform.Position.z),
-                math.asuint(health.Current),
-                math.asuint(velocity.Value.x)));
-            uint b = math.hash(new uint4(
-                math.asuint(velocity.Value.y),
-                (uint)team.Value,
-                (uint)stableId.Value,
-                navCtx.Value));   // surface context — a roof/ground divergence shows here
-            Partials[_threadIndex] += a ^ b;   // '+' is commutative -> independent of iteration order
+            Partials[_threadIndex] += LockstepHash.Unit(
+                xform.Position, health.Current, velocity.Value,
+                team.Value, stableId.Value, navCtx.Value);
         }
     }
 
@@ -230,5 +297,32 @@ public partial struct SimChecksumSystem : ISystem
             cs.Value = sum;
             ChecksumLookup[ChecksumEntity] = cs;
         }
+    }
+}
+
+// Records every executed tick's checksum into the managed ChecksumHistory ring.
+// Managed (SystemBase, no Burst) because it writes a managed static; runs after
+// SimChecksumSystem inside the same OrderLast band so the singleton is fresh.
+// This runs once per TICK (not per frame), so multi-tick catch-up frames record
+// every tick — the property the desync detector depends on.
+[UpdateInGroup(typeof(SimulationSystemGroup), OrderLast = true)]
+[UpdateAfter(typeof(SimChecksumSystem))]
+public partial class ChecksumHistorySystem : SystemBase
+{
+    protected override void OnUpdate()
+    {
+        if (!SystemAPI.HasSingleton<SimChecksum>()) return;
+
+        // SimChecksumSystem writes SimChecksum from a scheduled FinalizeJob and
+        // leaves it in flight (it's parallel so it doesn't force-sync the tick
+        // pipeline). We read that value on the main thread to copy it into the
+        // managed ring, so complete the writer first. CompleteDependency()
+        // finishes only the jobs touching components THIS system reads
+        // (SimChecksum) — a scoped sync at the tail of the sim group, not a
+        // world-wide stall.
+        CompleteDependency();
+
+        var cs = SystemAPI.GetSingleton<SimChecksum>();
+        if (cs.Tick > 0) ChecksumHistory.Record(cs.Tick, cs.Value);
     }
 }

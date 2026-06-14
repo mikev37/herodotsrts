@@ -173,11 +173,6 @@ public partial struct SteeringSystem : ISystem
             if (penetration > 0f)
             {
                 float2 normal = math.normalizesafe(normalSum);
-                // SLIDE: cancel only the into-wall component of motion, scaled
-                // by penetration. Tangential motion is untouched, so units slide
-                // along edges instead of bouncing off every cell corner. At full
-                // penetration the into-component is fully canceled — a wall
-                // still stops a unit dead head-on.
                 float into = math.dot(desired, normal);
                 if (into < 0f) desired -= normal * (into * penetration);
                 // PUSH: smooth repulsion out of the surface. Quadratic ramp:

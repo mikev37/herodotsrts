@@ -1,45 +1,77 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Netcode;
 using UnityEngine;
 
 // ===========================================================================
-// LockstepNet — Phase 3 network layer.
+// LockstepNet — Phase 3 turn relay + Phase 4 snapshot sync.
 //
 // Host-relayed deterministic lockstep over Netcode for GameObjects (NGO). NGO is
 // used ONLY as a connection manager + reliable message channel (CustomMessaging);
 // none of its state-replication / NetworkVariable / spawn machinery touches the
 // simulation. The sim stays our deterministic ECS world.
 //
-// Protocol (per execution tick T):
+// Turn protocol (per execution tick T), unchanged from Phase 3:
 //   1. Every peer submits its commands for tick T to the host (empty submission
 //      still sent, as a "ready" signal). Peers run their submissions InputDelay
 //      ticks AHEAD of execution, which is the budget for network latency.
 //   2. The host collects submissions from ALL participants for T, concatenates
 //      them in a deterministic order, and broadcasts the combined turn to everyone
 //      (itself included).
-//   3. A peer may execute tick T only once it holds the combined turn for T. The
-//      LockstepRateManager calls TryBeginNextTurn(), which injects T's commands
-//      into the ECS command buffer and lets the sim advance exactly one tick.
+//   3. A peer may execute tick T only once it holds the combined turn for T.
 //
-// Because every peer applies the identical command set at the identical tick to an
-// identical starting state with deterministic float math, all peers stay in sync.
+// Phase 4 layers snapshot distribution on top. ONE mechanism covers game start,
+// load, and desync recovery, because in network mode a sim world only ever comes
+// into existence by restoring a host snapshot (see SimSnapshot.cs for why every
+// peer — host included — must rebuild from the same blob):
+//
+//   * Lobby: peers pick a team (MSG_TEAM). Nobody spawns anything.
+//   * Start: host spawns its world, captures it, and distributes (epoch N+1).
+//   * Load:  host reads the save file and distributes it the same way.
+//   * Desync: clients piggyback their latest per-tick checksum on every input
+//     submission; the host compares against its own ChecksumHistory at that
+//     tick. On mismatch it logs the first divergent tick and redistributes its
+//     current state — a pause-resync that heals every peer.
+//
+// Distribution (HostDistribute): bump the epoch, pause, restore the host's own
+// world from the blob first (canonical layout + reference hash), stream the blob
+// to each client in chunks, collect MSG_ACK hashes, and on unanimous agreement
+// broadcast MSG_RESUME. Every message carries the epoch; anything stamped with
+// an old epoch is a straggler from a dead timeline and is dropped. A hash
+// mismatch at ack time means the restore itself is nondeterministic — that is a
+// bug to root-cause, so the game stays paused and says so rather than retrying.
+//
+// Team authority: the host stamps PlayerId on every remote command from the
+// sender's lobby-assigned team, and CommandApplySystem rejects commands aimed at
+// units of another team — a client can't order the other side around.
 //
 // Requires packages: com.unity.netcode.gameobjects and com.unity.transport.
 // Scene setup + Multiplayer Play Mode steps are in README_LOCKSTEP.md.
 // ===========================================================================
 public class LockstepNet : MonoBehaviour
 {
-    private const string MSG_INPUT = "ls_input";   // client -> server: my commands for a tick
-    private const string MSG_TURN  = "ls_turn";    // server -> clients: combined commands for a tick
-    private const string MSG_START = "ls_start";   // server -> clients: begin the lockstep loop
+    private const string MSG_INPUT  = "ls_input";    // client -> server: epoch, checksum report, commands
+    private const string MSG_TURN   = "ls_turn";     // server -> clients: epoch, combined commands for a tick
+    private const string MSG_TEAM   = "ls_team";     // client -> server: lobby team choice
+    private const string MSG_SNAP_B = "ls_snap_b";   // server -> client: snapshot header + team assignments
+    private const string MSG_SNAP_C = "ls_snap_c";   // server -> client: one snapshot chunk
+    private const string MSG_ACK    = "ls_ack";      // client -> server: restored, here's my state hash
+    private const string MSG_RESUME = "ls_resume";   // server -> clients: all verified, run from tick T
+
+    // global: snapshot transfer chunk size. Comfortably under NGO/UTP fragmented
+    // message limits; ~600 units is ~15 chunks.
+    private const int SnapshotChunkBytes = 16 * 1024;
 
     public static LockstepNet Instance { get; private set; }
 
     public bool IsRunning { get; private set; }
+    public bool IsPaused  { get; private set; }   // frozen for a snapshot sync (rate manager gates on this)
 
     // Execution side (all peers).
+    private uint _epoch;            // bumped by every snapshot distribution; stamps all input/turn traffic
     private uint _execTick = 1;     // next tick to execute
     private uint _sentUpTo;         // highest tick we've submitted input for
     private readonly Dictionary<uint, List<SimCommand>> _turns = new();   // confirmed turns awaiting execution
@@ -47,6 +79,21 @@ public class LockstepNet : MonoBehaviour
     // Host side.
     private readonly Dictionary<uint, Dictionary<ulong, List<SimCommand>>> _inbox = new();
     private List<ulong> _participants = new();
+    private readonly Dictionary<ulong, int> _teamOf = new();                       // lobby team assignments
+    private readonly Dictionary<ulong, (uint tick, uint hash)> _reports = new();   // latest client checksum reports
+    private readonly HashSet<ulong> _pendingAcks = new();
+    private uint _syncTick;         // tick of the snapshot being distributed
+    private uint _hostHash;         // host's post-restore hash — the verification reference
+    private bool _syncing;
+    private bool _started;          // teams are locked and a world exists once true
+    private bool _syncFailed;       // a peer's restore hash disagreed — paused until root-caused
+
+    // Client-side snapshot assembly.
+    private byte[] _snapData;
+    private int  _snapChunks, _snapGot;
+    private uint _snapEpoch, _snapTick;
+
+    private int _myTeam = -1;       // local display + lobby choice
 
     private bool _handlersRegistered;
     private EntityQuery _queueQuery;
@@ -67,6 +114,9 @@ public class LockstepNet : MonoBehaviour
         {
             RegisterHandlers();
             NetworkManager.Singleton.OnClientDisconnectCallback += OnClientDisconnect;
+            NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+            _teamOf[NetworkManager.Singleton.LocalClientId] = 0;   // host defaults to team 1
+            _myTeam = 0;
         }
     }
 
@@ -80,47 +130,295 @@ public class LockstepNet : MonoBehaviour
     {
         if (_handlersRegistered) return;
         var cmm = NetworkManager.Singleton.CustomMessagingManager;
-        cmm.RegisterNamedMessageHandler(MSG_INPUT, OnInputMsg);
-        cmm.RegisterNamedMessageHandler(MSG_TURN,  OnTurnMsg);
-        cmm.RegisterNamedMessageHandler(MSG_START, OnStartMsg);
+        cmm.RegisterNamedMessageHandler(MSG_INPUT,  OnInputMsg);
+        cmm.RegisterNamedMessageHandler(MSG_TURN,   OnTurnMsg);
+        cmm.RegisterNamedMessageHandler(MSG_TEAM,   OnTeamMsg);
+        cmm.RegisterNamedMessageHandler(MSG_SNAP_B, OnSnapBegin);
+        cmm.RegisterNamedMessageHandler(MSG_SNAP_C, OnSnapChunk);
+        cmm.RegisterNamedMessageHandler(MSG_ACK,    OnAck);
+        cmm.RegisterNamedMessageHandler(MSG_RESUME, OnResume);
         _handlersRegistered = true;
     }
 
-    // Host presses "Start Game" once all clients are connected. Freezes the roster
-    // of participants, tells everyone to go, and begins locally. The Start message
-    // carries the HOST's halt tick: virtual players / clients load Inspector values
-    // from the saved scene and can be stale, so the halt (and therefore tick-exact
-    // auto-dumps) must be a networked decision, not a per-instance one.
-    private void HostStartGame()
+    private void OnClientConnected(ulong clientId)
     {
-        _participants = new List<ulong>(NetworkManager.Singleton.ConnectedClientsIds);
-        _participants.Sort();
-
-        foreach (var cid in NetworkManager.Singleton.ConnectedClientsIds)
-        {
-            if (cid == NetworkManager.Singleton.LocalClientId) continue;
-            using var w = new FastBufferWriter(8, Allocator.Temp);
-            w.WriteValueSafe(LockstepRateManager.HaltAtTick);
-            NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage(
-                MSG_START, cid, w, NetworkDelivery.Reliable);
-        }
-        BeginLocal();
+        if (!NetworkManager.Singleton.IsServer) return;
+        if (clientId == NetworkManager.Singleton.LocalClientId) return;
+        if (!_teamOf.ContainsKey(clientId)) _teamOf[clientId] = 1;   // new clients default to team 2
     }
 
-    private void BeginLocal()
+    // --- lobby: team selection ------------------------------------------------
+
+    private void ChooseTeam(int team)
     {
-        _execTick = 1;
-        _sentUpTo = 0;
+        if (_started) return;   // locked once a world exists
+        _myTeam = team;
+        var nm = NetworkManager.Singleton;
+        if (nm.IsServer)
+        {
+            _teamOf[nm.LocalClientId] = team;
+        }
+        else
+        {
+            using var w = new FastBufferWriter(8, Allocator.Temp);
+            w.WriteValueSafe(team);
+            nm.CustomMessagingManager.SendNamedMessage(
+                MSG_TEAM, NetworkManager.ServerClientId, w, NetworkDelivery.Reliable);
+        }
+    }
+
+    private void OnTeamMsg(ulong sender, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out int team);
+        if (_started) return;
+        _teamOf[sender] = Mathf.Clamp(team, 0, 1);
+    }
+
+    private void ApplyLocalTeam(int team)
+    {
+        _myTeam = team;
+        var pc = UnityEngine.Object.FindFirstObjectByType<PlayerCommander>();
+        if (pc != null) pc.SetTeam(team);
+    }
+
+    // --- host: start / load / resync — all the same distribution path ----------
+
+    private void HostStartGame()
+    {
+        if (_started) return;
+        var um = UnitManager.Instance;
+        if (um == null) { Debug.LogError("[Lockstep] no UnitManager in scene."); return; }
+        um.SpawnAll();
+        _started = true;
+        HostDistribute(SimSnapshot.Capture(World.DefaultGameObjectInjectionWorld));
+    }
+
+    private void HostLoadGame()
+    {
+        var data = SimSnapshot.LoadFile();
+        if (data == null) { Debug.LogWarning($"[Lockstep] no save file at {SimSnapshot.DefaultSavePath}"); return; }
+        _started = true;
+        HostDistribute(data);
+    }
+
+    // Called by the host when a client's reported checksum disagrees with the
+    // host's own hash at the same tick. Public so debug tooling can force one.
+    public void TriggerResync()
+    {
+        if (!NetworkManager.Singleton.IsServer || _syncing) return;
+        HostDistribute(SimSnapshot.Capture(World.DefaultGameObjectInjectionWorld));
+    }
+
+    private void HostDistribute(byte[] data)
+    {
+        var nm = NetworkManager.Singleton;
+        _epoch++;
+        _syncing = true;
+        _syncFailed = false;
+        IsPaused = true;
+        _reports.Clear();
+
+        _participants = new List<ulong>(nm.ConnectedClientsIds);
+        _participants.Sort();
+        foreach (var cid in _participants)
+            if (!_teamOf.ContainsKey(cid))
+                _teamOf[cid] = cid == nm.LocalClientId ? 0 : 1;
+
+        // The host restores its OWN world from the blob first: that produces the
+        // canonical chunk layout (see SimSnapshot.cs) and the reference hash
+        // every client ack is compared against.
+        var world = World.DefaultGameObjectInjectionWorld;
+        if (!SimSnapshot.Restore(world, data, out _syncTick, out _hostHash))
+        {
+            Debug.LogError("[Lockstep] host failed to restore its own snapshot — sync aborted.");
+            _syncing = false;
+            IsPaused = false;
+            return;
+        }
+        ApplyLocalTeam(_teamOf[nm.LocalClientId]);
+
+        _pendingAcks.Clear();
+        foreach (var cid in _participants)
+        {
+            if (cid == nm.LocalClientId) continue;
+            _pendingAcks.Add(cid);
+            SendSnapshot(cid, data);
+        }
+
+        // Solo host (no clients): nothing to wait for.
+        if (_pendingAcks.Count == 0) FinishSync();
+    }
+
+    private void SendSnapshot(ulong clientId, byte[] data)
+    {
+        var nm = NetworkManager.Singleton;
+        int chunkCount = (data.Length + SnapshotChunkBytes - 1) / SnapshotChunkBytes;
+
+        using (var w = new FastBufferWriter(256 + _teamOf.Count * 16, Allocator.Temp))
+        {
+            w.WriteValueSafe(_epoch);
+            w.WriteValueSafe(_syncTick);
+            w.WriteValueSafe(LockstepRateManager.HaltAtTick);   // networked decision, as in Phase 3
+            w.WriteValueSafe(data.Length);
+            w.WriteValueSafe(chunkCount);
+            w.WriteValueSafe(_teamOf.Count);
+            foreach (var kv in _teamOf)
+            {
+                w.WriteValueSafe(kv.Key);
+                w.WriteValueSafe(kv.Value);
+            }
+            nm.CustomMessagingManager.SendNamedMessage(
+                MSG_SNAP_B, clientId, w, NetworkDelivery.ReliableFragmentedSequenced);
+        }
+
+        for (int i = 0; i < chunkCount; i++)
+        {
+            int off = i * SnapshotChunkBytes;
+            int len = Math.Min(SnapshotChunkBytes, data.Length - off);
+            using var w = new FastBufferWriter(len + 64, Allocator.Temp);
+            w.WriteValueSafe(_epoch);
+            w.WriteValueSafe(i);
+            w.WriteValueSafe(len);
+            w.WriteBytesSafe(data, len, off);
+            nm.CustomMessagingManager.SendNamedMessage(
+                MSG_SNAP_C, clientId, w, NetworkDelivery.ReliableFragmentedSequenced);
+        }
+    }
+
+    // --- client: receive snapshot, restore, ack ---------------------------------
+
+    private void OnSnapBegin(ulong sender, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out uint epoch);
+        reader.ReadValueSafe(out uint tick);
+        reader.ReadValueSafe(out uint haltAtTick);
+        reader.ReadValueSafe(out int totalLen);
+        reader.ReadValueSafe(out int chunkCount);
+        reader.ReadValueSafe(out int teamCount);
+
+        // Adopt the new epoch immediately: everything still in flight from the
+        // old one (turns, our own queued submissions) belongs to a dead timeline.
+        _epoch = epoch;
+        _snapEpoch = epoch;
+        _snapTick = tick;
+        _started = true;
+        IsPaused = true;
+        LockstepRateManager.HaltAtTick = haltAtTick;
+
+        var nm = NetworkManager.Singleton;
+        for (int i = 0; i < teamCount; i++)
+        {
+            reader.ReadValueSafe(out ulong cid);
+            reader.ReadValueSafe(out int team);
+            if (cid == nm.LocalClientId) ApplyLocalTeam(team);
+        }
+
+        _snapData = new byte[totalLen];
+        _snapChunks = chunkCount;
+        _snapGot = 0;
+    }
+
+    private void OnSnapChunk(ulong sender, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out uint epoch);
+        if (epoch != _snapEpoch || _snapData == null) return;   // straggler from an aborted sync
+
+        reader.ReadValueSafe(out int index);
+        reader.ReadValueSafe(out int len);
+        var bytes = new byte[len];
+        reader.ReadBytesSafe(ref bytes, len);
+        Buffer.BlockCopy(bytes, 0, _snapData, index * SnapshotChunkBytes, len);
+
+        _snapGot++;
+        if (_snapGot < _snapChunks) return;
+
+        var data = _snapData;
+        _snapData = null;
+        bool ok = SimSnapshot.Restore(World.DefaultGameObjectInjectionWorld, data, out uint tick, out uint hash);
+
+        using var w = new FastBufferWriter(16, Allocator.Temp);
+        w.WriteValueSafe(_snapEpoch);
+        w.WriteValueSafe(ok ? (byte)1 : (byte)0);
+        w.WriteValueSafe(hash);
+        NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage(
+            MSG_ACK, NetworkManager.ServerClientId, w, NetworkDelivery.Reliable);
+        // Stay paused; MSG_RESUME arrives once every peer's hash is verified.
+    }
+
+    private void OnAck(ulong sender, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out uint epoch);
+        if (epoch != _epoch || !_syncing) return;
+        reader.ReadValueSafe(out byte ok);
+        reader.ReadValueSafe(out uint hash);
+
+        if (ok == 0 || hash != _hostHash)
+        {
+            // Identical blob, different state: the snapshot restore itself is
+            // nondeterministic (or structurally failed). Resending the same blob
+            // would loop forever — this is a bug to root-cause, so stay paused
+            // and say so.
+            Debug.LogError($"[Lockstep] SYNC FAILED: client {sender} restored to hash {hash:X8}, " +
+                           $"host has {_hostHash:X8} (ok={ok}). Game stays paused — root-cause the restore.");
+            _syncFailed = true;
+            return;
+        }
+
+        _pendingAcks.Remove(sender);
+        if (_pendingAcks.Count == 0 && !_syncFailed) FinishSync();
+    }
+
+    private void FinishSync()
+    {
+        var nm = NetworkManager.Singleton;
+        foreach (var cid in _participants)
+        {
+            if (cid == nm.LocalClientId) continue;
+            using var w = new FastBufferWriter(16, Allocator.Temp);
+            w.WriteValueSafe(_epoch);
+            w.WriteValueSafe(_syncTick);
+            nm.CustomMessagingManager.SendNamedMessage(
+                MSG_RESUME, cid, w, NetworkDelivery.Reliable);
+        }
+        Debug.Log($"[Lockstep] sync complete — all peers verified at tick {_syncTick} " +
+                  $"(hash {_hostHash:X8}, epoch {_epoch}); resuming.");
+        ResumeAt(_syncTick);
+    }
+
+    private void OnResume(ulong sender, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out uint epoch);
+        if (epoch != _epoch) return;
+        reader.ReadValueSafe(out uint tick);
+        ResumeAt(tick);
+    }
+
+    // Restart the lockstep pipeline from a freshly restored tick. Turns and
+    // inbox entries from before the restore reference a dead timeline; clearing
+    // them (plus the epoch stamp on all traffic) guarantees nothing stale leaks
+    // into the new one.
+    private void ResumeAt(uint tick)
+    {
+        _execTick = tick + 1;
+        _sentUpTo = tick;
         _turns.Clear();
         _inbox.Clear();
         IsRunning = true;
+        IsPaused = false;
+        _syncing = false;
     }
 
     // --- per-frame input pump -----------------------------------------------
 
     private void Update()
     {
-        if (!IsRunning) return;
+        var nm = NetworkManager.Singleton;
+
+        // Desync watchdog (host, while running normally): compare each client's
+        // latest reported checksum against our own hash AT THAT TICK.
+        if (nm != null && nm.IsServer && IsRunning && !_syncing) CheckReports();
+
+        if (!IsRunning || IsPaused) return;
 
         // Keep our submitted inputs InputDelay ticks ahead of execution. That gap
         // is what absorbs network latency. Never submit past the halt tick: the
@@ -136,6 +434,22 @@ public class LockstepNet : MonoBehaviour
         {
             _sentUpTo++;
             SubmitInput(_sentUpTo);
+        }
+    }
+
+    private void CheckReports()
+    {
+        foreach (var kv in _reports)
+        {
+            if (kv.Value.tick == 0) continue;                                  // nothing executed yet
+            if (!ChecksumHistory.TryGet(kv.Value.tick, out uint mine)) continue;   // we haven't run that tick / out of window
+            if (mine != kv.Value.hash)
+            {
+                Debug.LogError($"[Lockstep] DESYNC: client {kv.Key} at tick {kv.Value.tick} has hash " +
+                               $"{kv.Value.hash:X8}, host has {mine:X8} — redistributing host state.");
+                TriggerResync();
+                return;
+            }
         }
     }
 
@@ -158,6 +472,9 @@ public class LockstepNet : MonoBehaviour
         else
         {
             using var w = new FastBufferWriter(2048, Allocator.Temp, 256 * 1024);
+            w.WriteValueSafe(_epoch);
+            w.WriteValueSafe(ChecksumHistory.LatestTick);    // piggybacked desync report:
+            w.WriteValueSafe(ChecksumHistory.LatestValue);   // "my state at tick T hashed to H"
             w.WriteValueSafe(tick);
             w.WriteValueSafe(list.Count);
             for (int i = 0; i < list.Count; i++) w.WriteValueSafe(list[i]);
@@ -170,10 +487,27 @@ public class LockstepNet : MonoBehaviour
 
     private void OnInputMsg(ulong sender, FastBufferReader reader)
     {
+        reader.ReadValueSafe(out uint epoch);
+        if (epoch != _epoch) return;   // straggler from before a resync
+        reader.ReadValueSafe(out uint rTick);
+        reader.ReadValueSafe(out uint rHash);
+        if (rTick > 0) _reports[sender] = (rTick, rHash);
+
         reader.ReadValueSafe(out uint tick);
         reader.ReadValueSafe(out int count);
         var list = new List<SimCommand>(count);
         for (int i = 0; i < count; i++) { reader.ReadValueSafe(out SimCommand c); list.Add(c); }
+
+        // Team authority: the host stamps PlayerId from the sender's assigned
+        // team. Whatever the client claims, its commands act as its lobby team.
+        int team = _teamOf.TryGetValue(sender, out var t) ? t : 0;
+        for (int i = 0; i < list.Count; i++)
+        {
+            var c = list[i];
+            c.PlayerId = team;
+            list[i] = c;
+        }
+
         ServerReceiveInput(tick, list, sender);
     }
 
@@ -214,6 +548,7 @@ public class LockstepNet : MonoBehaviour
         {
             if (cid == NetworkManager.Singleton.LocalClientId) continue;
             using var w = new FastBufferWriter(2048, Allocator.Temp, 256 * 1024);
+            w.WriteValueSafe(_epoch);
             w.WriteValueSafe(tick);
             w.WriteValueSafe(combined.Count);
             for (int i = 0; i < combined.Count; i++) w.WriteValueSafe(combined[i]);
@@ -222,24 +557,17 @@ public class LockstepNet : MonoBehaviour
         }
     }
 
-    // --- client: receive turns / start --------------------------------------
+    // --- client: receive turns ------------------------------------------------
 
     private void OnTurnMsg(ulong sender, FastBufferReader reader)
     {
+        reader.ReadValueSafe(out uint epoch);
+        if (epoch != _epoch) return;   // turn from a dead timeline
         reader.ReadValueSafe(out uint tick);
         reader.ReadValueSafe(out int count);
         var list = new List<SimCommand>(count);
         for (int i = 0; i < count; i++) { reader.ReadValueSafe(out SimCommand c); list.Add(c); }
         _turns[tick] = list;
-    }
-
-    private void OnStartMsg(ulong sender, FastBufferReader reader)
-    {
-        // Adopt the host's halt tick — overrides any stale local Inspector value
-        // so every peer halts (and auto-dumps) at the exact same tick.
-        reader.ReadValueSafe(out uint haltAtTick);
-        LockstepRateManager.HaltAtTick = haltAtTick;
-        BeginLocal();
     }
 
     // --- execution gate (called by LockstepRateManager) ---------------------
@@ -279,6 +607,13 @@ public class LockstepNet : MonoBehaviour
     private void OnClientDisconnect(ulong clientId)
     {
         _participants.Remove(clientId);
+        _teamOf.Remove(clientId);
+        _reports.Remove(clientId);
+
+        // If we were waiting on this client's restore ack, stop waiting.
+        if (_syncing && _pendingAcks.Remove(clientId) && _pendingAcks.Count == 0 && !_syncFailed)
+            FinishSync();
+
         // A pending tick may now be complete with the remaining participants.
         var ready = new List<uint>();
         foreach (var kv in _inbox) if (AllSubmitted(kv.Key)) ready.Add(kv.Key);
@@ -299,7 +634,7 @@ public class LockstepNet : MonoBehaviour
     private void OnGUI()
     {
         var nm = NetworkManager.Singleton;
-        GUILayout.BeginArea(new Rect(10, 10, 240, 160), GUI.skin.box);
+        GUILayout.BeginArea(new Rect(10, 10, 250, 280), GUI.skin.box);
         if (nm == null)
         {
             GUILayout.Label("No NetworkManager in scene");
@@ -309,13 +644,38 @@ public class LockstepNet : MonoBehaviour
             if (GUILayout.Button("Host")) StartHost();
             if (GUILayout.Button("Client")) StartClient();
         }
+        else if (!_started)
+        {
+            GUILayout.Label(nm.IsServer ? "ROLE: HOST (lobby)" : "ROLE: CLIENT (lobby)");
+            GUILayout.Label($"connected: {nm.ConnectedClientsIds.Count}");
+            GUILayout.Label($"my team: {(_myTeam < 0 ? "-" : (_myTeam + 1).ToString())}");
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Play Team 1")) ChooseTeam(0);
+            if (GUILayout.Button("Play Team 2")) ChooseTeam(1);
+            GUILayout.EndHorizontal();
+
+            if (nm.IsServer)
+            {
+                foreach (var kv in _teamOf)
+                    GUILayout.Label($"  peer {kv.Key}: team {kv.Value + 1}");
+                if (GUILayout.Button("Start Game")) HostStartGame();
+                if (File.Exists(SimSnapshot.DefaultSavePath) && GUILayout.Button("Load Save"))
+                    HostLoadGame();
+            }
+            else
+            {
+                GUILayout.Label("waiting for host to start...");
+            }
+        }
         else
         {
             GUILayout.Label(nm.IsServer ? "ROLE: HOST" : "ROLE: CLIENT");
-            GUILayout.Label($"connected: {nm.ConnectedClientsIds.Count}");
+            GUILayout.Label($"team: {_myTeam + 1}   epoch: {_epoch}");
             GUILayout.Label($"execTick: {_execTick}   running: {IsRunning}");
-            if (nm.IsServer && !IsRunning && GUILayout.Button("Start Game"))
-                HostStartGame();
+            if (IsPaused) GUILayout.Label(_syncing ? "PAUSED — syncing..." : "PAUSED");
+            if (_syncFailed) GUILayout.Label("SYNC FAILED — check log");
+            if (nm.IsServer && IsRunning && !_syncing && GUILayout.Button("Save Game"))
+                SimSnapshot.SaveToFile(World.DefaultGameObjectInjectionWorld);
         }
         GUILayout.EndArea();
     }

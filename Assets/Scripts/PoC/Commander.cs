@@ -33,6 +33,11 @@ public abstract class Commander : MonoBehaviour
     [SerializeField] protected int team = 0;
     public int Team => team;
 
+    // Runtime team assignment (Phase 4): in a network session the local
+    // PlayerCommander's team comes from the lobby (host-assigned via
+    // LockstepNet), not the serialized Inspector value.
+    public void SetTeam(int newTeam) => team = newTeam;
+
     [Header("Lockstep stream (shared; configure on ONE instance)")]
     [Tooltip("Live = play normally; Record = play + save commands; Playback = replay a saved file; Network = LockstepNet distributes commands.")]
     [SerializeField] private LockstepMode mode = LockstepMode.Live;

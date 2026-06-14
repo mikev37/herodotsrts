@@ -100,14 +100,9 @@ public class UnitManager : MonoBehaviour
                 Amounts = new int3(startingGold, startingWood, startingStone)
             });
 
-        SpawnAll();
-    }
-
-    // -----------------------------------------------------------------------
-    // BACKING
-    // -----------------------------------------------------------------------
-    private void SpawnAll()
-    {
+        // Archetype lives here (not in SpawnAll) because in network mode a peer
+        // may never call SpawnAll at all — its world is built by
+        // SimSnapshot.Restore, which goes through SpawnUnit and needs this ready.
         var common = new ComponentType[]
         {
             typeof(LocalTransform), typeof(UnitTag), typeof(Team), typeof(UnitDefId),
@@ -120,14 +115,56 @@ public class UnitManager : MonoBehaviour
             typeof(Mana), typeof(PendingCast), typeof(NavContext),
             typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit), typeof(IncomingProjectile),   // perception + contact/friendly lists
         };
-        var archetype = _em.CreateArchetype(common);
+        _archetype = _em.CreateArchetype(common);
+
+        PreRegisterAll();
+
+        // Network mode: nothing spawns until the host starts/loads a game and
+        // the baseline snapshot materializes the world (SimSnapshot.Restore).
+        // Without LockstepNet in the scene this is the Phase 0-2 single-player
+        // path, unchanged.
+        if (LockstepNet.Instance == null) SpawnAll();
+    }
+
+    // Deterministic id pre-registration (Phase 4). Ability ids and projectile
+    // ids used to be assigned lazily at spawn — fine when every peer spawned
+    // the same roster, broken for a client that builds its world from a host
+    // snapshot and never spawns locally (its registries would be empty, or
+    // filled in a different order). Walking the roster in a fixed order
+    // (team, entry, slot) assigns the same ids on every peer before any unit
+    // exists; the spawn-time Register calls become idempotent lookups.
+    private void PreRegisterAll()
+    {
+        for (int team = 0; team < roster.Count; team++)
+        for (int id = 0; id < roster[team].Count; id++)
+        {
+            var def = roster[team][id].definition;
+            if (def == null) continue;
+            if (def.abilities != null && AbilityManager.Instance != null)
+                for (int s = 0; s < 4 && s < def.abilities.Length; s++)
+                    AbilityManager.Instance.Register(def.abilities[s]);
+            if (def.isRanged && def.projectile != null)
+                ResolveProjectileId(def.projectile);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // BACKING
+    // -----------------------------------------------------------------------
+    // The initial battle spawn. Single-player: called from Start. Network mode:
+    // called ONLY on the host when it presses Start Game (the resulting state is
+    // snapshotted and distributed; clients never run this).
+    public bool HasSpawned { get; private set; }
+
+    public void SpawnAll()
+    {
+        if (HasSpawned) { Debug.LogWarning("[UnitManager] SpawnAll called twice; ignored."); return; }
+        HasSpawned = true;
 
         // Terrain height for spawn placement (baked by TerrainFieldBootstrap; if
         // it hasn't run yet, units spawn at 0 and Steering snaps them next tick).
         bool hasTerrain = TryGetTerrain(out TerrainHeightField terrainField);
-        _archetype = archetype;
 
-        
         float spacing = 2;
         for (int team = 0; team < teamCount; team++) {
             float teamSign = team == 0 ? -1f : 1f;
@@ -163,6 +200,16 @@ public class UnitManager : MonoBehaviour
         }
     }
     private int _nextStableId;
+
+    // Snapshot access (SimSnapshot): SpawnUnit increments this during a restore
+    // too, but the restored ids are overwritten from the blob and the counter is
+    // set back to the captured value at the end — so post-restore spawns
+    // continue the EXACT id sequence the captured world would have produced.
+    public int NextStableId
+    {
+        get => _nextStableId;
+        set => _nextStableId = value;
+    }
     // Creates one fully-configured unit entity. Heroes are just units that also
     // get a HeroTag + HeroAura — no special movement/combat path. Buildings are
     // units too: same archetype and stat copy, plus BuildingTag (identity),

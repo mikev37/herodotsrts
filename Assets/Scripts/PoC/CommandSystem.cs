@@ -208,6 +208,12 @@ public partial struct CommandApplySystem : ISystem
                 if (!em.HasComponent<MoveTarget>(e) || !em.HasComponent<AttackOrder>(e)) continue;
                 if (em.HasComponent<Immobile>(e)) continue;   // buildings ignore movement/attack orders
 
+                // Team authority (Phase 4): a command only moves units on its
+                // issuer's team. The host stamps PlayerId from the sender's
+                // lobby-assigned team, so a client can never order the other
+                // side around (and an AI commander only ever moves its own).
+                if (!em.HasComponent<Team>(e) || em.GetComponentData<Team>(e).Value != c.PlayerId) continue;
+
                 MoveTarget mv  = em.GetComponentData<MoveTarget>(e);
                 AttackOrder ao = em.GetComponentData<AttackOrder>(e);
                 switch (c.Kind)
@@ -318,6 +324,10 @@ public partial struct CommandApplySystem : ISystem
         if (mana.Current < spec.ManaCost) return;                           // can't afford — fizzle, nothing consumed
 
         int team = em.HasComponent<Team>(caster) ? em.GetComponentData<Team>(caster).Value : c.PlayerId;
+
+        // Team authority (Phase 4): casts only commit through casters on the
+        // issuer's team (PlayerId is host-stamped from the lobby assignment).
+        if (team != c.PlayerId) return;
 
         // Commander resources: check all three before consuming any.
         bool hasResources = resourceEntity != Entity.Null && em.HasBuffer<TeamResources>(resourceEntity);
