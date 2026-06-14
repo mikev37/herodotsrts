@@ -298,7 +298,13 @@ public class UnitManager : MonoBehaviour
                 // A wall stamps a walkable Roof top + Transition skirt instead of
                 // a solid Impassable footprint. RoofHeight sits the configured
                 // amount above the footprint's highest terrain cell.
-                _em.AddComponentData(e, new Wall { Extents = extents, RoofHeight = pos.y + wdef.wallHeight });
+                _em.AddComponentData(e, new Wall
+                {
+                    Extents = extents,
+                    RoofHeight = pos.y + wdef.wallHeight,
+                    RampCells = math.max(1, wdef.rampCells),
+                    RampSide = (byte)wdef.rampSide,
+                });
             }
             else
             {

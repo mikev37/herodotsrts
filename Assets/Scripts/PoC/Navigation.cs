@@ -275,6 +275,8 @@ public partial struct ObstacleGridSystem : ISystem
             sig = Fnv(sig, (uint)c.x); sig = Fnv(sig, (uint)c.y);
             sig = Fnv(sig, (uint)wall.ValueRO.Extents.x); sig = Fnv(sig, (uint)wall.ValueRO.Extents.y);
             sig = Fnv(sig, math.asuint(wall.ValueRO.RoofHeight));
+            sig = Fnv(sig, (uint)wall.ValueRO.RampSide);
+            sig = Fnv(sig, (uint)wall.ValueRO.RampCells);
             sig = Fnv(sig, 0x5A5A5A5Au);   // domain-separate walls from obstacles
         }
         // The slope/water bake becomes available the first frame terrain exists;
