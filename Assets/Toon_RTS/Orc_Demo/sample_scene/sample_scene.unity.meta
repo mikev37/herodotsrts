@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: bf2d1ed0b6389504e9ed4db9e493dbe6
+timeCreated: 1506491096
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 101359
+  packageName: Toon RTS Units - Orcs Demo
+  packageVersion: 1.0
+  assetPath: Assets/Toon_RTS/Orc_Demo/sample_scene/sample_scene.unity
+  uploadId: 203097

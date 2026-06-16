@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 20d58ed5d4b11024696104eca050d3c2
+timeCreated: 1506490994
+licenseType: Store
+NativeFormatImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 101359
+  packageName: Toon RTS Units - Orcs Demo
+  packageVersion: 1.0
+  assetPath: Assets/Toon_RTS/Orc_Demo/model/Materials/Orc_Standard_Units.mat
+  uploadId: 203097

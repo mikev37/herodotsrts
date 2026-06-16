@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: a25de3c0a8b95464983d851d2448e292
+timeCreated: 1506490994
+licenseType: Store
+NativeFormatImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 101359
+  packageName: Toon RTS Units - Orcs Demo
+  packageVersion: 1.0
+  assetPath: Assets/Toon_RTS/Orc_Demo/model/Materials/Wolf_A.mat
+  uploadId: 203097
