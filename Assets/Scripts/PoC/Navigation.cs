@@ -439,7 +439,7 @@ public partial struct ObstacleGridSystem : ISystem
                 _bigChecksum[b] = sum;
                 bigVer[b]++;
                 anyMoved = true;
-                LabelTile(passable, cellComp, compCount, origin, b, floodStack);
+                LabelTile(cellType, cellComp, compCount, origin, b, floodStack);
             }
         }
         floodStack.Dispose();
@@ -469,7 +469,7 @@ public partial struct ObstacleGridSystem : ISystem
         return h;
     }
 
-    private static void LabelTile(NativeArray<byte> passable, NativeArray<byte> cellComp,
+    private static void LabelTile(NativeArray<byte> cellType, NativeArray<byte> cellComp,
                                   NativeArray<byte> compCount, int2 origin, int b,
                                   NativeArray<int> stack)
     {
@@ -483,7 +483,13 @@ public partial struct ObstacleGridSystem : ISystem
         for (int lx = 0; lx < sub; lx++)
         {
             int idx = NavGrid.Index(origin.x + lx, origin.y + ly);
-            if (passable[idx] == 0 || cellComp[idx] != 255) continue;
+            // Seed a new component from any standable, unlabelled cell. Impassable
+            // stays 255. The flood below only crosses Connected edges, so a Roof
+            // region and a Ground region in the same tile get DIFFERENT ids —
+            // they're joined only where a Transition bridges them. This is what
+            // makes one shared field route ground units around a wall and roof
+            // units along it: they live in different components of the graph.
+            if (cellType[idx] == NavCell.Impassable || cellComp[idx] != 255) continue;
             byte id = comps < NavGrid.MaxComp ? comps : (byte)(NavGrid.MaxComp - 1);
             if (comps < NavGrid.MaxComp) comps++;
 
@@ -494,13 +500,15 @@ public partial struct ObstacleGridSystem : ISystem
             {
                 int si = stack[--top];
                 int cx = si % sub, cy = si / sub;
+                byte fromType = cellType[NavGrid.Index(origin.x + cx, origin.y + cy)];
                 for (int d = 0; d < 4; d++)
                 {
                     int nx = cx + (d == 0 ? 1 : d == 1 ? -1 : 0);
                     int ny = cy + (d == 2 ? 1 : d == 3 ? -1 : 0);
                     if (nx < 0 || nx >= sub || ny < 0 || ny >= sub) continue;
                     int nidx = NavGrid.Index(origin.x + nx, origin.y + ny);
-                    if (passable[nidx] == 0 || cellComp[nidx] != 255) continue;
+                    if (cellComp[nidx] != 255) continue;
+                    if (!NavCell.Connected(fromType, cellType[nidx])) continue;   // type-aware edge
                     cellComp[nidx] = id;
                     stack[top++] = ny * sub + nx;
                 }
@@ -666,6 +674,7 @@ public partial struct FlowFieldSystem : ISystem
                 Coarse     = coarse,
                 Slots      = slots,
                 Passable   = obs.Passable,
+                CellType   = obs.CellType,
                 CellComp   = obs.CellComp,
                 BlockOf    = blockOf,
                 FineDir    = nf.ValueRW.FineDir,
@@ -874,6 +883,7 @@ public partial struct FlowFieldSystem : ISystem
         [ReadOnly] public NativeArray<int>       Coarse;
         [ReadOnly] public NativeArray<PathSlot>  Slots;
         [ReadOnly] public NativeArray<byte>      Passable;
+        [ReadOnly] public NativeArray<byte>      CellType;
         [ReadOnly] public NativeArray<byte>      CellComp;
         [ReadOnly] public NativeArray<int>       BigVersion;
         [ReadOnly] public NativeArray<int>       BlockOf;    // slot*BigCount+big -> block (neighbour lookup)
@@ -948,11 +958,16 @@ public partial struct FlowFieldSystem : ISystem
                     int lx = e == 0 ? 0 : e == 1 ? sub - 1 : t;
                     int ly = e == 2 ? 0 : e == 3 ? sub - 1 : t;
                     int2 cell = cellOrigin + new int2(lx, ly);
-                    if (Passable[NavGrid.Index(cell)] == 0) continue;
+                    if (CellType[NavGrid.Index(cell)] == NavCell.Impassable) continue;
 
                     int2 ncell = new int2(e == 0 ? cell.x - 1 : e == 1 ? cell.x + 1 : cell.x,
                                           e == 2 ? cell.y - 1 : e == 3 ? cell.y + 1 : cell.y);
-                    if (!NavGrid.InBounds(ncell.x, ncell.y) || Passable[NavGrid.Index(ncell)] == 0) continue;
+                    if (!NavGrid.InBounds(ncell.x, ncell.y)) continue;
+                    // Type-aware border edge: only connect components across the
+                    // tile boundary when the two cells are actually traversable
+                    // between (same surface or Transition-bridged), never across
+                    // a sheer ground<->roof step.
+                    if (!NavCell.Connected(CellType[NavGrid.Index(cell)], CellType[NavGrid.Index(ncell)])) continue;
 
                     int myCost = Coarse[baseC + big   * NavGrid.MaxComp + CellComp[NavGrid.Index(cell)]];
                     int nbCost = Coarse[baseC + nbBig * NavGrid.MaxComp + CellComp[NavGrid.Index(ncell)]];
@@ -1001,7 +1016,7 @@ public partial struct FlowFieldSystem : ISystem
                 FineDir[baseCost + si] = float2.zero;
                 float cc = FineCost[baseCost + si];
                 if (cc >= INF) continue;
-                if (Passable[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)] == 0) continue;
+                if (CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)] == NavCell.Impassable) continue;
 
                 float cR = SubCostOr(baseCost, lx + 1, ly, sub, cc);
                 float cL = SubCostOr(baseCost, lx - 1, ly, sub, cc);
@@ -1030,7 +1045,10 @@ public partial struct FlowFieldSystem : ISystem
                 int nsi = nly * sub + nlx;
                 if (stateArr[nsi] == 2) continue;
                 int2 ncell = cellOrigin + new int2(nlx, nly);
-                if (Passable[NavGrid.Index(ncell)] == 0) continue;
+                // Type-aware: cost only flows between Connected cells, so the
+                // field never propagates across a sheer ground<->roof step.
+                if (!NavCell.Connected(CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)],
+                                       CellType[NavGrid.Index(ncell)])) continue;
 
                 float t = SolveEikonal(nlx, nly, sub, cellOrigin, baseCost, stateArr);
                 if (t < FineCost[baseCost + nsi])
@@ -1068,7 +1086,8 @@ public partial struct FlowFieldSystem : ISystem
                 if (nlx < 0 || nlx >= sub || nly < 0 || nly >= sub) continue;
                 if (stateArr[nly * sub + nlx] != 2) continue;            // upwind: frozen neighbors only
                 int2 ncell = cellOrigin + new int2(nlx, nly);
-                if (Passable[NavGrid.Index(ncell)] == 0) continue;
+                if (!NavCell.Connected(CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)],
+                                       CellType[NavGrid.Index(ncell)])) continue;
                 best = math.min(best, FineCost[baseCost + nly * sub + nlx]);
             }
             return best;

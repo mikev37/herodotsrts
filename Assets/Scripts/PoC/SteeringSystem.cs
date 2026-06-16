@@ -150,16 +150,6 @@ public partial struct SteeringSystem : ISystem
             float falloff = radius.Value + NavGrid.CellSize;   // response ramps in within this of a blocked center
             int2 cell = NavGrid.Cell(pos);
 
-            int rampSearch = (int)math.ceil(falloff / NavGrid.CellSize) + 1;
-            bool nearRamp = false;
-            for (int ox = -rampSearch; ox <= rampSearch && !nearRamp; ox++)
-            for (int oy = -rampSearch; oy <= rampSearch && !nearRamp; oy++)
-            {
-                int ax = cell.x + ox, ay = cell.y + oy;
-                if (NavGrid.InBounds(ax, ay) &&
-                    CellType[NavGrid.Index(ax, ay)] == NavCell.Transition)
-                    nearRamp = true;
-            }
             for (int ox = -1; ox <= 1; ox++)
             for (int oy = -1; oy <= 1; oy++)
             {
@@ -167,8 +157,13 @@ public partial struct SteeringSystem : ISystem
                 if (!NavGrid.InBounds(nx, ny)) continue;
                 byte nType = CellType[NavGrid.Index(nx, ny)];
 
-                bool blocks = nearRamp ? (nType == NavCell.Impassable)
-                                       : !NavCell.CanStand(ctx, nType);
+                // A cell repels if THIS unit can't stand on it. Symmetric:
+                // a ground unit is walled out of roof cells, a roof unit is
+                // fenced out of ground cells (can't walk off the parapet), and a
+                // unit ON a ramp (context Transition) is repelled by neither, so
+                // it climbs through freely. Transitions never repel (always
+                // standable), so a ground unit can always step onto a ramp foot.
+                bool blocks = !NavCell.CanStand(ctx, nType);
                 if (!blocks) continue;
                 float2 away = pos - NavGrid.CellCenter(nx, ny);
                 float dist = math.length(away);

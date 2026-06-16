@@ -39,7 +39,7 @@ public partial struct ContactCombatSystem : ISystem
         new CombatJob
         {
             Dt = SystemAPI.Time.DeltaTime,
-            ImpactScale = 6f,        // global: ramming-impact damage multiplier
+            ImpactScale = 20f,        // global: ramming-impact damage multiplier
             KnockbackScale = 0.4f,   // global: knockback strength
             BodyContactScale = 1.2f, // global: bodies "touch" within (rA + rB) * this
             ImmobileLk = SystemAPI.GetComponentLookup<Immobile>(true),

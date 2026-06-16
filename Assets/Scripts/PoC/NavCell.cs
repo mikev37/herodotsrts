@@ -56,8 +56,9 @@ public static class NavCell
     public static bool CanStand(byte context, byte cellType)
     {
         if (cellType == Impassable) return false;
-        if (cellType == Transition) return true;
-        return cellType == context;     // Ground unit on Ground, Roof unit on Roof
+        if (cellType == Transition) return true;        // a ramp is always steppable
+        if (context == Transition) return true;         // mid-climb: may step onto ground (descend) or roof (ascend)
+        return cellType == context;                     // a Ground unit stands on Ground, a Roof unit on Roof
     }
 
     // Mutual traversability between two adjacent cells, independent of context.

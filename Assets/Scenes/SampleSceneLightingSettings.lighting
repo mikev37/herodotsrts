@@ -8,12 +8,12 @@ LightingSettings:
   m_PrefabAsset: {fileID: 0}
   m_Name: SampleSceneLightingSettings
   serializedVersion: 8
-  m_EnableBakedLightmaps: 1
+  m_EnableBakedLightmaps: 0
   m_EnableRealtimeLightmaps: 0
   m_RealtimeEnvironmentLighting: 0
   m_BounceScale: 1
   m_AlbedoBoost: 1
-  m_IndirectOutputScale: 1
+  m_IndirectOutputScale: 0.77
   m_UsingShadowmask: 0
   m_BakeBackend: 2
   m_LightmapMaxSize: 512
@@ -23,8 +23,8 @@ LightingSettings:
   m_Padding: 2
   m_LightmapCompression: 2
   m_AO: 1
-  m_AOMaxDistance: 1
-  m_CompAOExponent: 1
+  m_AOMaxDistance: 1000
+  m_CompAOExponent: 1.05
   m_CompAOExponentDirect: 0.3
   m_ExtractAO: 0
   m_MixedBakeMode: 0

@@ -4,13 +4,13 @@ public class SimpleProceduralWalker : MonoBehaviour {
     [System.Serializable]
     public class Leg {
         public Transform foot;
-        public Vector3 homeOffset;
+        [HideInInspector] public Vector3 homeOffset;
 
-        public Vector3 currentPos;
-        public Vector3 stepFrom;
-        public Vector3 targetPos;
-        public bool stepping;
-        public float stepT;
+        [HideInInspector] public Vector3 currentPos;
+        [HideInInspector] public Vector3 stepFrom;
+        [HideInInspector] public Vector3 targetPos;
+        [HideInInspector] public bool stepping;
+        [HideInInspector] public float stepT;
     }
 
     public Leg[] legs;
@@ -26,17 +26,18 @@ public class SimpleProceduralWalker : MonoBehaviour {
     [Header("Speed Reference")]
     public float maxSpeed = 8f;
 
+    [Header("Idle")]
+    public float idleThreshold = 0.05f;
+    public float idleReturnSpeed = 3f;
+
     [Header("Step")]
     public float stepHeight = 0.25f;
-    public float stepSpeedMultiplier = 3f;
-    public float minStepSpeed = 2f;
-
-    public float stepStride = 1;
+    public float stepStride = 1f;
+    public AnimationCurve stepHeightCurve;
 
     public int _currentIndex;
     public Vector3 _lastPos;
     public Vector3 _velocity;
-    public Vector3 _planarVel;
     public float _speedT;
 
     void Start() {
@@ -44,7 +45,8 @@ public class SimpleProceduralWalker : MonoBehaviour {
         _currentIndex = 0;
 
         foreach (var leg in legs) {
-            leg.currentPos = transform.TransformPoint(leg.homeOffset);
+            leg.homeOffset = leg.foot.localPosition;
+            leg.currentPos = leg.foot.position;
             leg.stepFrom = leg.currentPos;
             leg.targetPos = leg.currentPos;
             leg.stepping = false;
@@ -53,62 +55,67 @@ public class SimpleProceduralWalker : MonoBehaviour {
     }
 
     void Update() {
-        _velocity = (transform.position - _lastPos) / Mathf.Max(Time.deltaTime, 0.0001f);
+        Vector3 _rawvelocity = (transform.position - _lastPos) / Mathf.Max(Time.deltaTime, 0.0001f);
+        if (_rawvelocity.magnitude != 0)
+            _velocity = _rawvelocity;
         _lastPos = transform.position;
-        _planarVel = new Vector3(_velocity.x, 0f, _velocity.z);
-        _speedT = Mathf.Clamp01(_planarVel.magnitude / maxSpeed);
+        _speedT = Mathf.Clamp01(_velocity.magnitude / maxSpeed);
 
         ProcessLegs();
     }
 
     void ProcessLegs() {
-        // Advance all active steps
-        foreach (var leg in legs) {
-            if (!leg.stepping) continue;
-
-            float distanceTraveled = _planarVel.magnitude * Time.deltaTime;
-            leg.stepT += distanceTraveled / stepStride;
-            float t = Mathf.Clamp01(leg.stepT);
-
-            Vector3 pos = Vector3.Lerp(leg.stepFrom, leg.targetPos, t);
-            pos.y += Mathf.Sin(t * Mathf.PI) * stepHeight;
-            leg.currentPos = pos;
-
-            if (leg.stepT >= 1f) {
+        if (_velocity.magnitude < idleThreshold) {
+            foreach (var leg in legs) {
                 leg.stepping = false;
-                leg.currentPos = leg.targetPos;
+                if (leg.foot != null) {
+                    leg.foot.localPosition = Vector3.Lerp(leg.foot.localPosition, leg.homeOffset, Time.deltaTime * idleReturnSpeed);
+                    leg.currentPos = leg.foot.position;
+                }
             }
+            _currentIndex = 0;
+        } else {
+            foreach (var leg in legs) {
+                if (!leg.stepping) continue;
+
+                float distanceTraveled = Mathf.Max(_velocity.magnitude, idleThreshold) * Time.deltaTime;
+                leg.stepT += distanceTraveled / stepStride;
+                float t = Mathf.Clamp01(leg.stepT);
+
+                Vector3 pos = Vector3.Lerp(leg.stepFrom, leg.targetPos, t);
+                pos.y += stepHeightCurve.Evaluate(t) * stepHeight;
+                leg.currentPos = pos;
+
+                if (leg.stepT >= 1f) {
+                    leg.stepping = false;
+                    leg.currentPos = leg.targetPos;
+                }
+            }
+
+            foreach (var leg in legs)
+                if (leg.foot != null)
+                    leg.foot.position = leg.currentPos;
         }
 
-        foreach (var leg in legs)
-            if (leg.foot != null)
-                leg.foot.position = leg.currentPos;
-
-        // Is any foot in front of the body relative to velocity?
-        Vector3 forward = _planarVel.magnitude > 0.01f ? _planarVel.normalized : transform.forward;
+        Vector3 forward = _velocity.magnitude > 0.01f ? _velocity.normalized : transform.forward;
         int forwardCount = 0;
         foreach (var leg in legs)
-            if (Vector3.Dot(leg.targetPos - (transform.position + _planarVel * Time.deltaTime), forward) > minForward)
+            if (Vector3.Dot(leg.targetPos - (transform.TransformPoint(leg.homeOffset) + _velocity * Time.deltaTime), forward) > minForward)
                 forwardCount++;
 
-        if (forwardCount > 0) return;
+        if (forwardCount >= Mathf.CeilToInt(legs.Length / 2f)) return;
 
-
-        // Begin step on current candidate
         Leg candidate = legs[_currentIndex];
         if (candidate.stepping) return;
 
         float fwdExtent = Mathf.Lerp(minForward, maxForward, _speedT);
         float latExtent = Mathf.Lerp(minLateral, maxLateral, _speedT);
-        float stepDistance = fwdExtent;
-        float timeToLand = stepStride / Mathf.Max(_planarVel.magnitude, 0.01f);
-        Vector3 worldHome = transform.TransformPoint(candidate.homeOffset) + _planarVel * timeToLand;
-        if (Vector3.Distance(candidate.currentPos, worldHome) < stepDistance) return;
+        float timeToLand = stepStride / Mathf.Max(_velocity.magnitude, 0.01f);
 
+        Vector3 worldHome = transform.TransformPoint(candidate.homeOffset) + _velocity * timeToLand;
+        if (Vector3.Distance(candidate.currentPos, worldHome) < fwdExtent) return;
 
-        
-        Vector3 target = ComputeTarget(worldHome + _planarVel * timeToLand, _planarVel, fwdExtent, latExtent);
-
+        Vector3 target = ComputeTarget(worldHome, _velocity, fwdExtent, latExtent);
 
         BeginStep(candidate, target);
         _currentIndex = (_currentIndex + 1) % legs.Length;
@@ -126,19 +133,24 @@ public class SimpleProceduralWalker : MonoBehaviour {
 
     Vector3 ComputeTarget(Vector3 worldHome, Vector3 vel, float fwdExtent, float latExtent) {
         Vector3 forward = vel.magnitude > 0.01f ? vel.normalized : transform.forward;
-        Vector3 lateral = Vector3.Cross(Vector3.up, forward).normalized;
+        Vector3 lateral = transform.right;
 
-        float fwdDot = Mathf.Clamp(Vector3.Dot(vel.normalized, forward) * fwdExtent, -fwdExtent, fwdExtent);
-        float latDot = Mathf.Clamp(Vector3.Dot(vel.normalized, lateral) * latExtent, -latExtent, latExtent);
+        float fwdDot = Mathf.Clamp(Vector3.Dot(vel, forward) * fwdExtent, -fwdExtent, fwdExtent);
+        float latDot = Mathf.Clamp(Vector3.Dot(vel, lateral) * latExtent, -latExtent, latExtent);
 
         return worldHome + forward * fwdDot + lateral * latDot;
+    }
+
+    float GetTerrainHeight(Vector3 pos) {
+        if (Terrain.activeTerrain == null) return pos.y;
+        return Terrain.activeTerrain.SampleHeight(pos);
     }
 
 #if UNITY_EDITOR
     void OnDrawGizmosSelected() {
         if (legs == null) return;
         Vector3 fwd = Application.isPlaying
-            ? (_planarVel.magnitude > 0.01f ? _planarVel.normalized : transform.forward)
+            ? (_velocity.magnitude > 0.01f ? _velocity.normalized : transform.forward)
             : transform.forward;
 
         for (int i = 0; i < legs.Length; i++) {
