@@ -1016,12 +1016,18 @@ public partial struct FlowFieldSystem : ISystem
                 FineDir[baseCost + si] = float2.zero;
                 float cc = FineCost[baseCost + si];
                 if (cc >= INF) continue;
-                if (CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)] == NavCell.Impassable) continue;
+                byte ct = CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)];
+                if (ct == NavCell.Impassable) continue;
 
-                float cR = SubCostOr(baseCost, lx + 1, ly, sub, cc);
-                float cL = SubCostOr(baseCost, lx - 1, ly, sub, cc);
-                float cU = SubCostOr(baseCost, lx, ly + 1, sub, cc);
-                float cD = SubCostOr(baseCost, lx, ly - 1, sub, cc);
+                // Gradient only over CONNECTED neighbours. Without this, a roof
+                // edge cell sees the cheap ground cell across the sheer face
+                // (flooded from the ground side toward the same goal) and points
+                // the unit straight into the wall; it then presses the edge
+                // instead of routing along the roof to a ramp.
+                float cR = SubCostOr(baseCost, lx + 1, ly, sub, cellOrigin, ct, cc);
+                float cL = SubCostOr(baseCost, lx - 1, ly, sub, cellOrigin, ct, cc);
+                float cU = SubCostOr(baseCost, lx, ly + 1, sub, cellOrigin, ct, cc);
+                float cD = SubCostOr(baseCost, lx, ly - 1, sub, cellOrigin, ct, cc);
                 FineDir[baseCost + si] = -math.normalizesafe(new float2(cR - cL, cU - cD));
             }
 
@@ -1093,9 +1099,14 @@ public partial struct FlowFieldSystem : ISystem
             return best;
         }
 
-        private float SubCostOr(int baseCost, int lx, int ly, int sub, float fallback)
+        private float SubCostOr(int baseCost, int lx, int ly, int sub, int2 cellOrigin, byte fromType, float fallback)
         {
             if (lx < 0 || lx >= sub || ly < 0 || ly >= sub) return fallback;
+            // Across a non-connected boundary (sheer ground<->roof), treat the
+            // neighbour as if it were this cell's own cost, so it adds nothing to
+            // the gradient — the direction follows only reachable cells.
+            byte nType = CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)];
+            if (!NavCell.Connected(fromType, nType)) return fallback;
             float c = FineCost[baseCost + ly * sub + lx];
             return c >= INF ? fallback : c;
         }

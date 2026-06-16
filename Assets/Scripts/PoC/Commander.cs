@@ -75,7 +75,8 @@ public abstract class Commander : MonoBehaviour
         AllUnitsQuery = Em.CreateEntityQuery(
             ComponentType.ReadOnly<UnitTag>(),
             ComponentType.ReadOnly<Team>(),
-            ComponentType.ReadOnly<LocalTransform>());
+            ComponentType.ReadOnly<LocalTransform>(),
+            ComponentType.Exclude<Immobile>());   // buildings/walls aren't selectable/orderable units
         _clockQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<SimClock>());
         worldReady = _ready = true;
 

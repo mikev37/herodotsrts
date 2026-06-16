@@ -1077,14 +1077,19 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   legs:
-  - foot: {fileID: 0}
-    restOffset: {x: 0, y: 0, z: 0}
-  - foot: {fileID: 0}
-    restOffset: {x: 0, y: 0, z: 0}
+  - {foot: {fileID: 0}, restOffset: {x: 0, y: 0, z: 0}}
+  - {foot: {fileID: 0}, restOffset: {x: 0, y: 0, z: 0}}
   stepDistance: 0.4
   stepHeight: 0.15
   stepSpeed: 6
   stepOvershoot: 0.1
+  _planted: []
+  _stepFrom: []
+  _stepTarget: []
+  _stepT: []
+  _isStepping: []
+  _prevPosition: {x: 0, y: 0, z: 0}
+  _velocity: {x: 0, y: 0, z: 0}
 --- !u!1 &1687258581
 GameObject:
   m_ObjectHideFlags: 0
@@ -1429,7 +1434,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 8627985545248680660, guid: ff4d8adbf7f6f164484f57fc5c835ebd, type: 3}
       propertyPath: _speedT
-      value: 0.26608032
+      value: 0.2660803
       objectReference: {fileID: 0}
     - target: {fileID: 8627985545248680660, guid: ff4d8adbf7f6f164484f57fc5c835ebd, type: 3}
       propertyPath: maxSpeed
@@ -1437,11 +1442,11 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 8627985545248680660, guid: ff4d8adbf7f6f164484f57fc5c835ebd, type: 3}
       propertyPath: _lastPos.x
-      value: 291.07025
+      value: 291.0703
       objectReference: {fileID: 0}
     - target: {fileID: 8627985545248680660, guid: ff4d8adbf7f6f164484f57fc5c835ebd, type: 3}
       propertyPath: _lastPos.y
-      value: 0.000022888184
+      value: 0.00002288818
       objectReference: {fileID: 0}
     - target: {fileID: 8627985545248680660, guid: ff4d8adbf7f6f164484f57fc5c835ebd, type: 3}
       propertyPath: _lastPos.z
@@ -1457,7 +1462,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 8627985545248680660, guid: ff4d8adbf7f6f164484f57fc5c835ebd, type: 3}
       propertyPath: _velocity.z
-      value: -1.0643213
+      value: -1.064321
       objectReference: {fileID: 0}
     - target: {fileID: 8627985545248680660, guid: ff4d8adbf7f6f164484f57fc5c835ebd, type: 3}
       propertyPath: _currentIndex
