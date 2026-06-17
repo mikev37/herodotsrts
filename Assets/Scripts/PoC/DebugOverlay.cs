@@ -68,6 +68,12 @@ public class DebugOverlay : MonoBehaviour
     private readonly List<Vector3> _ramp = new();
     private readonly List<UnitGiz> _units = new();
 
+    // Live readout for the first selected unit (context / surface debug).
+    private bool _selHas;
+    private byte _selCtx, _selCellType;
+    private float _selY, _selNavH;
+    private Vector2Int _selCell;
+
     private EntityManager _em;
     private EntityQuery _debugQuery, _unitQuery, _flowQuery, _obstacleQuery, _requestQuery;
     private bool _ready;
@@ -231,6 +237,30 @@ public class DebugOverlay : MonoBehaviour
         var targets = _unitQuery.ToComponentDataArray<CombatTarget>(Allocator.Temp);
         var dests = _unitQuery.ToComponentDataArray<DesiredDestination>(Allocator.Temp);
 
+        // Selected-unit surface readout. Pull NavContext + the cell under it from
+        // the ObstacleField, so we can see live whether context matches the tile
+        // it's standing on (and whether it jitters between roof/transition).
+        _selHas = false;
+        bool hasObs = _obstacleQuery.TryGetSingleton<ObstacleField>(out var obsField);
+        for (int i = 0; i < entities.Length; i++)
+        {
+            if (!(_em.HasComponent<Selected>(entities[i]) && _em.IsComponentEnabled<Selected>(entities[i]))) continue;
+            float3 sp = xforms[i].Position;
+            int2 c = NavGrid.Cell(new float2(sp.x, sp.z));
+            _selHas = true;
+            _selCell = new Vector2Int(c.x, c.y);
+            _selY = sp.y;
+            _selCtx = _em.HasComponent<NavContext>(entities[i])
+                ? _em.GetComponentData<NavContext>(entities[i]).Value : (byte)255;
+            if (hasObs && NavGrid.InBounds(c.x, c.y))
+            {
+                _selCellType = obsField.CellType[NavGrid.Index(c.x, c.y)];
+                _selNavH = obsField.NavHeight[NavGrid.Index(c.x, c.y)];
+            }
+            else { _selCellType = 255; _selNavH = 0f; }
+            break;
+        }
+
         int total = entities.Length;
         int step = Mathf.Max(1, total / Mathf.Max(1, maxGizmoUnits));
         for (int i = 0; i < total; i += step)
@@ -266,7 +296,7 @@ public class DebugOverlay : MonoBehaviour
     private void OnGUI()
     {
         if (!showHud) return;
-        const int w = 250, h = 250;
+        const int w = 260, h = 320;
         GUI.Box(new Rect(Screen.width - w - 10, 10, w, h), "SIM DEBUG");
         var r = new Rect(Screen.width - w, 35, w - 15, 18);
         void Line(string s) { GUI.Label(r, s); r.y += 17; }
@@ -281,6 +311,19 @@ public class DebugOverlay : MonoBehaviour
         Line($"Selected:{selected}");
         Line($"Flow paths:{flowFieldCount}/{NavGrid.MaxPaths}  fine blocks:{flowBlocks}");
         Line($"Obstacles ver:{obstacleVersion}  blocked:{blockedCells}");
+
+        if (_selHas)
+        {
+            string ctxName = _selCtx == 1 ? "Ground" : _selCtx == 2 ? "Roof" : _selCtx == 3 ? "Transition" : _selCtx.ToString();
+            string typeName = _selCellType == 0 ? "Impassable" : _selCellType == 1 ? "Ground" : _selCellType == 2 ? "Roof" : _selCellType == 3 ? "Transition" : _selCellType.ToString();
+            Line($"Sel cell:({_selCell.x},{_selCell.y}) y:{_selY:0.0} navH:{_selNavH:0.0}");
+            Line($"Sel ctx:{ctxName}  tile:{typeName}");
+            // A unit on a Transition tile should have Transition context and be
+            // repelled by nothing. Flag any mismatch so jitter is visible.
+            bool mismatch = (_selCellType <= 3) && (_selCtx != _selCellType)
+                            && !(_selCellType == 0);
+            if (mismatch) Line($"  >> CTX/TILE MISMATCH <<");
+        }
     }
 
     private void OnDrawGizmos()

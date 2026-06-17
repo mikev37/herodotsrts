@@ -184,17 +184,8 @@ public partial struct SteeringSystem : ISystem
                     float into = math.dot(desired, normal);
                     if (into < 0f) desired -= normal * into;
 
-                    // PUSH out of the surface, but never AGAINST the unit's
-                    // goal direction. At the mouth of a 1-wide gap the flanking
-                    // structures both sit behind-and-beside the unit, so their
-                    // summed normal points backward out of the gap; pushing along
-                    // it would eject the unit. Strip the component of the push
-                    // that opposes desired, leaving only the sideways centring.
-                    float2 push = normal * (sumLen * sumLen * ObstacleStrength);
-                    float2 goalDir = math.normalizesafe(desired);
-                    float against = math.dot(push, goalDir);
-                    if (against < 0f) push -= goalDir * against;
-                    desired += push;
+                    // PUSH out of the surface, scaled by the RESULTANT normal magnitude.
+                    desired += normal * (sumLen * sumLen * ObstacleStrength);
                 }
             }
 

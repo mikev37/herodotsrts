@@ -54,13 +54,13 @@ MonoBehaviour:
   avoidMelee: 0
   retreatLowHealth: 0
   formWedge: 0
-  alignCardinal: 1
+  alignCardinal: 0
   alignMovement: 0
-  separate: 1
-  separateIdle: 1
-  separateLateral: 1
-  groupCohesion: 1
-  followMoving: 1
+  separate: 0
+  separateIdle: 0
+  separateLateral: 0
+  groupCohesion: 0
+  followMoving: 0
   attackNearbyRange: 6
   avoidMeleeRange: 8
   retreatHealthFraction: 0.25

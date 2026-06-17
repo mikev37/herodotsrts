@@ -67,7 +67,7 @@ public static class NavTerrain
     // Also closes diagonal seepage: a diagonal step is blocked unless both
     // orthogonal shoulder cells are standable.
     public static bool LineOfSight(float2 a, float2 b, in NativeArray<byte> cellType,
-                                   byte context, int maxCells)
+                                   int maxCells)
     {
         int2 c0 = NavGrid.Cell(a), c1 = NavGrid.Cell(b);
         int dx = math.abs(c1.x - c0.x), dy = math.abs(c1.y - c0.y);
@@ -77,22 +77,36 @@ public static class NavTerrain
         int sy = c1.y >= c0.y ? 1 : -1;
         int x = c0.x, y = c0.y, err = dx - dy;
 
+        // Walkable sightline: every STEP along the ray must be a Connected edge
+        // between adjacent cells. This is what keeps a unit on a ramp (context
+        // Transition) from "seeing" straight across a roof to a ground goal —
+        // CanStand(Transition,*) is true for everything, so a context test would
+        // pass the whole ray and flip the unit into a direct march back over the
+        // wall. Connectivity breaks the ray at the sheer roof<->ground face, so
+        // the unit keeps following the flow field down the ramp and around.
+        if (!NavGrid.InBounds(x, y) || cellType[NavGrid.Index(x, y)] == NavCell.Impassable) return false;
+        byte prevType = cellType[NavGrid.Index(x, y)];
+
         for (int guard = 0; guard <= maxCells + 2; guard++)
         {
-            if (!NavGrid.InBounds(x, y)) return false;
-            if (!NavCell.CanStand(context, cellType[NavGrid.Index(x, y)])) return false;
             if (x == c1.x && y == c1.y) return true;
             int e2 = 2 * err;
             bool stepX = e2 > -dy, stepY = e2 < dx;
             if (stepX && stepY)
             {
                 int hx = x + sx, hy = y + sy;
-                bool shoulderX = NavGrid.InBounds(hx, y) && NavCell.CanStand(context, cellType[NavGrid.Index(hx, y)]);
-                bool shoulderY = NavGrid.InBounds(x, hy) && NavCell.CanStand(context, cellType[NavGrid.Index(x, hy)]);
+                bool shoulderX = NavGrid.InBounds(hx, y) &&
+                    NavCell.Connected(prevType, cellType[NavGrid.Index(hx, y)]);
+                bool shoulderY = NavGrid.InBounds(x, hy) &&
+                    NavCell.Connected(prevType, cellType[NavGrid.Index(x, hy)]);
                 if (!shoulderX || !shoulderY) return false;
             }
             if (stepX) { err -= dy; x += sx; }
             if (stepY) { err += dx; y += sy; }
+            if (!NavGrid.InBounds(x, y)) return false;
+            byte t = cellType[NavGrid.Index(x, y)];
+            if (!NavCell.Connected(prevType, t)) return false;   // ray breaks at a non-traversable edge
+            prevType = t;
         }
         return true;
     }

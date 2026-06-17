@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 431177ed328b44e40985bb540aa9dded
+timeCreated: 1501350345
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 95640
+  packageName: Toon RTS Units - Undead Demo
+  packageVersion: 1.0
+  assetPath: Assets/Toon_RTS/unded_Demo/demo_scene/ToonRTS_Undead_demo_scene.unity
+  uploadId: 192702

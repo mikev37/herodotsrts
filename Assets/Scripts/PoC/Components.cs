@@ -12,6 +12,7 @@ public struct MoveTarget : IComponentData
 {
     public float2 Value;   // world-space XZ destination (we flatten 3D -> plane)
     public bool HasTarget;
+    public float2 Forward;
     public bool AttackMove; // if true, engage enemies encountered en route; if false, ignore them
 }
 

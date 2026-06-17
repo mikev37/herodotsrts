@@ -1,3 +1,4 @@
+using System;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
@@ -57,6 +58,7 @@ public partial struct InformationGatherSystem : ISystem {
             SearchCells = 2,            // global: how many hash cells out to perceive
             ContactRadius = 6f,         // global: neighbors within this go into the ContactList
             FriendlyRadius = 8f,       // global: friendlies within this go into the FriendlyUnit buffer
+            FriendlyCap = 16,           // global: max friendlies in the formation buffer (nearest kept, furthest dropped)
             OutlierFactor = 1.75f,      // global: CoM pass 2 drops units beyond mean dist * this
             ClusterRadius = 14f,        // global: trimmed mean spread above this -> "spread apart"
             LosRange = 10,              // global: max cells for LoS check
@@ -74,7 +76,7 @@ public partial struct InformationGatherSystem : ISystem {
         public float CellSize, ContactRadius, FriendlyRadius, OutlierFactor, ClusterRadius;
         public float ProjCellSize;
         public float NoLosMultiplier, HeightGate;
-        public int SearchCells, LosRange;
+        public int SearchCells, LosRange, FriendlyCap;
 
         private void Execute(
             Entity self,
@@ -84,14 +86,13 @@ public partial struct InformationGatherSystem : ISystem {
             in Attack myAttack,
             in Defense myDefense,
             in GroundSpeedMultiplier slope,
-            in NavContext navCtx,
             ref Perception perception,
             DynamicBuffer<UnitInfo> contacts,
             DynamicBuffer<FriendlyUnit> friendlies,
-            DynamicBuffer<IncomingProjectile> incomingProjectiles) {
+            DynamicBuffer<IncomingProjectile> incomingProjectiles,
+            [ReadOnly] DynamicBuffer<GroupMember> group) {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float myHeight = slope.Height;
-            byte myCtx = navCtx.Value;
             float3 forward3 = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
 
@@ -105,6 +106,10 @@ public partial struct InformationGatherSystem : ISystem {
 
             var enemies = new NativeList<UnitInfo>(32, Allocator.Temp);
             var allies = new NativeList<UnitInfo>(32, Allocator.Temp);
+            // Same-group friendlies collected with distance, so the cap can keep
+            // the nearest FriendlyCap and drop the furthest after the sweep.
+            var friendlyCands = new NativeList<FriendlyCand>(32, Allocator.Temp);
+            bool hasGroup = group.Length > 0;   // empty buffer -> ungrouped, proximity fallback
 
             // ---- one sweep: collect, fill buffers, score candidates ----------
             float closestEnemyDist = float.MaxValue;
@@ -131,7 +136,7 @@ public partial struct InformationGatherSystem : ISystem {
                                              math.abs(neighbor.Height - myHeight) > HeightGate;
 
                         bool los = neighbor.IsBuilding ||
-                                   NavTerrain.LineOfSight(position, neighbor.Position, CellType, myCtx, LosRange);
+                                   NavTerrain.LineOfSight(position, neighbor.Position, CellType, LosRange);
                         float effectiveDist = los ? distance : distance + NoLosMultiplier;
                         if (!neighbor.IsBuilding && !heightBlocked && effectiveDist <= ContactRadius)
                             contacts.Add(neighbor);
@@ -173,21 +178,22 @@ public partial struct InformationGatherSystem : ISystem {
                         } else {
                             if (effectiveDist > FriendlyRadius)
                                 continue;
+                            // GROUP FILTER: a grouped unit perceives ONLY its own
+                            // group's members; an ungrouped unit (empty buffer)
+                            // falls back to proximity and sees everyone nearby.
+                            if (hasGroup && !InGroup(group, neighbor.StableId))
+                                continue;
+
                             allies.Add(neighbor);
 
                             // Formation neighborhood is MOBILE units only: a
                             // building must not anchor lattice/wedge/rank slots
                             // or drag the movement/facing consensus to zero.
-                            if (distance <= FriendlyRadius && !neighbor.IsBuilding) {
-                                friendlies.Add(new FriendlyUnit { Info = neighbor });
-                                avgFacing += neighbor.Facing;
-                                avgVelocity += neighbor.Velocity;
-                                if (neighbor.IsAttacking || math.lengthsq(neighbor.Velocity) > 0.1f)
-                                {
-                                    movingVelocity += neighbor.Velocity;
-                                    movingCount++;
-                                }
-                            }
+                            // Collected with distance so the cap can drop the
+                            // FURTHEST when the group exceeds FriendlyCap; the
+                            // buffer + consensus are built from the kept set below.
+                            if (distance <= FriendlyRadius && !neighbor.IsBuilding)
+                                friendlyCands.Add(new FriendlyCand { Info = neighbor, Dist = distance });
 
                             if (Better(distance, neighbor.StableId, closestFriendDist, closestFriendId)) {
                                 closestFriendDist = distance; closestFriendId = neighbor.StableId;
@@ -197,6 +203,30 @@ public partial struct InformationGatherSystem : ISystem {
                     }
                     while (Map.TryGetNextValue(out neighbor, ref iterator));
                 }
+
+            // ---- formation buffer: cap to the NEAREST FriendlyCap ------------
+            // Over the cap, sort nearest-first (ties by StableId -> deterministic)
+            // and keep only FriendlyCap. The facing/velocity/moving consensus is
+            // built from the KEPT set so it matches the slots the buffer feeds.
+            int keep = friendlyCands.Length;
+            if (keep > FriendlyCap)
+            {
+                friendlyCands.Sort();
+                keep = FriendlyCap;
+            }
+            for (int i = 0; i < keep; i++)
+            {
+                UnitInfo f = friendlyCands[i].Info;
+                friendlies.Add(new FriendlyUnit { Info = f });
+                avgFacing += f.Facing;
+                avgVelocity += f.Velocity;
+                if (f.IsAttacking || math.lengthsq(f.Velocity) > 0.1f)
+                {
+                    movingVelocity += f.Velocity;
+                    movingCount++;
+                }
+            }
+            friendlyCands.Dispose();
 
             // ---- incoming projectiles: 3x3 cell walk around my position -----
             if (ProjMap.IsCreated)
@@ -238,6 +268,29 @@ public partial struct InformationGatherSystem : ISystem {
         // Deterministic "closer wins, StableId breaks ties".
         private static bool Better(float dist, int id, float bestDist, int bestId)
             => dist < bestDist || (dist == bestDist && id < bestId);
+
+        // Group membership test for the perception filter. Linear — groups are
+        // small (a selection); swap for a NativeHashSet if rosters get large.
+        private static bool InGroup(in DynamicBuffer<GroupMember> group, int stableId)
+        {
+            for (int i = 0; i < group.Length; i++)
+                if (group[i].StableId == stableId) return true;
+            return false;
+        }
+
+        // A same-group friendly + its distance, so the formation cap can keep the
+        // nearest and drop the furthest. Total order (distance, then StableId)
+        // makes the sort identical on every peer.
+        private struct FriendlyCand : IComparable<FriendlyCand>
+        {
+            public UnitInfo Info;
+            public float Dist;
+            public int CompareTo(FriendlyCand o)
+            {
+                if (Dist != o.Dist) return Dist < o.Dist ? -1 : 1;
+                return Info.StableId.CompareTo(o.Info.StableId);
+            }
+        }
 
         // Two-pass center of mass: mean, then re-mean excluding units farther than
         // OutlierFactor * meanDistance (stragglers don't drag the group's center).

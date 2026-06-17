@@ -113,7 +113,7 @@ public class UnitManager : MonoBehaviour
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
             typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
             typeof(Mana), typeof(PendingCast), typeof(NavContext),
-            typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit), typeof(IncomingProjectile),   // perception + contact/friendly lists
+            typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit), typeof(GroupMember), typeof(IncomingProjectile),   // perception + contact/friendly/group lists
         };
         _archetype = _em.CreateArchetype(common);
 

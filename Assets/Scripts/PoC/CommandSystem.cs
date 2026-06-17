@@ -43,6 +43,23 @@ public struct SimCommand : IBufferElementData, INetworkSerializeByMemcpy
 // Marks the entity that owns the pending-command buffer (and the cast-event buffer).
 public struct CommandQueueTag : IComponentData { }
 
+// Per-unit roster of the LAST order this unit received: the StableIds of every
+// unit that shared that order. Written by CommandApplySystem on each unit order,
+// read by InformationGatherSystem to scope perception to the group — a unit only
+// "sees" friendlies whose StableId is in this list. Persists until the unit's
+// next order; empty => ungrouped (the gather falls back to proximity).
+//
+// PERSISTENT SIM STATE: serialize this in SimSnapshot like AttackOrder. It holds
+// StableIds, not Entity refs, so it survives restore with NO fixup pass. Add the
+// buffer to the unit archetype wherever FriendlyUnit is added, so the set of
+// entities the gather runs on is unchanged. Capacity 0 keeps the (up to ~125-id)
+// roster off the chunk, matching FriendlyUnit.
+[InternalBufferCapacity(0)]
+public struct GroupMember : IBufferElementData
+{
+    public int StableId;
+}
+
 // Deterministic sequence for AbilityField ids (replaces entity-index FieldIds,
 // which aren't guaranteed identical across clients).
 public struct FieldIdSeq : IComponentData { public int Next; }
@@ -202,12 +219,71 @@ public partial struct CommandApplySystem : ISystem
             Entity atkTarget = Entity.Null;
             if (c.Kind == CommandKind.AttackTarget) map.TryGetValue(c.TargetStableId, out atkTarget);
 
+            // ---- collect the units this order actually applies to -------------
+            int cap = c.Units.Length;
+            var ids  = new NativeList<int>(cap, Allocator.Temp);
+            var ents = new NativeList<Entity>(cap, Allocator.Temp);
+            var poss = new NativeList<float2>(cap, Allocator.Temp);
+            float2 center = float2.zero, facingSum = float2.zero;
             for (int u = 0; u < c.Units.Length; u++)
             {
                 if (!map.TryGetValue(c.Units[u], out Entity e)) continue;
                 if (!em.HasComponent<MoveTarget>(e) || !em.HasComponent<AttackOrder>(e)) continue;
                 if (em.HasComponent<Immobile>(e)) continue;   // buildings ignore movement/attack orders
+                var xf = em.GetComponentData<LocalTransform>(e);
+                float2 p = new float2(xf.Position.x, xf.Position.z);
+                float3 f3 = math.forward(xf.Rotation);
+                ids.Add(c.Units[u]); ents.Add(e); poss.Add(p);
+                center += p; facingSum += new float2(f3.x, f3.z);
+            }
+            int n = ids.Length;
+            if (n == 0) { ids.Dispose(); ents.Dispose(); poss.Dispose(); continue; }
+            center /= n;
 
+            // ---- the order's FIXED forward (stored, never recomputed per tick) -
+            float2 avgFacing = math.normalizesafe(facingSum, new float2(0f, 1f));
+            float2 aim = c.TargetPos;
+            if (c.Kind == CommandKind.AttackTarget && atkTarget != Entity.Null)
+            {
+                var tx = em.GetComponentData<LocalTransform>(atkTarget).Position;
+                aim = new float2(tx.x, tx.z);
+            }
+            float2 fwd = c.Kind == CommandKind.Stop ? avgFacing
+                                                    : math.normalizesafe(aim - center, avgFacing);
+            float2 right = new float2(fwd.y, -fwd.x);
+
+            // ---- assign units to slots BY POSITION (2D) -----------------------
+            // Front rank first along fwd, then left-to-right along right within
+            // each rank — so a unit's rank reflects where it already stands and
+            // paths don't cross. Shape/width come from the group's flags (assumed
+            // shared); BehaviorSystem reproduces the same slot from this rank.
+            FormationShape shape = FormationGeometry.FromFlags(em.GetComponentData<BehaviorFlags>(ents[0]).Value);
+            int cols = FormationGeometry.Cols(shape, n);
+            var idx = new NativeArray<int>(n, Allocator.Temp);
+            for (int i = 0; i < n; i++) idx[i] = i;
+            for (int a = 0; a < n; a++)                         // depth DESC (front first), tie StableId
+            {
+                int best = a;
+                for (int b = a + 1; b < n; b++)
+                    if (FrontOf(poss[idx[b]], ids[idx[b]], poss[idx[best]], ids[idx[best]], fwd)) best = b;
+                (idx[a], idx[best]) = (idx[best], idx[a]);
+            }
+            for (int r0 = 0; r0 < n; r0 += cols)               // lateral ASC within each rank, tie StableId
+            {
+                int r1 = math.min(r0 + cols, n);
+                for (int a = r0; a < r1; a++)
+                {
+                    int best = a;
+                    for (int b = a + 1; b < r1; b++)
+                        if (LeftOf(poss[idx[b]], ids[idx[b]], poss[idx[best]], ids[idx[best]], right)) best = b;
+                    (idx[a], idx[best]) = (idx[best], idx[a]);
+                }
+            }
+
+            // ---- write orders + the position-sorted roster + the forward ------
+            for (int a = 0; a < n; a++)
+            {
+                Entity e = ents[idx[a]];
                 MoveTarget mv  = em.GetComponentData<MoveTarget>(e);
                 AttackOrder ao = em.GetComponentData<AttackOrder>(e);
                 switch (c.Kind)
@@ -221,12 +297,39 @@ public partial struct CommandApplySystem : ISystem
                     case CommandKind.AttackTarget:
                         mv.HasTarget = false; ao.Target = atkTarget; ao.Has = atkTarget != Entity.Null; break;
                 }
+                mv.Forward = fwd;                              // fixed shared frame for the order's life
                 em.SetComponentData(e, mv);
                 em.SetComponentData(e, ao);
+
+                // Shared roster, in SLOT ORDER: each unit's index here is its
+                // slot rank, and every unit in the group gets the identical list.
+                if (em.HasBuffer<GroupMember>(e))
+                {
+                    var grp = em.GetBuffer<GroupMember>(e);
+                    grp.Clear();
+                    for (int g = 0; g < n; g++)
+                        grp.Add(new GroupMember { StableId = ids[idx[g]] });
+                }
             }
+
+            ids.Dispose(); ents.Dispose(); poss.Dispose(); idx.Dispose();
         }
 
         due.Dispose();
+    }
+
+    // a is in front of b along fwd? greater depth wins; tie -> lower StableId.
+    private static bool FrontOf(float2 pa, int ia, float2 pb, int ib, float2 fwd)
+    {
+        float da = math.dot(pa, fwd), db = math.dot(pb, fwd);
+        return da > db || (da == db && ia < ib);
+    }
+
+    // a is left of b along right? smaller lateral wins; tie -> lower StableId.
+    private static bool LeftOf(float2 pa, int ia, float2 pb, int ib, float2 right)
+    {
+        float la = math.dot(pa, right), lb = math.dot(pb, right);
+        return la < lb || (la == lb && ia < ib);
     }
 
     // Spawns a building at the command's execution tick, with validation done

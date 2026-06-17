@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: cfc4ec4fcf7f1c44ebc04032f02fb499
+timeCreated: 1501350347
+licenseType: Store
+NativeFormatImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 95640
+  packageName: Toon RTS Units - Undead Demo
+  packageVersion: 1.0
+  assetPath: Assets/Toon_RTS/unded_Demo/demo_scene/sample_ground.mat
+  uploadId: 192702
