@@ -19,8 +19,8 @@ MonoBehaviour:
   mass: 3
   turnSpeed: 6
   separationStrength: 8
-  combatSpacing: 1.3
-  idleSpacing: 2.2
+  combatSpacing: 3.5
+  idleSpacing: 5
   maxHealth: 300
   deathAnimSeconds: 2
   armor: 10
@@ -43,26 +43,12 @@ MonoBehaviour:
   - {fileID: 0}
   - {fileID: 0}
   - {fileID: 0}
-  attackNearby: 1
-  flankTarget: 0
-  bodyBlock: 0
-  formWall: 1
-  standBehindFriend: 1
-  standFrontline: 0
-  advanceOnEnemy: 1
-  advanceIndividual: 0
-  avoidMelee: 0
-  retreatLowHealth: 1
-  formWedge: 1
-  alignCardinal: 0
-  alignMovement: 1
-  separate: 0
-  separateIdle: 1
-  separateLateral: 0
-  groupCohesion: 1
-  followMoving: 1
   attackNearbyRange: 6
   avoidMeleeRange: 8
   retreatHealthFraction: 0.25
   pursueDistance: 30
   cohesionRadius: 20
+  frontPriority: 0
+  looseness: 0
+  aggression: 1
+  formationSpacing: 3
