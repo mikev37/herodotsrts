@@ -88,8 +88,8 @@ public partial struct SteeringSystem : ISystem
             in DesiredDestination dest,
             DynamicBuffer<UnitInfo> contacts)
         {
-            byte ctx = navCtx.Value;
             float2 pos = new float2(xform.Position.x, xform.Position.z);
+            byte ctx = navCtx.Value;
             float locomotion = speed.Value * slope.Value;
             float2 desired = float2.zero;
 
@@ -143,11 +143,12 @@ public partial struct SteeringSystem : ISystem
             }
             desired += separation * tuning.SeparationStrength;
 
-            // --- 3. Obstacle response: composite normal + smooth slide -------
+            // Capture pre-obstacle desired for the speed integrator below.
+            float2 preObstacleDesired = desired;
   
             float2 normalSum = float2.zero;
             float penetration = 0f;   // 0 = clear, 1 = pressed against a cell center
-            float falloff = radius.Value + NavGrid.CellSize;   // response ramps in within this of a blocked center
+            float falloff = radius.Value + NavGrid.CellSize;
             int2 cell = NavGrid.Cell(pos);
 
             for (int ox = -1; ox <= 1; ox++)
@@ -157,12 +158,10 @@ public partial struct SteeringSystem : ISystem
                 if (!NavGrid.InBounds(nx, ny)) continue;
                 byte nType = CellType[NavGrid.Index(nx, ny)];
 
-                // A cell repels if THIS unit can't stand on it. Symmetric:
-                // a ground unit is walled out of roof cells, a roof unit is
-                // fenced out of ground cells (can't walk off the parapet), and a
-                // unit ON a ramp (context Transition) is repelled by neither, so
-                // it climbs through freely. Transitions never repel (always
-                // standable), so a ground unit can always step onto a ramp foot.
+                // A cell repels if THIS unit can't stand on it. Symmetric: a
+                // ground unit is walled out of roof cells, a roof unit is fenced
+                // off ground cells. Transitions are always standable so a ramp
+                // never repels — the unit climbs/descends through it freely.
                 bool blocks = !NavCell.CanStand(ctx, nType);
                 if (!blocks) continue;
                 float2 away = pos - NavGrid.CellCenter(nx, ny);
@@ -184,7 +183,13 @@ public partial struct SteeringSystem : ISystem
                     float into = math.dot(desired, normal);
                     if (into < 0f) desired -= normal * into;
 
-                    // PUSH out of the surface, scaled by the RESULTANT normal magnitude.
+                    // PUSH out of the surface, scaled by the RESULTANT normal
+                    // magnitude. Opposing walls in a fit-through passage cancel
+                    // (|normalSum| small near centre -> light nudge), while a
+                    // single wall gives the full push so a unit walking into a
+                    // building is stopped. This must NOT be stripped against the
+                    // goal direction: the whole point is to oppose motion INTO a
+                    // wall, which is by definition against the unit's desired dir.
                     desired += normal * (sumLen * sumLen * ObstacleStrength);
                 }
             }
@@ -198,10 +203,15 @@ public partial struct SteeringSystem : ISystem
           
             vel.Value = desired;
             float2 step = desired * Dt;
+            // Speed integrator: bleed desiredValue down to what was achievable in
+            // the forward direction, so obstacle clearance feels like smooth
+            // acceleration not a speed snap. Use pre-obstacle desired (seek +
+            // separation only) to measure blockage — the obstacle push and slide
+            // are deflections, not forward losses, and shouldn't contaminate it.
             float2 desiredDir = math.normalizesafe(vel.desiredValue);
-            float currentLen = math.min(math.length(vel.desiredValue), locomotion); // clamp to current top speed (handles cresting hills)
-            float projectedLen = math.max(0f, math.dot(vel.Value, desiredDir));
-            vel.desiredValue = desiredDir * math.min(currentLen, projectedLen);     // only bleed down, never boost
+            float currentLen = math.min(math.length(vel.desiredValue), locomotion);
+            float achievedForward = math.max(0f, math.dot(preObstacleDesired, desiredDir));
+            vel.desiredValue = desiredDir * math.min(currentLen, achievedForward);
             // Surface + context, from the destination cell AFTER the step.
             float newX = xform.Position.x + step.x;
             float newZ = xform.Position.z + step.y;
