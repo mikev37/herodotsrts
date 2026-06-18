@@ -83,44 +83,6 @@ public class UnitDefinition : ScriptableObject
              "selected unit with the MOST abilities is the caster.")]
     public AbilityDefinition[] abilities = new AbilityDefinition[4];
 
-    [Header("Behaviors (compose freely)")]
-    [Tooltip("Engage enemies that come within Attack Nearby Range.")]
-    public bool attackNearby = true;
-    [Tooltip("Try to position behind the chosen target's facing.")]
-    public bool flankTarget = false;
-    [Tooltip("Stand between the chosen enemy and the friendly center of mass.")]
-    public bool bodyBlock = false;
-    [Tooltip("Hold the line between the friendly and enemy centers of mass.")]
-    public bool formWall = false;
-    [Tooltip("Fill the nearest open slot behind a formation friendly (group-forward direction).")]
-    public bool standBehindFriend = false;
-    [Tooltip("Fill the nearest open slot in front of a formation friendly (group-forward direction).")]
-    public bool standFrontline = false;
-    [Tooltip("March toward the enemy center of mass.")]
-    public bool advanceOnEnemy = false;
-    [Tooltip("March toward the chosen target.")]
-    public bool advanceIndividual = true;
-    [Tooltip("Back off when an enemy is within Avoid Melee Range.")]
-    public bool avoidMelee = false;
-    [Tooltip("Flee the enemy center of mass when health drops below Retreat Health Fraction.")]
-    public bool retreatLowHealth = false;
-    [Tooltip("Slot in behind-and-beside the friendly ahead (wedge formations).")]
-    public bool formWedge = false;
-    [Tooltip("Snap to 90-degree slots around the closest friendly, in their facing frame.")]
-    public bool alignCardinal = false;
-    [Tooltip("Move with the friendly movement consensus when nothing else applies.")]
-    public bool alignMovement = false;
-    [Tooltip("Push apart from crowded allies at all times.")]
-    public bool separate = false;
-    [Tooltip("Push apart from crowded allies only when no enemies are near.")]
-    public bool separateIdle = false;
-    [Tooltip("Push apart into a rough line")]
-    public bool separateLateral = false;
-    [Tooltip("Pull toward the friendly center of mass when farther than Cohesion Radius.")]
-    public bool groupCohesion = false;
-    [Tooltip("Move with nearby friendlies that have an active target (ignores idle units).")]
-    public bool followMoving = false;
-
 
     [Header("Behavior ranges")]
     [Tooltip("Break formation and attack range")]
@@ -139,5 +101,7 @@ public class UnitDefinition : ScriptableObject
     public float looseness = 0f;    // 0 = rigid grid, 1 = loose smattering
     [Range(0f, 2f)]
     public float aggression = 1f;    // reserved
+    [Tooltip("member.Separation` should be ≤ slot pitch, or the push fights")]
+    public float formationSpacing = 3;    // personal-space radius for the soft push
 
 }

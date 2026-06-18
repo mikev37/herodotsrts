@@ -55,6 +55,7 @@ public partial struct InformationGatherSystem : ISystem {
             ProjMap = projHash.Map,
             ProjCellSize = projHash.CellSize,
             CellType = SystemAPI.GetSingleton<ObstacleField>().CellType,
+            MoveLookup = SystemAPI.GetComponentLookup<MoveTarget>(true),
             SearchCells = 2,            // global: how many hash cells out to perceive
             ContactRadius = 6f,         // global: neighbors within this go into the ContactList
             FriendlyRadius = 8f,       // global: friendlies within this go into the FriendlyUnit buffer
@@ -73,6 +74,7 @@ public partial struct InformationGatherSystem : ISystem {
         [ReadOnly] public NativeParallelMultiHashMap<int, UnitInfo> Map;
         [ReadOnly] public NativeParallelMultiHashMap<int, IncomingProjectile> ProjMap;
         [ReadOnly] public NativeArray<byte> CellType;
+        [ReadOnly] public ComponentLookup<MoveTarget> MoveLookup;   // for a neighbor's FormationId
         public float CellSize, ContactRadius, FriendlyRadius, OutlierFactor, ClusterRadius;
         public float ProjCellSize;
         public float NoLosMultiplier, HeightGate;
@@ -86,11 +88,10 @@ public partial struct InformationGatherSystem : ISystem {
             in Attack myAttack,
             in Defense myDefense,
             in GroundSpeedMultiplier slope,
+            in MoveTarget myMove,                       // self FormationId (0 = ungrouped)
             ref Perception perception,
             DynamicBuffer<UnitInfo> contacts,
-            DynamicBuffer<FriendlyUnit> friendlies,
-            DynamicBuffer<IncomingProjectile> incomingProjectiles,
-            [ReadOnly] DynamicBuffer<GroupMember> group) {
+            DynamicBuffer<IncomingProjectile> incomingProjectiles) {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float myHeight = slope.Height;
             float3 forward3 = math.forward(xform.Rotation);
@@ -101,7 +102,6 @@ public partial struct InformationGatherSystem : ISystem {
 
             perception = default;
             contacts.Clear();
-            friendlies.Clear();
             incomingProjectiles.Clear();
 
             var enemies = new NativeList<UnitInfo>(32, Allocator.Temp);
@@ -109,7 +109,7 @@ public partial struct InformationGatherSystem : ISystem {
             // Same-group friendlies collected with distance, so the cap can keep
             // the nearest FriendlyCap and drop the furthest after the sweep.
             var friendlyCands = new NativeList<FriendlyCand>(32, Allocator.Temp);
-            bool hasGroup = group.Length > 0;   // empty buffer -> ungrouped, proximity fallback
+            bool hasGroup = myMove.FormationId != 0;   // 0 -> ungrouped, proximity fallback
 
             // ---- one sweep: collect, fill buffers, score candidates ----------
             float closestEnemyDist = float.MaxValue;
@@ -179,10 +179,16 @@ public partial struct InformationGatherSystem : ISystem {
                             if (effectiveDist > FriendlyRadius)
                                 continue;
                             // GROUP FILTER: a grouped unit perceives ONLY its own
-                            // group's members; an ungrouped unit (empty buffer)
-                            // falls back to proximity and sees everyone nearby.
-                            if (hasGroup && !InGroup(group, neighbor.StableId))
-                                continue;
+                            // FormationId's members; an ungrouped unit (id 0) falls
+                            // back to proximity and sees everyone nearby. Reading
+                            // the neighbor's LIVE FormationId means re-ordering a
+                            // subset instantly splits the groups — no stale roster.
+                            if (hasGroup)
+                            {
+                                int nf = MoveLookup.HasComponent(neighbor.Entity)
+                                    ? MoveLookup[neighbor.Entity].FormationId : 0;
+                                if (nf != myMove.FormationId) continue;
+                            }
 
                             allies.Add(neighbor);
 
@@ -217,7 +223,6 @@ public partial struct InformationGatherSystem : ISystem {
             for (int i = 0; i < keep; i++)
             {
                 UnitInfo f = friendlyCands[i].Info;
-                friendlies.Add(new FriendlyUnit { Info = f });
                 avgFacing += f.Facing;
                 avgVelocity += f.Velocity;
                 if (f.IsAttacking || math.lengthsq(f.Velocity) > 0.1f)
@@ -256,8 +261,6 @@ public partial struct InformationGatherSystem : ISystem {
                 perception.FriendlyCenter = TrimmedCenter(allies, out perception.FriendliesClustered);
 
             perception.FriendlyAvgFacing = math.normalizesafe(avgFacing, float2.zero);
-            perception.FriendlyAvgVelocity = friendlies.Length > 0
-                ? avgVelocity / friendlies.Length : float2.zero;
             perception.FriendlyMovingAvgVelocity = movingCount > 0
                 ? movingVelocity / movingCount : float2.zero;
 
@@ -268,15 +271,6 @@ public partial struct InformationGatherSystem : ISystem {
         // Deterministic "closer wins, StableId breaks ties".
         private static bool Better(float dist, int id, float bestDist, int bestId)
             => dist < bestDist || (dist == bestDist && id < bestId);
-
-        // Group membership test for the perception filter. Linear — groups are
-        // small (a selection); swap for a NativeHashSet if rosters get large.
-        private static bool InGroup(in DynamicBuffer<GroupMember> group, int stableId)
-        {
-            for (int i = 0; i < group.Length; i++)
-                if (group[i].StableId == stableId) return true;
-            return false;
-        }
 
         // A same-group friendly + its distance, so the formation cap can keep the
         // nearest and drop the furthest. Total order (distance, then StableId)

@@ -36,8 +36,6 @@ public class BuildingDefinition : UnitDefinition
         mass = 50f;
         speed = 0f;
         attackDamage = 0f;
-        attackNearby = false;
-        advanceIndividual = false;
         isRanged = false;
         isHero = false;
     }

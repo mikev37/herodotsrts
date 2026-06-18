@@ -43,7 +43,6 @@ public partial struct AnimationStateSystem : ISystem
                              in CombatStatus status,
                              in Ranged ranged,
                              in CombatTarget target,
-                             in BehaviorFlags flags,
                              in DesiredDestination dest)
         {
             // Dying this frame (health 0, Dead tag still queued) -> lock to Die.
@@ -61,7 +60,6 @@ public partial struct AnimationStateSystem : ISystem
                 return;
             }
 
-            bool shieldHolding = (flags.Value & (uint)BehaviorFlag.FormWall) != 0 && !moving;
             anim.State = moving ? AnimState.Walk : AnimState.Idle;
         }
     }

@@ -61,8 +61,6 @@ public static class SimSnapshot
         public byte IsDead;
 
         public LocalTransform        Xf;
-        public BehaviorFlags         Flags;
-        public BehaviorOverride      Override;
         public UnitTuning            Tuning;
         public Attack                Attack;
         public Defense               Defense;
@@ -89,11 +87,9 @@ public static class SimSnapshot
         public AbilityCooldowns      Cds;
 
         public int ModCount;                      // ActiveModifier entries follow this record
-        public int GroupCount;                    // GroupMember (roster StableIds) follow the mod entries
     }
 
     private struct ModRecord : INetworkSerializeByMemcpy { public ActiveModifier M; }
-    private struct GroupRecord : INetworkSerializeByMemcpy { public GroupMember M; }
     private struct FieldModRecord : INetworkSerializeByMemcpy { public FieldModifier M; }
 
     private struct ProjectileRecord : INetworkSerializeByMemcpy
@@ -211,8 +207,6 @@ public static class SimSnapshot
                 IsDead   = em.HasComponent<Dead>(e) ? (byte)1 : (byte)0,
 
                 Xf       = em.GetComponentData<LocalTransform>(e),
-                Flags    = em.GetComponentData<BehaviorFlags>(e),
-                Override = em.GetComponentData<BehaviorOverride>(e),
                 Tuning   = em.GetComponentData<UnitTuning>(e),
                 Attack   = em.GetComponentData<Attack>(e),
                 Defense  = em.GetComponentData<Defense>(e),
@@ -240,12 +234,9 @@ public static class SimSnapshot
             };
 
             var mods = em.GetBuffer<ActiveModifier>(e);
-            var grp = em.GetBuffer<GroupMember>(e);
             rec.ModCount = mods.Length;
-            rec.GroupCount = grp.Length;      
             w.WriteValueSafe(rec);
             for (int i = 0; i < mods.Length; i++) w.WriteValueSafe(new ModRecord { M = mods[i] });
-            for (int i = 0; i < grp.Length; i++) w.WriteValueSafe(new GroupRecord { M = grp[i] });
         }
 
         foreach (var e in projectiles)
@@ -378,8 +369,6 @@ public static class SimSnapshot
 
             em.SetComponentData(e, new StableId { Value = rec.StableId });
             em.SetComponentData(e, rec.Xf);
-            em.SetComponentData(e, rec.Flags);
-            em.SetComponentData(e, rec.Override);
             em.SetComponentData(e, rec.Tuning);
             em.SetComponentData(e, rec.Attack);
             em.SetComponentData(e, rec.Defense);
@@ -414,11 +403,6 @@ public static class SimSnapshot
 
             sidToEntity[rec.StableId] = e;
             aoFixups.Add((e, rec.AO, rec.AOTargetSid));
-            var grp = em.GetBuffer<GroupMember>(e);
-            for (int i = 0; i < rec.GroupCount; i++) {
-                r.ReadValueSafe(out GroupRecord gr);
-                grp.Add(gr.M);
-            }
         }
 
         // Pass 2: entity-reference fixups, now that every StableId resolves.

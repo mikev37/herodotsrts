@@ -2491,7 +2491,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   teamone:
   - definition: {fileID: 11400000, guid: 0ba2a2468c7e07246bf7077fcf8c459e, type: 2}
-    countPerTeam: 1
+    countPerTeam: 100
   - definition: {fileID: 11400000, guid: 3fbd04588eb42f247bea1a251fe95ee6, type: 2}
     countPerTeam: 0
   - definition: {fileID: 11400000, guid: 0ba2a2468c7e07246bf7077fcf8c459e, type: 2}
@@ -2503,7 +2503,7 @@ MonoBehaviour:
   - definition: {fileID: 11400000, guid: c43c81611863ac4499c23986e5faff75, type: 2}
     countPerTeam: 0
   - definition: {fileID: 11400000, guid: 42fd9d9a29e06cb429be163d9aa41f83, type: 2}
-    countPerTeam: 1
+    countPerTeam: 0
   teamtwo:
   - definition: {fileID: 11400000, guid: ec3518ca68a3ea64f9a0f7448c23cc57, type: 2}
     countPerTeam: 0
@@ -2613,20 +2613,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 2249a2d6c5451eb408661e7051996f66, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  legs:
-  - {foot: {fileID: 0}, restOffset: {x: 0, y: 0, z: 0}}
-  - {foot: {fileID: 0}, restOffset: {x: 0, y: 0, z: 0}}
-  stepDistance: 0.4
-  stepHeight: 0.15
-  stepSpeed: 6
-  stepOvershoot: 0.1
-  _planted: []
-  _stepFrom: []
-  _stepTarget: []
-  _stepT: []
-  _isStepping: []
-  _prevPosition: {x: 0, y: 0, z: 0}
-  _velocity: {x: 0, y: 0, z: 0}
 --- !u!1 &1687258581
 GameObject:
   m_ObjectHideFlags: 0

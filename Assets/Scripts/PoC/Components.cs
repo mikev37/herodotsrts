@@ -9,34 +9,31 @@ using Unity.Collections;
 
 // Per-unit movement intent. Set by player orders OR by AI behaviors.
 public struct MoveTarget : IComponentData {
-    public float2 Value;       // world-space XZ destination (group center ends here)
-    public bool HasTarget;
-    public float2 Forward;     // order's FIXED frame forward (never recomputed per tick)
-    public bool AttackMove;  // engage en route (true) vs ignore enemies (false)
-
-    // ---- formation order state (written once by CommandSystem) -------------
-    public float2 Origin;      // group center at order time; anchor advances from here
-    public int FormationId; // stable group key (lowest member StableId); 0 = ungrouped
-    public int Cols;        // frozen formation width
-    public byte Shape;       // FormationShape (Grid/Wall/Wedge)
-    public float Spacing;     // slot pitch shared by the group
-    public float Progress;    // distance the anchor has advanced along Origin->Value
+    public float2 Value;       // world XZ order point (group centre ends here)
+    public bool HasTarget;   // move / attack-move active
+    public bool AttackMove;  // engage en route
+    public float2 Forward;     // LIVE frame forward (FormationSystem rewrites it)
+    public float2 Anchor;      // LIVE formation centre (FormationSystem advances it)
+    public int FormationId; // group key = lowest member StableId + 1; 0 = ungrouped
+    public int Cols;        // formation width (0 was auto; CommandSystem fills it)
+    public byte Shape;       // FormationShape
 }
 
 public struct FormationMember : IComponentData {
-    public int FrontPriority; // higher = nearer the front rank. Designer-managed;
-                              // equal priority = intentional intermingling.
-    public float Looseness;     // 0 = dead on the ideal slot, 1 = max scatter
-    public float Aggression;    // reserved: how far it will leave its slot to fight
+    public int FrontPriority; // higher = front rank; equal = intentional intermix
+    public float Looseness;     // 0 rigid … 1 scatter (drives tolerance + scatter)
+    public float Aggression;    // 0 pacifist, 1 holds the line, >1 charges
+    public float Separation;    // personal-space radius for the soft push
 }
 
 // Per-unit formation SLOT, rebuilt EVERY tick by FormationSystem from the living
 // members. NOT serialized (it is recomputed before BehaviorSystem each tick).
 public struct FormationSlot : IComponentData {
-    public bool Has;    // false => no formation this tick (ungrouped/alone)
-    public int Index;  // this unit's slot among the living, sorted members
-    public int Count;  // living member count (so the grid sizes to survivors)
-    public float2 Anchor; // shared formation center this tick
+    public bool Has;
+    public int Index;    // rank among living members, by position
+    public int Count;    // living member count (grid sizes to survivors)
+    public float2 Anchor;   // shared centre this tick
+    public float Spacing;  // pitch this tick (combat vs idle)
 }
 
 // Accumulated velocity for this frame, integrated by the steering system.
@@ -161,7 +158,7 @@ public struct UnitInfo : IBufferElementData
     public float  Damage;         // its attack damage (danger/exposure scoring)
     public float  Armor;
     public float  Shield;
-    public uint   Flags;          // BehaviorFlags
+   
     public bool   IsAttacking;    // behavior committed to an attack this tick
     public Entity AttackTarget;   // who it is attacking (single-target strikes)
     public float  StrikeDamage;   // melee pulse this tick (0 except on the strike tick)
@@ -171,15 +168,6 @@ public struct UnitInfo : IBufferElementData
     public bool   IsBuilding;     // entity carries BuildingTag; Radius is then the
                                   // footprint's inscribed radius and consumers
                                   // measure range to the surface, not the center
-}
-
-// Nearby friendlies (full snapshots), gather-written. Separate from the
-// ContactList: this is the FORMATION neighborhood (wedge/wall/cardinal/align),
-// the ContactList is the PHYSICAL one (separation/impacts).
-[InternalBufferCapacity(0)]
-public struct FriendlyUnit : IBufferElementData
-{
-    public UnitInfo Info;
 }
 
 // Per-unit perception, written ONLY by InformationGatherSystem, read by behavior

@@ -77,42 +77,6 @@ public class AbilityDefinition : ScriptableObject
 
     [Header("Numeric effects (deltas to stats / health)")]
     public List<NumericModifierDef> numericModifiers = new();
-
-    [Header("Flag effects (force behavior flags on/off while active)")]
-    public List<FlagModifierDef> flagModifiers = new();
-
-    // --- legacy ----------------------------------------------------------------
-    // The old mixed list. Hidden; migrated into the split lists on first
-    // OnValidate (editor) or registration (runtime fallback for stale assets).
-    [HideInInspector] public List<StatModifierDef> modifiers = new();
-
-    private void OnValidate() => MigrateLegacyModifiers();
-
-    public void MigrateLegacyModifiers()
-    {
-        if (modifiers == null || modifiers.Count == 0) return;
-        foreach (var m in modifiers)
-        {
-            if (AbilityUtil.IsBool(m.target))
-                flagModifiers.Add(new FlagModifierDef
-                {
-                    target = (FlagTarget)(m.target - ModTarget.FlagFormWall),
-                    on = m.boolValue,
-                });
-            else
-                numericModifiers.Add(new NumericModifierDef
-                {
-                    target = (NumericTarget)m.target,
-                    delta = m.delta,
-                    mode = m.mode,
-                    revert = m.revert,
-                    capMode = m.capMode,
-                    capRef = m.capRef,
-                    capValue = m.capValue,
-                });
-        }
-        modifiers.Clear();
-    }
 }
 
 // Authoring-side enums: same members, same order as the corresponding ModTarget
@@ -137,28 +101,4 @@ public class NumericModifierDef
     public CapRef capRef = CapRef.Absolute;
     [Tooltip("Cap value. With Base, it's added to the base/Max (e.g. Max+0 = full health).")]
     public float capValue = 0f;
-}
-
-// One behavior-flag effect within an ability (reverts when it ends).
-[Serializable]
-public class FlagModifierDef
-{
-    public FlagTarget target = FlagTarget.FormWall;
-    [Tooltip("Force the flag ON or OFF while the modifier is active.")]
-    public bool on = true;
-}
-
-// LEGACY authoring row, kept only so old assets still deserialize for
-// migration. Do not author new entries against this.
-[Serializable]
-public class StatModifierDef
-{
-    public ModTarget target = ModTarget.Health;
-    public float delta = -10f;
-    public ModMode mode = ModMode.Instant;
-    public bool revert = false;
-    public CapMode capMode = CapMode.Min;
-    public CapRef capRef = CapRef.Absolute;
-    public float capValue = 0f;
-    public bool boolValue = true;
 }

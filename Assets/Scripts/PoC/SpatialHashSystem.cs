@@ -80,7 +80,7 @@ public partial struct SpatialHashSystem : ISystem
 
         private void Execute(Entity entity, in LocalTransform xform, in Team team,
                              in Velocity velocity, in Mass mass, in Health health,
-                             in BehaviorFlags flags, in Attack attack, in StableId stableId,
+                             in Attack attack, in StableId stableId,
                              in UnitRadius radius, in GroundSpeedMultiplier slope,
                              in CombatStatus status, in CombatTarget target,
                              in Defense defense, in UnitDefId defId)
@@ -104,7 +104,6 @@ public partial struct SpatialHashSystem : ISystem
                 Damage = attack.Damage,
                 Armor = defense.Armor,
                 Shield = defense.Shield,
-                Flags = flags.Value,
                 IsAttacking = status.IsAttacking,
                 AttackTarget = target.Has ? target.Info.Entity : Entity.Null,
                 StrikeDamage = attack.Pulse,

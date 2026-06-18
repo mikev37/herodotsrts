@@ -57,8 +57,6 @@ public partial struct BehaviorSystem : ISystem
 
             PursueGate        = 1f,    // global: (× tuning.PursueDistance) advance only when this close to the enemy
             HeightRangeBonus  = 0.5f,  // global: extra ranged engage range per meter of height advantage
-            FlankDistance     = 2.5f,  // global: how far behind a target a flanker stands
-            BodyBlockDistance = 2.5f,  // global: how far in front of the enemy a blocker stands
             FleeDistance      = 8f,    // global: retreat carrot length
 
             WeightYield       = 1.5f,  // global: idle lane-clear nudge, in world units
@@ -74,7 +72,7 @@ public partial struct BehaviorSystem : ISystem
     {
         [ReadOnly] public NativeArray<byte> CellType;
         public float HoldRadius;
-        public float PursueGate, HeightRangeBonus, FlankDistance, BodyBlockDistance, FleeDistance;
+        public float PursueGate, HeightRangeBonus, FleeDistance;
         public float WeightYield;
         public int LosRange;
 
@@ -82,16 +80,15 @@ public partial struct BehaviorSystem : ISystem
         private void Execute(
             in LocalTransform xform,
             in StableId self,                          // for the looseness scatter seed
-            in BehaviorFlags baseFlags,
-            in BehaviorOverride over,
             in Perception perception,
             in UnitTuning tuning,
             in Attack attack,
             in Ranged ranged,
             in Health health,
             in GroundSpeedMultiplier slope,
+            in DynamicBuffer<UnitInfo> contacts,       // all nearby units (cross-group) — separation / yield
             in FormationSlot slot,                     // maintained each tick by FormationSystem
-            in FormationMember member,                 // per-unit design: looseness / aggression
+            in FormationMember member,                 // per-unit design: looseness / aggression / separation
             ref CombatTarget target,
             ref CombatStatus status,
             ref AttackOrder attackOrder,
@@ -101,7 +98,6 @@ public partial struct BehaviorSystem : ISystem
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 forward3 = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
-            uint E = BehaviorOverride.Effective(baseFlags.Value, over);
 
             status.IsAttacking = false;
 
@@ -138,28 +134,42 @@ public partial struct BehaviorSystem : ISystem
             float healthFrac = health.Max > 0f ? health.Current / health.Max : 1f;
 
             // ---- my formation slot (placed by FormationSystem this tick) ------
-            // The slot world point = shared anchor + my offset in the order's
-            // fixed frame + a stable looseness scatter. No per-tick direction
-            // from FriendlyCenter, no rank contest — both are gone.
+            // slotWorld = the shared LIVE anchor + my offset in the LIVE frame
+            // (FormationSystem advances/pivots both) + a stable looseness scatter.
+            // Spacing is whatever FormationSystem picked this tick (combat/idle).
             bool hasSlot = slot.Has;
+            float pitch = slot.Spacing > 0f ? slot.Spacing : spread;
             float2 slotWorld = order.Value;
             if (hasSlot)
             {
                 float2 sfwd = math.normalizesafe(order.Forward, myFacing);
                 float2 sright = new float2(sfwd.y, -sfwd.x);
-                float pitch = order.Spacing > 0f ? order.Spacing : spread;
                 slotWorld = slot.Anchor
                           + FormationGeometry.Offset((FormationShape)order.Shape, slot.Index, slot.Count,
                                                      math.max(1, order.Cols), sfwd, sright, pitch)
                           + FormationGeometry.Scatter(self.Value, member.Looseness, pitch);
             }
 
+            // Cross-group separation: step off anyone inside our personal space.
+            // Runs DURING movement too, so a unit caught between a neighbor and
+            // its slot gets out of the way instead of bunching. Sees ALL nearby
+            // units (other formations included), which is why an idle smattering
+            // reacts to a formation passing through it.
+            //
+            // FALLBACK: member.Separation is authored per unit (see UnitDefinition).
+            // If it is 0 (the baked default before the designer sets it), use half
+            // the slot pitch so units always have a minimum physical exclusion zone.
+            // This means pass-through works even on units whose Separation hasn't
+            // been explicitly authored yet.
+            float sepRadius = member.Separation > 0f ? member.Separation : pitch * 0.5f;
+            float2 sep = Separation(position, in contacts, sepRadius);
+
             // ===================================================================
-            // 1) BLOCKED — an enemy is in reach. Clear it before anything else;
-            //    a melee in our face blocks the order too. (Obstacles are routed
-            //    around automatically: Act flips to the flow field on lost LoS.)
+            // 1) BLOCKED — an enemy is in reach. Any unit with aggression > 0
+            //    clears it before anything else (a melee in our face blocks the
+            //    order too). Pacifist units (aggression 0) skip straight to orders.
             // ===================================================================
-            if ((E & (uint)BehaviorFlag.AttackNearby) != 0 && target.Has && targetDist <= engageRange)
+            if (member.Aggression > 0f && target.Has && targetDist <= engageRange)
             {
                 status.IsAttacking = true;
                 Attack(ref dest, position, target.Info.Position, enemyDir, ranged.IsRanged);
@@ -174,7 +184,7 @@ public partial struct BehaviorSystem : ISystem
             // ===================================================================
             if (order.HasTarget && !order.AttackMove)
             {
-                DriveOrHold(ref dest, position, slotWorld);
+                DriveOrHold(ref dest, position, slotWorld + sep);
                 return;
             }
 
@@ -189,14 +199,16 @@ public partial struct BehaviorSystem : ISystem
                     Attack(ref dest, position, target.Info.Position, enemyDir, ranged.IsRanged);
                     return;
                 }
-                DriveOrHold(ref dest, position, slotWorld);
+                DriveOrHold(ref dest, position, slotWorld + sep);
                 return;
             }
 
             // ===================================================================
             // 4) SURVIVAL — individual; drops formation and nudges entirely.
+            //    Driven by tuning: a nonzero RetreatHealthPct means "this unit
+            //    retreats", a nonzero AvoidMeleeRange means "this unit kites".
             // ===================================================================
-            if ((E & (uint)BehaviorFlag.RetreatLowHealth) != 0 && perception.HasEnemies &&
+            if (tuning.RetreatHealthPct > 0f && perception.HasEnemies &&
                 healthFrac < tuning.RetreatHealthPct)
             {
                 float2 away = math.normalizesafe(position - perception.EnemyCenter, -enemyDir);
@@ -204,7 +216,7 @@ public partial struct BehaviorSystem : ISystem
                 return;
             }
 
-            if ((E & (uint)BehaviorFlag.AvoidMelee) != 0 && perception.HasClosestEnemy)
+            if (tuning.AvoidMeleeRange > 0f && perception.HasClosestEnemy)
             {
                 float closeDist = math.distance(position, perception.ClosestEnemy.Position);
                 if (closeDist < tuning.AvoidMeleeRange)
@@ -216,49 +228,32 @@ public partial struct BehaviorSystem : ISystem
             }
 
             // ===================================================================
-            // 5) ENGAGEMENT MANEUVER — advance on the enemy and take position by
-            //    ENEMY DIRECTION (not movement). Formation-shaped the whole way.
-            //    The "goal" (where the formation sits) depends on the unit's role:
-            //      BodyBlock -> between the enemy and our own center
-            //      Flank     -> behind the target
-            //      Advance   -> stand off the enemy center at a held distance
+            // 5) ENGAGEMENT MANEUVER — individual; the unit LEAVES its slot to
+            //    engage and the formation re-forms (FormationSystem) once it
+            //    disengages. Triggered by the advance flags OR by aggression above
+            //    the base of 1 — a charger breaks off to fight (imp7), a holder
+            //    (aggression <= 1) keeps its slot and lets the anchor bring it up.
             // ===================================================================
             if (perception.HasEnemies)
             {
                 float distToEnemy = math.distance(position, perception.EnemyCenter);
-                bool advance =
-                    ((E & (uint)BehaviorFlag.AdvanceOnEnemy) != 0 && distToEnemy <= tuning.PursueDistance * PursueGate) ||
-                    ((E & (uint)BehaviorFlag.AdvanceIndividual) != 0 && target.Has && targetDist <= tuning.PursueDistance * PursueGate);
+                bool charger = member.Aggression > 1f;
+                float chargeGate = tuning.PursueDistance * PursueGate * math.max(1f, member.Aggression);
+                bool advance = charger &&
+                    (distToEnemy <= chargeGate || (target.Has && targetDist <= chargeGate));
 
-                bool wantsPosition = advance ||
-                    (E & ((uint)BehaviorFlag.BodyBlock | (uint)BehaviorFlag.FlankTarget)) != 0;
-
-                if (wantsPosition)
+                if (advance)
                 {
-                    // Frame faces the enemy mass; standoff keeps ranged at range.
+                    // Face the enemy mass; ranged hold a standoff, melee close in.
                     float2 efwd = math.normalizesafe(perception.EnemyCenter - position, enemyDir);
                     float standoff = ranged.IsRanged ? math.max(1f, attack.Range * 0.8f) : 0f;
-
-                    float2 goal;
-                    if ((E & (uint)BehaviorFlag.BodyBlock) != 0 && target.Has && perception.HasFriendlies)
-                    {
-                        float2 toAllies = math.normalizesafe(perception.FriendlyCenter - target.Info.Position, -efwd);
-                        goal = target.Info.Position + toAllies * BodyBlockDistance;
-                    }
-                    else if ((E & (uint)BehaviorFlag.FlankTarget) != 0 && target.Has)
-                    {
-                        goal = target.Info.Position - target.Info.Facing * FlankDistance;
-                    }
-                    else
-                    {
-                        goal = perception.EnemyCenter - efwd * standoff;
-                    }
-
+                    float2 goal = perception.EnemyCenter - efwd * standoff;
                     Act(ref dest, position, goal);   // individual; formation re-forms after combat
                     return;
                 }
-                // Enemies known but not close enough to commit: fall through to
-                // IDLE — hold formation around the group, no blob creep forward.
+                // Enemies known but this unit isn't a charger (or they're out of
+                // range): fall through to IDLE. The FORMATION still advances on
+                // them via FormationSystem — no individual blob creep here.
             }
 
             // ===================================================================
@@ -267,17 +262,17 @@ public partial struct BehaviorSystem : ISystem
             // ===================================================================
             if (order.HasTarget && order.AttackMove)
             {
-                DriveOrHold(ref dest, position, slotWorld);
+                DriveOrHold(ref dest, position, slotWorld + sep);
                 return;
             }
 
             // ===================================================================
             // 7) IDLE — hold the formation slot if there is one (the formation
             //    simply stopped advancing), else hold position. Never seek the
-            //    group center. Step out of a purposeful mover's lane.
+            //    group center. Separate from neighbors and step out of a lane.
             // ===================================================================
-            float2 idleDest = hasSlot ? slotWorld : position;
-            idleDest += YieldNudge(position, in perception, spread);
+            float2 idleDest = (hasSlot ? slotWorld : position) + sep;
+            idleDest += YieldNudge(position, in perception, pitch);
             DriveOrHold(ref dest, position, idleDest);
         }
 
@@ -297,6 +292,28 @@ public partial struct BehaviorSystem : ISystem
             float clear = 1f - math.abs(side) / laneHalf;
             return lateral * (sign * clear * WeightYield);
         }
+
+        // Cross-group personal-space push: sum of unit-normalized repulsions from
+        // every nearby contact (any team) inside `radius`, capped to one radius of
+        // clearance. radius is the unit's own desired spacing (member.Separation);
+        // 0 disables it. This is what makes a unit caught between a neighbor and
+        // its slot step aside, and what lets an idle group feel a formation pass
+        // through it. Steering still owns hard collision; this is a soft bias.
+        private static float2 Separation(float2 position, in DynamicBuffer<UnitInfo> contacts, float radius)
+        {
+            if (radius <= 0f) return float2.zero;
+            float2 push = float2.zero;
+            for (int i = 0; i < contacts.Length; i++)
+            {
+                float2 d = position - contacts[i].Position;
+                float dist = math.length(d);
+                if (dist > 0.01f && dist < radius) push += d / dist * (1f - dist / radius);
+            }
+            float len = math.length(push);
+            if (len > 1f) push /= len;
+            return push * radius;
+        }
+
         // We know the exact desired point, so steer to it (steering arrives and
         // decelerates) — no carrot, no overshoot. At the point already? Hold, so
         // settled formations neither creep nor spin.

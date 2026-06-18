@@ -5,56 +5,6 @@ using Unity.Entities;
 // Unmanaged data the entity carries in place of managed references.
 // ===========================================================================
 
-// Composable behaviors, authored as bools on UnitDefinition and packed into a
-// bitmask at spawn so Burst systems can read them. (Burst can't walk a list of
-// polymorphic behavior objects, so a flag bitmask is the data-driven stand-in.)
-[Flags]
-// Composable behavior primitives. A unit archetype is just a SET of these —
-// e.g. a shield-waller is AttackNearby | FormWall | AlignCardinal
-// | AdvanceOnEnemy. Priority between active flags is the guarded-chain order in
-// BehaviorSystem (top of that file documents it).
-public enum BehaviorFlag : uint
-{
-    None              = 0,
-    AttackNearby      = 1u << 0,   // enemy within AttackNearbyRange -> engage it
-    FlankTarget       = 1u << 1,   // position behind the chosen target's facing
-    BodyBlock         = 1u << 2,   // stand between the chosen enemy and friendly center of mass
-    FormWall          = 1u << 3,   // hold the line between friendly CoM and enemy CoM
-    StandBehindFriend = 1u << 4,   // fill the nearest open slot behind a friendly (slot pipeline)
-    StandFrontline    = 1u << 17,  // fill the nearest open slot in front of a friendly (slot pipeline)
-    AdvanceOnEnemy    = 1u << 5,   // march toward the enemy center of mass
-    AdvanceIndividual = 1u << 6,   // march toward the chosen target
-    AvoidMelee        = 1u << 7,   // enemy within AvoidMeleeRange -> back off
-    RetreatLowHealth  = 1u << 8,   // health below fraction -> flee the enemy CoM
-    FormWedge         = 1u << 9,   // slot in behind-and-beside the friendly ahead
-    AlignCardinal     = 1u << 10,  // snap to 90-degree slots around the closest friendly's facing
-    GroupCohesion     = 1u << 11,  // pull toward the friendly center of mass when too far
-    AlignMovement     = 1u << 12,  // move with the friendly movement consensus
-    Separate          = 1u << 13,  // push apart from crowded allies (always)
-    SeparateIdle      = 1u << 14,  // push apart from crowded allies (only with no enemies near)
-    SpreadLateral     = 1u << 15,  // spread perpendicular to the enemy axis while advancing
-    FollowMoving      = 1u << 16,  // align movement with friendlies that have an active target (ignore idle)
-}
-
-public struct BehaviorFlags : IComponentData
-{
-    public uint Value;
-    public bool Has(BehaviorFlag f) => (Value & (uint)f) != 0u;
-}
-
-// Runtime override layer, written by hero auras / abilities. The unit's
-// effective behavior set is its base flags with these applied:
-//     effective = (base | ForceOn) & ~ForceOff
-// Both zero = the unit just runs its authored behaviors.
-public struct BehaviorOverride : IComponentData
-{
-    public uint ForceOn;
-    public uint ForceOff;
-
-    public static uint Effective(uint baseFlags, in BehaviorOverride o)
-        => (baseFlags | o.ForceOn) & ~o.ForceOff;
-}
-
 // Stable handle from an entity back to its UnitDefinition (= index in the
 // UnitManager roster). Replaces the old hand-authored viewTypeId; the manager
 // uses it to find the view prefab, so the visual link can't drift.

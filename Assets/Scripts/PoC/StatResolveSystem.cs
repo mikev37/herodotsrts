@@ -33,31 +33,24 @@ public partial struct StatResolveSystem : ISystem
             ref Speed speed,
             ref UnitTuning tuning,
             ref Attack atk,
-            ref Defense def,
-            ref BehaviorOverride over)
+            ref Defense def)
         {
-            float dSpeed = 0, dTurn = 0, dRange = 0, dDmg = 0, dArmor = 0, dShield = 0;
-            uint on = 0, off = 0;
+            float dSpeed = 0, dTurn = 0, dRange = 0, dDmg = 0, dArmor = 0, dShield = 0, agg = 0, loose = 0, sep = 0;
 
             for (int i = 0; i < mods.Length; i++)
             {
                 var m = mods[i];
-                if (AbilityUtil.IsBool(m.Target))
+                switch (m.Target)
                 {
-                    if (m.BoolValue == 1) on |= AbilityUtil.FlagBit(m.Target);
-                    else off |= AbilityUtil.FlagBit(m.Target);
-                }
-                else if (m.Revert == 1)
-                {
-                    switch (m.Target)
-                    {
-                        case ModTarget.Speed:        dSpeed += m.Offset; break;
-                        case ModTarget.TurnSpeed:    dTurn += m.Offset; break;
-                        case ModTarget.MeleeRange:   dRange += m.Offset; break;
-                        case ModTarget.AttackDamage: dDmg += m.Offset; break;
-                        case ModTarget.Armor:        dArmor += m.Offset; break;
-                        case ModTarget.Shield:       dShield += m.Offset; break;
-                    }
+                    case ModTarget.Speed:        dSpeed += m.Offset; break;
+                    case ModTarget.TurnSpeed:    dTurn += m.Offset; break;
+                    case ModTarget.MeleeRange:   dRange += m.Offset; break;
+                    case ModTarget.AttackDamage: dDmg += m.Offset; break;
+                    case ModTarget.Armor:        dArmor += m.Offset; break;
+                    case ModTarget.Shield:       dShield += m.Offset; break;
+                    case ModTarget.Aggression:   agg += m.Offset; break;
+                    case ModTarget.Looseness:    loose += m.Offset; break;
+                    case ModTarget.Separation:   sep += m.Offset; break;
                 }
             }
 
@@ -67,8 +60,11 @@ public partial struct StatResolveSystem : ISystem
             atk.Damage        = math.max(0f, baseS.AttackDamage + dDmg);
             def.Armor         = math.max(0f, baseS.Armor + dArmor);
             def.Shield        = math.max(0f, baseS.Shield + dShield);
-            over.ForceOn = on;
-            over.ForceOff = off;
+            /*//TODO
+            member.Aggression = agg; 
+            member.Looseness = math.saturate(loose); 
+            member.Separation = math.max(0f, sep);
+            em.SetComponentData(e, member);   // FormationSystem + BehaviorSystem read this same tick*/
         }
     }
 }

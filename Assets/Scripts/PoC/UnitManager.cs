@@ -106,7 +106,7 @@ public class UnitManager : MonoBehaviour
         var common = new ComponentType[]
         {
             typeof(LocalTransform), typeof(UnitTag), typeof(Team), typeof(UnitDefId),
-            typeof(BehaviorFlags), typeof(BehaviorOverride), typeof(UnitTuning), typeof(Attack),
+            typeof(UnitTuning), typeof(Attack),
             typeof(Defense), typeof(Speed), typeof(Selected), typeof(KnockbackVelocity),
             typeof(UnitRadius), typeof(Mass), typeof(Velocity), typeof(GroundSpeedMultiplier),
             typeof(MoveTarget), typeof(AttackOrder), typeof(CombatTarget), typeof(DesiredDestination),
@@ -114,7 +114,7 @@ public class UnitManager : MonoBehaviour
             typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
             typeof(Mana), typeof(PendingCast), typeof(NavContext),
             typeof(FormationMember), typeof(FormationSlot),
-            typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit), typeof(GroupMember), typeof(IncomingProjectile),   // perception + contact/friendly/group lists
+            typeof(Perception), typeof(UnitInfo), typeof(IncomingProjectile),   // perception + contact/friendly/group lists
         };
         _archetype = _em.CreateArchetype(common);
 
@@ -236,7 +236,6 @@ public class UnitManager : MonoBehaviour
         _em.SetComponentData(e, LocalTransform.FromPosition(pos));
         _em.SetComponentData(e, new Team { Value = team });
         _em.SetComponentData(e, new UnitDefId { Value = defId });
-        _em.SetComponentData(e, new BehaviorFlags { Value = PackFlags(def) });
         _em.SetComponentData(e, new UnitTuning
         {
             TurnSpeed = def.turnSpeed,
@@ -289,6 +288,7 @@ public class UnitManager : MonoBehaviour
             FrontPriority = def.frontPriority,
             Looseness = def.looseness,
             Aggression = def.aggression,
+            Separation = def.formationSpacing
         });
         if (def.isHero)
             _em.AddComponent<HeroTag>(e);   // abilities are cast at the hero via the ability system
@@ -380,29 +380,6 @@ public class UnitManager : MonoBehaviour
         return maxH > float.MinValue ? maxH : fallback;
     }
 
-    private static uint PackFlags(UnitDefinition d)
-    {
-        uint f = 0;
-        if (d.attackNearby)       f |= (uint)BehaviorFlag.AttackNearby;
-        if (d.flankTarget)        f |= (uint)BehaviorFlag.FlankTarget;
-        if (d.bodyBlock)          f |= (uint)BehaviorFlag.BodyBlock;
-        if (d.formWall)           f |= (uint)BehaviorFlag.FormWall;
-        if (d.standBehindFriend)  f |= (uint)BehaviorFlag.StandBehindFriend;
-        if (d.standFrontline)      f |= (uint)BehaviorFlag.StandFrontline;
-        if (d.advanceOnEnemy)     f |= (uint)BehaviorFlag.AdvanceOnEnemy;
-        if (d.advanceIndividual)  f |= (uint)BehaviorFlag.AdvanceIndividual;
-        if (d.avoidMelee)         f |= (uint)BehaviorFlag.AvoidMelee;
-        if (d.retreatLowHealth)   f |= (uint)BehaviorFlag.RetreatLowHealth;
-        if (d.formWedge)          f |= (uint)BehaviorFlag.FormWedge;
-        if (d.alignCardinal)      f |= (uint)BehaviorFlag.AlignCardinal;
-        if (d.alignMovement)      f |= (uint)BehaviorFlag.AlignMovement;
-        if (d.separate)           f |= (uint)BehaviorFlag.Separate;
-        if (d.separateIdle)       f |= (uint)BehaviorFlag.SeparateIdle;
-        if (d.separateLateral)    f |= (uint)BehaviorFlag.SpreadLateral;
-        if (d.groupCohesion)      f |= (uint)BehaviorFlag.GroupCohesion;
-        if (d.followMoving)       f |= (uint)BehaviorFlag.FollowMoving;
-        return f;
-    }
     private Color TeamColor(int team)
         => (teamColors != null && team >= 0 && team < teamColors.Length) ? teamColors[team] : Color.white;
 

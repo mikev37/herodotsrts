@@ -17,8 +17,7 @@ using Unity.Mathematics;
 public enum ModTarget : byte
 {
     Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield,   // numeric
-    FlagFormWall, FlagStandBehindFriend, FlagAvoidMelee,                 // bool
-    FlagAdvanceIndividual, FlagAdvanceOnEnemy, FlagSeparateIdle,
+    Aggression, Looseness, Separation,
 }
 
 public enum ModMode : byte { Instant, PerSecond }
@@ -28,22 +27,6 @@ public enum ShapeType : byte { Circle, Line }
 public enum AnchorType : byte { Hero, WorldPoint }
 public enum ApplyMode : byte { CastOnce, PersistentArea }
 public enum AffectFilter : byte { Enemies, Allies, All }
-
-public static class AbilityUtil
-{
-    public static bool IsBool(ModTarget t) => t >= ModTarget.FlagFormWall;
-
-    public static uint FlagBit(ModTarget t) => t switch
-    {
-        ModTarget.FlagFormWall          => (uint)BehaviorFlag.FormWall,
-        ModTarget.FlagStandBehindFriend => (uint)BehaviorFlag.StandBehindFriend,
-        ModTarget.FlagAvoidMelee        => (uint)BehaviorFlag.AvoidMelee,
-        ModTarget.FlagAdvanceIndividual => (uint)BehaviorFlag.AdvanceIndividual,
-        ModTarget.FlagAdvanceOnEnemy    => (uint)BehaviorFlag.AdvanceOnEnemy,
-        ModTarget.FlagSeparateIdle      => (uint)BehaviorFlag.SeparateIdle,
-        _ => 0u,
-    };
-}
 
 // The unmodified authored stats, kept so StatResolve can recompute live values
 // each frame as base + active offsets (so all other systems read live components

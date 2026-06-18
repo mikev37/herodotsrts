@@ -92,11 +92,6 @@ public class AbilityManager : MonoBehaviour
         if (def == null) return -1;
         if (_idOf.TryGetValue(def, out int id)) return id;
 
-        // Runtime safety net: an asset that never went through OnValidate in
-        // the editor still carries its effects in the legacy list — fold them
-        // into the split lists before baking (not persisted; just this run).
-        def.MigrateLegacyModifiers();
-
         id = _defs.Count;
         _idOf[def] = id;
         _defs.Add(def);
@@ -123,7 +118,7 @@ public class AbilityManager : MonoBehaviour
         // Bake the split lists into one FieldModifier payload: numeric rows
         // first, then flag rows. The order is deterministic (asset-defined), so
         // Slot identities match on every peer.
-        var arr = new FieldModifier[def.numericModifiers.Count + def.flagModifiers.Count];
+        var arr = new FieldModifier[def.numericModifiers.Count];
         int k = 0;
         for (int i = 0; i < def.numericModifiers.Count; i++)
         {
@@ -138,21 +133,6 @@ public class AbilityManager : MonoBehaviour
                 CapMode = m.capMode,
                 CapRef = m.capRef,
                 CapValue = m.capValue,
-            };
-        }
-        for (int i = 0; i < def.flagModifiers.Count; i++)
-        {
-            var m = def.flagModifiers[i];
-            arr[k++] = new FieldModifier
-            {
-                Target = ModTarget.FlagFormWall + (byte)m.target,   // FlagTarget mirrors ModTarget's flag range
-                Delta = 0f,
-                Mode = ModMode.Instant,
-                Revert = 1,
-                BoolValue = (byte)(m.on ? 1 : 0),
-                CapMode = CapMode.None,
-                CapRef = CapRef.Absolute,
-                CapValue = 0f,
             };
         }
         _mods.Add(arr);

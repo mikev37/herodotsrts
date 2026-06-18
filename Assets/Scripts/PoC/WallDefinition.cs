@@ -34,8 +34,6 @@ public class WallDefinition : BuildingDefinition
         mass = 200f;
         speed = 0f;
         attackDamage = 0f;
-        attackNearby = false;
-        advanceIndividual = false;
         isRanged = false;
         isHero = false;
         footprintX = 3;

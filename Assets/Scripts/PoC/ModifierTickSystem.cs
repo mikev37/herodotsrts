@@ -46,7 +46,7 @@ public partial struct ModifierTickSystem : ISystem
                         health.Current = Cap(health.Current + m.Delta * Dt, m, health.Max);
                     }
                 }
-                else if (m.Revert == 1 && !AbilityUtil.IsBool(m.Target))
+                else if (m.Revert == 1)
                 {
                     // "reverts": maintain an offset for StatResolve to read.
                     if (m.Mode == ModMode.Instant) { if (m.Applied == 0) m.Offset = m.Delta; }

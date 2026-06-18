@@ -221,11 +221,8 @@ public partial struct CommandApplySystem : ISystem
 
             // ---- collect the formation members + the group frame --------------
             int cap = c.Units.Length;
-            var ids  = new NativeList<int>(cap, Allocator.Temp);
             var ents = new NativeList<Entity>(cap, Allocator.Temp);
             float2 center = float2.zero, facingSum = float2.zero;
-            int formationId = int.MaxValue;
-            float spacing = 1f;
             for (int u = 0; u < c.Units.Length; u++)
             {
                 if (!map.TryGetValue(c.Units[u], out Entity e)) continue;
@@ -234,19 +231,27 @@ public partial struct CommandApplySystem : ISystem
                 if (!em.HasComponent<FormationMember>(e)) continue;      // only formation units take a slot
                 var xf = em.GetComponentData<LocalTransform>(e);
                 float3 f3 = math.forward(xf.Rotation);
-                ids.Add(c.Units[u]); ents.Add(e);
+                ents.Add(e);
                 center += new float2(xf.Position.x, xf.Position.z);
                 facingSum += new float2(f3.x, f3.z);
-                formationId = math.min(formationId, c.Units[u]);        // stable group id = lowest member StableId
-                spacing = math.max(spacing, em.GetComponentData<UnitTuning>(e).CombatSpacing);
             }
-            int n = ids.Length;
-            if (n == 0) { ids.Dispose(); ents.Dispose(); continue; }
+            int n = ents.Length;
+            if (n == 0) { ents.Dispose(); continue; }
             center /= n;
 
-            // Order's FIXED forward + destination. FormationSystem advances the
-            // anchor from Origin (this center) toward the destination each tick;
-            // it does NOT recompute direction from FriendlyCenter ever again.
+            // Unique id per ORDER, not per membership. Using a monotonic counter
+            // means re-ordering a subset always produces a fresh id, so the units
+            // left behind immediately stop being considered part of the new group.
+            // 0 is the ungrouped sentinel (MoveTarget default); the counter starts
+            // at 1 and only increments, so it never collides with 0.
+            var seq = em.GetComponentData<FieldIdSeq>(qe);
+            int formationId = seq.Next;
+            seq.Next++;
+            em.SetComponentData(qe, seq);
+
+            // Initial forward + the live anchor's starting point (the group center).
+            // FormationSystem advances/pivots both from here; CommandSystem never
+            // touches them again.
             float2 avgFacing = math.normalizesafe(facingSum, new float2(0f, 1f));
             float2 aim = c.TargetPos;
             if (c.Kind == CommandKind.AttackTarget && atkTarget != Entity.Null)
@@ -257,16 +262,15 @@ public partial struct CommandApplySystem : ISystem
             float2 fwd = c.Kind == CommandKind.Stop ? avgFacing
                                                     : math.normalizesafe(aim - center, avgFacing);
 
-            // Shape is an ORDER property now (units carry no shape flags).
-            // DEVIATION: defaulted to Grid until SimCommand carries a formation
-            // choice — there is no per-unit source to read it from anymore.
+            // Shape + width are ORDER properties. Width comes from the command
+            // (right-click-drag length, set in Commander). 0 => auto-fit.
+            // TODO(integration): set `width = c.FormationWidth;` once SimCommand
+            // carries it (see FORMATION_INTEGRATION.md, imp2). Defaults keep Grid.
             FormationShape shape = FormationShape.Grid;
-            int cols = FormationGeometry.Cols(shape, n);
+            int width = 0;
+            int cols = width > 0 ? math.min(width, n) : FormationGeometry.Cols(shape, n);
 
             // ---- stamp the initial frame; FormationSystem owns it from here ----
-            // No sorting/assignment here: a once-stamped formation can't adapt to
-            // attrition. FormationSystem re-packs living members into slots each
-            // tick instead.
             for (int a = 0; a < n; a++)
             {
                 Entity e = ents[a];
@@ -280,26 +284,15 @@ public partial struct CommandApplySystem : ISystem
                     case CommandKind.AttackTarget:mv.Value = aim;         mv.HasTarget = false; ao.Target = atkTarget; ao.Has = atkTarget != Entity.Null; break;
                 }
                 mv.Forward     = fwd;
-                mv.Origin      = center;
+                mv.Anchor      = center;     // live formation center; FormationSystem advances it
                 mv.FormationId = formationId;
                 mv.Cols        = cols;
                 mv.Shape       = (byte)shape;
-                mv.Spacing     = spacing;
-                mv.Progress    = 0f;
                 em.SetComponentData(e, mv);
                 em.SetComponentData(e, ao);
-
-                // Perception roster (group-scoped friendlies in the gather).
-                // Verbatim list; FormationSystem does its own living-member sort.
-                if (em.HasBuffer<GroupMember>(e))
-                {
-                    var grp = em.GetBuffer<GroupMember>(e);
-                    grp.Clear();
-                    for (int g = 0; g < n; g++) grp.Add(new GroupMember { StableId = ids[g] });
-                }
             }
 
-            ids.Dispose(); ents.Dispose();
+            ents.Dispose();
         }
 
         due.Dispose();
