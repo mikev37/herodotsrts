@@ -121,6 +121,7 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Move with nearby friendlies that have an active target (ignores idle units).")]
     public bool followMoving = false;
 
+
     [Header("Behavior ranges")]
     [Tooltip("Break formation and attack range")]
     public float attackNearbyRange = 8;
@@ -132,5 +133,11 @@ public class UnitDefinition : ScriptableObject
     public float pursueDistance = 40;
     [Tooltip("GroupCohesion pulls toward the friendly center of mass when the unit is beyond this distance from it.")]
     public float cohesionRadius = 20f;
+    [Header("Formation")]
+    public int frontPriority = 0;     // higher = front rank
+    [Range(0f, 1f)]
+    public float looseness = 0f;    // 0 = rigid grid, 1 = loose smattering
+    [Range(0f, 2f)]
+    public float aggression = 1f;    // reserved
 
 }

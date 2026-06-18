@@ -71,4 +71,17 @@ public static class FormationGeometry
         float y = ((rows - 1) * 0.5f - row) * spacing;   // row 0 = front rank
         return right * x + fwd * y;
     }
+
+    // A FIXED per-unit offset from the ideal slot — seeded by StableId so it's a
+    // stable scatter spot, not per-tick jitter. looseness 0 = dead on the slot,
+    // 1 = up to ~half a spacing of random offset. Lets loose units smatter around
+    // the ideal grid instead of being placed individually.
+    public static float2 Scatter(int stableId, float looseness, float spacing)
+    {
+        if (looseness <= 0f) return float2.zero;
+        uint h = (uint)stableId * 2654435761u;
+        float ax = (h & 0xFFFF) / 65535f * 2f - 1f;
+        float ay = ((h >> 16) & 0xFFFF) / 65535f * 2f - 1f;
+        return new float2(ax, ay) * (looseness * spacing * 0.5f);
+    }
 }

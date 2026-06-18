@@ -11,34 +11,31 @@ using Unity.Transforms;
 // carrot direction. The steering system owns "where we actually end up" and all
 // collision avoidance; Behavior only answers "where do I want to be this tick".
 //
-//   destination = anchor  +  slotOffset(rank,…)  +  Σ nudges
+//   slotWorld = slot.Anchor  +  Offset(shape, slot.Index, …)  +  Scatter(looseness)
 //
-//     anchor      a point SHARED by the whole group — either the order/engage
-//                 DESTINATION or the live FriendlyCenter (FrameAnchor switch).
-//     slotOffset  this unit's formation slot, a pure function of its RANK in the
-//                 shared group roster (GroupMember) and the group size. Rank is
-//                 fixed for the life of an order, so the slot never flips and the
-//                 grid is stable; the anchor moves smoothly so slots converge.
-//     nudges      external desires (separation, idle yield) added DIRECTLY in
-//                 world units — "move 3 toward open space", not normalize*weight.
+//     slot        FormationSlot, written FRESH every tick by FormationSystem:
+//                 the shared anchor + this unit's index among the LIVING members
+//                 + the group size. Attrition is handled there — survivors
+//                 re-pack, so the slot a unit reads already accounts for the dead.
+//     Offset      the unit's place in the order's fixed frame (Forward/Cols/Shape
+//                 all stored on the order), a pure function of index + count.
+//     Scatter     a stable per-unit offset seeded by StableId, scaled by the
+//                 unit's Looseness — loose units smatter around the ideal slot.
 //
-// We then drive to that exact point (Act) and let steering arrive/decelerate —
-// no Lookahead carrot, so no overshoot. Only the directionless flee/kite uses a
-// raw direction.
+// We drive to that exact point (Act) and let steering arrive/decelerate — no
+// Lookahead carrot, so no overshoot. Only the directionless flee/kite uses a raw
+// direction. Idle does NOT seek the group center: it holds the slot (the
+// formation simply stopped advancing) or holds position, so the order is never
+// erased and units don't clump.
 //
 // PRIORITY LADDER (first match wins; see Execute):
 //   1 BLOCKED     enemy in reach -> attack it (clears the way; beats orders)
-//   2 HARD MOVE   formation march to a point; ignores enemies & survival
-//   3 HARD ATTACK formation march onto an ordered target
-//   4 SURVIVAL    retreat / kite — individual, drops formation & nudges
-//   5 ENGAGE      advance on enemy & take position by ENEMY direction
-//   6 ATTACK-MOVE soft move: march to area, but 1/4/5 fire en route
-//   7 IDLE        relaxed spacing; yield out of purposeful movers' lane
-//
-// FrameAnchor (global, configurable): 0 = anchor slots at the DESTINATION,
-// 1 = anchor at the live FriendlyCenter. Both are stable because rank is stable;
-// they differ in feel (lead-to-goal vs clump-and-merge). More knobs (wide/tall
-// bias, formation looseness) layer onto SlotOffset later.
+//   2 HARD MOVE   advance in formation to a point; ignores enemies & survival
+//   3 HARD ATTACK advance in formation onto an ordered target
+//   4 SURVIVAL    retreat / kite — individual, drops formation
+//   5 ENGAGE      advance on enemy & take position by ENEMY direction (individual)
+//   6 ATTACK-MOVE soft move: advance in formation, but 1/4/5 fire en route
+//   7 IDLE        hold the slot (or position); yield out of purposeful movers' lane
 // ===========================================================================
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
@@ -56,8 +53,6 @@ public partial struct BehaviorSystem : ISystem
 
         new BehaviorJob
         {
-            FrameAnchor       = 0,     // global: 0 = anchor slots at DESTINATION, 1 = at FriendlyCenter
-            ArriveRadius      = 2f,    // global: within this of an order point, the order releases
             HoldRadius        = 0.4f,  // global: within this of the desired point -> Hold (no creep, no turn)
 
             PursueGate        = 1f,    // global: (× tuning.PursueDistance) advance only when this close to the enemy
@@ -66,7 +61,6 @@ public partial struct BehaviorSystem : ISystem
             BodyBlockDistance = 2.5f,  // global: how far in front of the enemy a blocker stands
             FleeDistance      = 8f,    // global: retreat carrot length
 
-            WeightSeparate    = 1.0f,  // global: separation nudge, in world units (direct, not normalized*lookahead)
             WeightYield       = 1.5f,  // global: idle lane-clear nudge, in world units
 
             CellType = obstacles.CellType,
@@ -79,15 +73,15 @@ public partial struct BehaviorSystem : ISystem
     private partial struct BehaviorJob : IJobEntity
     {
         [ReadOnly] public NativeArray<byte> CellType;
-        public byte FrameAnchor;
-        public float ArriveRadius, HoldRadius;
+        public float HoldRadius;
         public float PursueGate, HeightRangeBonus, FlankDistance, BodyBlockDistance, FleeDistance;
-        public float WeightSeparate, WeightYield;
+        public float WeightYield;
         public int LosRange;
+
 
         private void Execute(
             in LocalTransform xform,
-            in StableId self,                          // NEW: needed for this unit's formation rank
+            in StableId self,                          // for the looseness scatter seed
             in BehaviorFlags baseFlags,
             in BehaviorOverride over,
             in Perception perception,
@@ -96,8 +90,8 @@ public partial struct BehaviorSystem : ISystem
             in Ranged ranged,
             in Health health,
             in GroundSpeedMultiplier slope,
-            in DynamicBuffer<FriendlyUnit> friendlies,
-            in DynamicBuffer<GroupMember> group,       // NEW: shared roster -> stable rank
+            in FormationSlot slot,                     // maintained each tick by FormationSystem
+            in FormationMember member,                 // per-unit design: looseness / aggression
             ref CombatTarget target,
             ref CombatStatus status,
             ref AttackOrder attackOrder,
@@ -143,8 +137,22 @@ public partial struct BehaviorSystem : ISystem
 
             float healthFrac = health.Max > 0f ? health.Current / health.Max : 1f;
 
-            // ---- this unit's stable formation rank ----------------------------
-            bool inFormation = TryRank(in group, self.Value, out int rank, out int count);
+            // ---- my formation slot (placed by FormationSystem this tick) ------
+            // The slot world point = shared anchor + my offset in the order's
+            // fixed frame + a stable looseness scatter. No per-tick direction
+            // from FriendlyCenter, no rank contest — both are gone.
+            bool hasSlot = slot.Has;
+            float2 slotWorld = order.Value;
+            if (hasSlot)
+            {
+                float2 sfwd = math.normalizesafe(order.Forward, myFacing);
+                float2 sright = new float2(sfwd.y, -sfwd.x);
+                float pitch = order.Spacing > 0f ? order.Spacing : spread;
+                slotWorld = slot.Anchor
+                          + FormationGeometry.Offset((FormationShape)order.Shape, slot.Index, slot.Count,
+                                                     math.max(1, order.Cols), sfwd, sright, pitch)
+                          + FormationGeometry.Scatter(self.Value, member.Looseness, pitch);
+            }
 
             // ===================================================================
             // 1) BLOCKED — an enemy is in reach. Clear it before anything else;
@@ -159,27 +167,19 @@ public partial struct BehaviorSystem : ISystem
             }
 
             // ===================================================================
-            // 2) HARD MOVE ORDER — formation march to a point. Ignores enemies
-            //    and survival ("move there, no matter what"). Still fully shaped
-            //    by the formation slot: it's "advance in formation", not a beeline.
+            // 2) HARD MOVE ORDER — advance in formation. Ignores enemies and
+            //    survival. The slot's anchor (FormationSystem) advances toward the
+            //    point and stops there; the unit holds its slot when it arrives,
+            //    so the order is NEVER erased and idle = "the formation stopped".
             // ===================================================================
             if (order.HasTarget && !order.AttackMove)
             {
-                if (math.distance(position, order.Value) <= ArriveRadius) { order.HasTarget = false; }
-                else
-                {
-                    // Frame = the order's STORED forward (fixed at issue time in
-                    // CommandSystem), not a per-tick center direction — so the
-                    // grid never rotates as the group nears the point.
-                    float2 ofwd = math.normalizesafe(order.Forward, myFacing);
-                    DriveFormationFwd(ref dest, position, order.Value, order.Value, ofwd,
-                                      in perception, in friendlies, E, spread, rank, count, inFormation);
-                    return;
-                }
+                DriveOrHold(ref dest, position, slotWorld);
+                return;
             }
 
             // ===================================================================
-            // 3) HARD ATTACK ORDER — formation march onto the ordered target.
+            // 3) HARD ATTACK ORDER — advance in formation onto the ordered target.
             // ===================================================================
             if (attackOrder.Has && target.Has && target.Info.Entity == attackOrder.Target)
             {
@@ -189,10 +189,7 @@ public partial struct BehaviorSystem : ISystem
                     Attack(ref dest, position, target.Info.Position, enemyDir, ranged.IsRanged);
                     return;
                 }
-                float standoff = ranged.IsRanged ? math.max(1f, attack.Range * 0.8f) : 0f;
-                float2 goal = target.Info.Position - enemyDir * standoff;
-                DriveFormation(ref dest, position, goal, target.Info.Position,
-                               in perception, in friendlies, E, spread, rank, count, inFormation, myFacing);
+                DriveOrHold(ref dest, position, slotWorld);
                 return;
             }
 
@@ -257,8 +254,7 @@ public partial struct BehaviorSystem : ISystem
                         goal = perception.EnemyCenter - efwd * standoff;
                     }
 
-                    DriveFormationFwd(ref dest, position, goal, perception.EnemyCenter, efwd,
-                                      in perception, in friendlies, E, spread, rank, count, inFormation);
+                    Act(ref dest, position, goal);   // individual; formation re-forms after combat
                     return;
                 }
                 // Enemies known but not close enough to commit: fall through to
@@ -266,134 +262,41 @@ public partial struct BehaviorSystem : ISystem
             }
 
             // ===================================================================
-            // 6) SOFT MOVE ORDER (attack-move) — march to the area; engagement
+            // 6) SOFT MOVE ORDER (attack-move) — advance in formation; engagement
             //    above already fired if anything was in reach.
             // ===================================================================
             if (order.HasTarget && order.AttackMove)
             {
-                if (math.distance(position, order.Value) <= ArriveRadius) { order.HasTarget = false; }
-                else
-                {
-                    float2 ofwd = math.normalizesafe(order.Forward, myFacing);
-                    DriveFormationFwd(ref dest, position, order.Value, order.Value, ofwd,
-                                      in perception, in friendlies, E, spread, rank, count, inFormation);
-                    return;
-                }
+                DriveOrHold(ref dest, position, slotWorld);
+                return;
             }
 
             // ===================================================================
-            // 7) IDLE — relaxed formation around the group, and step out of the
-            //    lane of friendlies moving with purpose (inverse body-block).
+            // 7) IDLE — hold the formation slot if there is one (the formation
+            //    simply stopped advancing), else hold position. Never seek the
+            //    group center. Step out of a purposeful mover's lane.
             // ===================================================================
-            float2 idleFwd = GroupForward(myFacing, in perception);
-            float2 idleRight = new float2(idleFwd.y, -idleFwd.x);
-            float2 idleAnchor = position;
-
-            float2 idleDest = idleAnchor;
-            if (inFormation)
-                idleDest += SlotOffset(rank, count, E, idleFwd, idleRight, spread);
-            idleDest += Nudges(position, in perception, in friendlies, E, spread, yieldOk: true);
-
+            float2 idleDest = hasSlot ? slotWorld : position;
+            idleDest += YieldNudge(position, in perception, spread);
             DriveOrHold(ref dest, position, idleDest);
         }
 
-        // ---- formation drive: anchor + slot(travel frame) + nudges ------------
-        // frame forward = direction from the group toward the goal, so the grid
-        // orients along travel. anchorTarget is what the slot is measured from
-        // (destination or live center, per FrameAnchor).
-        private void DriveFormation(ref DesiredDestination dest, float2 position,
-                                    float2 goal, float2 anchorTarget,
-                                    in Perception perception, in DynamicBuffer<FriendlyUnit> friendlies,
-                                    uint E, float spread, int rank, int count, bool inFormation, float2 myFacing)
+        // Idle lane-clear: an idle unit steps perpendicular out of the moving
+        // consensus's lane, toward the nearer side. Added in world units.
+        private float2 YieldNudge(float2 position, in Perception perception, float spread)
         {
-            float2 from = perception.HasFriendlies ? perception.FriendlyCenter : position;
-            float2 fwd = math.normalizesafe(goal - from, myFacing);
-            DriveFormationFwd(ref dest, position, goal, anchorTarget, fwd,
-                              in perception, in friendlies, E, spread, rank, count, inFormation);
+            if (math.lengthsq(perception.FriendlyMovingAvgVelocity) <= 0.05f) return float2.zero;
+            float2 moveDir = math.normalizesafe(perception.FriendlyMovingAvgVelocity);
+            float2 lateral = new float2(-moveDir.y, moveDir.x);
+            float2 fromLane = position - (perception.HasFriendlies ? perception.FriendlyCenter : position);
+            float side = math.dot(fromLane, lateral);
+            float along = math.dot(fromLane, moveDir);
+            float laneHalf = spread * 1.5f;
+            if (along <= -spread || math.abs(side) >= laneHalf) return float2.zero;
+            float sign = side >= 0f ? 1f : -1f;
+            float clear = 1f - math.abs(side) / laneHalf;
+            return lateral * (sign * clear * WeightYield);
         }
-
-        // Same, with an explicit frame forward (engagement faces the enemy).
-        private void DriveFormationFwd(ref DesiredDestination dest, float2 position,
-                                       float2 goal, float2 anchorTarget, float2 fwd,
-                                       in Perception perception, in DynamicBuffer<FriendlyUnit> friendlies,
-                                       uint E, float spread, int rank, int count, bool inFormation)
-        {
-            float2 right = new float2(fwd.y, -fwd.x);
-            float2 anchor = Anchor(anchorTarget, in perception);
-
-            float2 destPt = anchor;
-            if (inFormation)
-                destPt += SlotOffset(rank, count, E, fwd, right, spread);
-            destPt += Nudges(position, in perception, in friendlies, E, spread, yieldOk: false);
-
-            DriveOrHold(ref dest, position, destPt);
-        }
-
-        // The slot's base point: the shared destination, or the live group center.
-        private float2 Anchor(float2 destination, in Perception perception)
-            => FrameAnchor == 0
-                ? destination
-                : (perception.HasFriendlies ? perception.FriendlyCenter : destination);
-
-        // ---- RANK-BASED FORMATION SLOT ----------------------------------------
-        // Geometry lives in FormationGeometry so CommandSystem (which assigns
-        // units to slots by position at order time) and this placement use the
-        // EXACT same offsets. `rank` is the slot this unit was assigned; the
-        // shape (bounded grid / wedge) and width come from its flags.
-        private float2 SlotOffset(int rank, int count, uint E, float2 fwd, float2 right, float spacing)
-        {
-            if (count <= 1 || !FormationGeometry.HasFormation(E)) return float2.zero;
-            FormationShape shape = FormationGeometry.FromFlags(E);
-            int cols = FormationGeometry.Cols(shape, count);
-            return FormationGeometry.Offset(shape, rank, count, cols, fwd, right, spacing);
-        }
-
-        // External desires, added DIRECTLY in world units (no normalize×lookahead).
-        // Separation keeps the slot from piling; idle yield clears purposeful
-        // movers' lane. Steering still owns hard collision avoidance.
-        private float2 Nudges(float2 position, in Perception perception,
-                              in DynamicBuffer<FriendlyUnit> friendlies, uint E, float spread, bool yieldOk)
-        {
-            float2 n = float2.zero;
-
-            bool separate = (E & (uint)BehaviorFlag.Separate) != 0 ||
-                            ((E & (uint)BehaviorFlag.SeparateIdle) != 0 && !perception.HasEnemies);
-            if (separate)
-                n += Separation(position, in friendlies, spread * 1.5f) * WeightSeparate;
-
-            // Idle units step perpendicular out of the moving consensus's lane.
-            if (yieldOk && math.lengthsq(perception.FriendlyMovingAvgVelocity) > 0.05f)
-            {
-                float2 moveDir = math.normalizesafe(perception.FriendlyMovingAvgVelocity);
-                float2 lateral = new float2(-moveDir.y, moveDir.x);
-                float2 fromLane = position - (perception.HasFriendlies ? perception.FriendlyCenter : position);
-                float side = math.dot(fromLane, lateral);
-                float along = math.dot(fromLane, moveDir);
-                float laneHalf = spread * 1.5f;
-                if (along > -spread && math.abs(side) < laneHalf)
-                {
-                    float sign = side >= 0f ? 1f : -1f;
-                    float clear = 1f - math.abs(side) / laneHalf;
-                    n += lateral * sign * clear * WeightYield;
-                }
-            }
-            return n;
-        }
-
-        private float2 Separation(float2 position, in DynamicBuffer<FriendlyUnit> friendlies, float radius)
-        {
-            float2 push = float2.zero;
-            for (int i = 0; i < friendlies.Length; i++)
-            {
-                float2 d = position - friendlies[i].Info.Position;
-                float dist = math.length(d);
-                if (dist > 0.01f && dist < radius)
-                    push += d / dist * (1f - dist / radius);
-            }
-            return Cap(push) * radius;   // up to one separation radius of clearance
-        }
-
-        // ---- drive / hold -----------------------------------------------------
         // We know the exact desired point, so steer to it (steering arrives and
         // decelerates) — no carrot, no overshoot. At the point already? Hold, so
         // settled formations neither creep nor spin.
@@ -401,18 +304,6 @@ public partial struct BehaviorSystem : ISystem
         {
             if (math.distancesq(position, destPt) < HoldRadius * HoldRadius) Hold(ref d);
             else Act(ref d, position, destPt);
-        }
-
-        // This unit's rank in the shared roster, and the roster size. Returns
-        // false (no formation) when ungrouped or alone. Every unit in the group
-        // holds the SAME roster, so all ranks agree -> one coherent formation.
-        private static bool TryRank(in DynamicBuffer<GroupMember> group, int selfId, out int rank, out int count)
-        {
-            count = group.Length;
-            for (int i = 0; i < count; i++)
-                if (group[i].StableId == selfId) { rank = i; return count > 1; }
-            rank = 0;
-            return false;
         }
 
         // Whether one of the perceived enemy candidates IS the ordered target
@@ -426,23 +317,6 @@ public partial struct BehaviorSystem : ISystem
             if (perception.HasMostExposed && perception.MostExposedEnemy.Entity == wanted) { info = perception.MostExposedEnemy; return true; }
             info = default;
             return false;
-        }
-
-        // Shared group orientation for the IDLE frame: movement consensus, else
-        // facing consensus, else this unit's OWN facing — never arbitrary north.
-        private float2 GroupForward(float2 myFacing, in Perception perception)
-        {
-            if (math.lengthsq(perception.FriendlyAvgVelocity) > 0.1f)
-                return math.normalizesafe(perception.FriendlyAvgVelocity, myFacing);
-            if (math.lengthsq(perception.FriendlyAvgFacing) > 0.01f)
-                return math.normalizesafe(perception.FriendlyAvgFacing, myFacing);
-            return myFacing;
-        }
-
-        private static float2 Cap(float2 v)
-        {
-            float len = math.length(v);
-            return len > 1f ? v / len : v;
         }
 
         private bool Los(float2 from, float2 to) =>

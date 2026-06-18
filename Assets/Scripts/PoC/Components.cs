@@ -8,12 +8,35 @@ using Unity.Collections;
 // ---------------------------------------------------------------------------
 
 // Per-unit movement intent. Set by player orders OR by AI behaviors.
-public struct MoveTarget : IComponentData
-{
-    public float2 Value;   // world-space XZ destination (we flatten 3D -> plane)
+public struct MoveTarget : IComponentData {
+    public float2 Value;       // world-space XZ destination (group center ends here)
     public bool HasTarget;
-    public float2 Forward;
-    public bool AttackMove; // if true, engage enemies encountered en route; if false, ignore them
+    public float2 Forward;     // order's FIXED frame forward (never recomputed per tick)
+    public bool AttackMove;  // engage en route (true) vs ignore enemies (false)
+
+    // ---- formation order state (written once by CommandSystem) -------------
+    public float2 Origin;      // group center at order time; anchor advances from here
+    public int FormationId; // stable group key (lowest member StableId); 0 = ungrouped
+    public int Cols;        // frozen formation width
+    public byte Shape;       // FormationShape (Grid/Wall/Wedge)
+    public float Spacing;     // slot pitch shared by the group
+    public float Progress;    // distance the anchor has advanced along Origin->Value
+}
+
+public struct FormationMember : IComponentData {
+    public int FrontPriority; // higher = nearer the front rank. Designer-managed;
+                              // equal priority = intentional intermingling.
+    public float Looseness;     // 0 = dead on the ideal slot, 1 = max scatter
+    public float Aggression;    // reserved: how far it will leave its slot to fight
+}
+
+// Per-unit formation SLOT, rebuilt EVERY tick by FormationSystem from the living
+// members. NOT serialized (it is recomputed before BehaviorSystem each tick).
+public struct FormationSlot : IComponentData {
+    public bool Has;    // false => no formation this tick (ungrouped/alone)
+    public int Index;  // this unit's slot among the living, sorted members
+    public int Count;  // living member count (so the grid sizes to survivors)
+    public float2 Anchor; // shared formation center this tick
 }
 
 // Accumulated velocity for this frame, integrated by the steering system.

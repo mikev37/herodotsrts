@@ -240,14 +240,12 @@ public static class SimSnapshot
             };
 
             var mods = em.GetBuffer<ActiveModifier>(e);
-            rec.ModCount = mods.Length;
-            w.WriteValueSafe(rec);
-            for (int i = 0; i < mods.Length; i++)
-                w.WriteValueSafe(new ModRecord { M = mods[i] });
             var grp = em.GetBuffer<GroupMember>(e);
-            rec.GroupCount = grp.Length;          
-            for (int i = 0; i < grp.Length; i++)
-                w.WriteValueSafe(new GroupRecord { M = grp[i] });
+            rec.ModCount = mods.Length;
+            rec.GroupCount = grp.Length;      
+            w.WriteValueSafe(rec);
+            for (int i = 0; i < mods.Length; i++) w.WriteValueSafe(new ModRecord { M = mods[i] });
+            for (int i = 0; i < grp.Length; i++) w.WriteValueSafe(new GroupRecord { M = grp[i] });
         }
 
         foreach (var e in projectiles)

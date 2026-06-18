@@ -113,6 +113,7 @@ public class UnitManager : MonoBehaviour
             typeof(Health), typeof(DeathTimer), typeof(Ranged), typeof(UnitAnim), typeof(CombatStatus),
             typeof(BaseStats), typeof(ActiveModifier), typeof(StableId),
             typeof(Mana), typeof(PendingCast), typeof(NavContext),
+            typeof(FormationMember), typeof(FormationSlot),
             typeof(Perception), typeof(UnitInfo), typeof(FriendlyUnit), typeof(GroupMember), typeof(IncomingProjectile),   // perception + contact/friendly/group lists
         };
         _archetype = _em.CreateArchetype(common);
@@ -284,7 +285,11 @@ public class UnitManager : MonoBehaviour
         });
         // BehaviorOverride / MoveTarget / AttackOrder / CombatTarget /
         // DesiredDestination default to zero (Has=false) — fine.
-
+        _em.SetComponentData(e, new FormationMember {
+            FrontPriority = def.frontPriority,
+            Looseness = def.looseness,
+            Aggression = def.aggression,
+        });
         if (def.isHero)
             _em.AddComponent<HeroTag>(e);   // abilities are cast at the hero via the ability system
 
