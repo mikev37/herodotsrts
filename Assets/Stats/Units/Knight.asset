@@ -49,6 +49,6 @@ MonoBehaviour:
   pursueDistance: 30
   cohesionRadius: 20
   frontPriority: 0
-  looseness: 0
+  looseness: 0.019
   aggression: 1
   formationSpacing: 3
