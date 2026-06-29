@@ -113,11 +113,15 @@ public abstract class Commander : MonoBehaviour
 
     // --- order verbs (the abstraction the AI shares) ------------------------
 
-    protected void IssueMove(List<Entity> units, float2 dest, bool attackMove = false)
+    // formationWidth: grid columns for the resulting formation. 0 => the apply
+    // system auto-fits (sqrt of the count). PlayerCommander passes a value
+    // derived from the right-drag length; AICommander leaves it 0.
+    protected void IssueMove(List<Entity> units, float2 dest, bool attackMove = false, int formationWidth = 0)
     {
         Select(units);
-        Issue(attackMove ? CommandKind.AttackMove : CommandKind.Move, dest, -1, 0);
-        lastOrder = $"{(attackMove ? "AttackMove" : "Move")} {_selection.Count} -> ({dest.x:0.#},{dest.y:0.#})";
+        Issue(attackMove ? CommandKind.AttackMove : CommandKind.Move, dest, -1, 0, formationWidth);
+        lastOrder = $"{(attackMove ? "AttackMove" : "Move")} {_selection.Count} -> ({dest.x:0.#},{dest.y:0.#})" +
+                    (formationWidth > 0 ? $" w{formationWidth}" : "");
     }
 
     protected void IssueAttack(List<Entity> units, Entity target, float2 targetPos)
@@ -166,7 +170,7 @@ public abstract class Commander : MonoBehaviour
         lastOrder = $"Demolish building {stableId}";
     }
 
-    private void Issue(CommandKind kind, float2 pos, int targetId, byte abilitySlot)
+    private void Issue(CommandKind kind, float2 pos, int targetId, byte abilitySlot, int formationWidth = 0)
     {
         if (Mode == LockstepMode.Playback) return;   // live input ignored during playback
 
@@ -178,6 +182,7 @@ public abstract class Commander : MonoBehaviour
             TargetPos      = pos,
             TargetStableId = targetId,
             AbilitySlot    = abilitySlot,
+            FormationWidth = formationWidth,
             Units          = ToFixed(_selection),
         };
         Outbox.Enqueue(cmd);
@@ -236,6 +241,7 @@ public abstract class Commander : MonoBehaviour
             w.Write(c.TargetPos.y);
             w.Write(c.TargetStableId);
             w.Write(c.AbilitySlot);
+            w.Write(c.FormationWidth);
             w.Write(c.Units.Length);
             for (int i = 0; i < c.Units.Length; i++) w.Write(c.Units[i]);
         }
@@ -262,6 +268,7 @@ public abstract class Commander : MonoBehaviour
                 TargetPos      = new float2(r.ReadSingle(), r.ReadSingle()),
                 TargetStableId = r.ReadInt32(),
                 AbilitySlot    = r.ReadByte(),
+                FormationWidth = r.ReadInt32(),
             };
             int uc = r.ReadInt32();
             for (int i = 0; i < uc; i++) c.Units.Add(r.ReadInt32());

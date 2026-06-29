@@ -9,6 +9,12 @@ using UnityEngine;
 // PLAYER COMMANDER — classic RTS input on the shared verbs. Left-drag box
 // select, right-click ground = move, right-click enemy = attack.
 //
+// Right-drag sets formation WIDTH: press to lock the destination, drag across
+// the terrain, release. The drag length (in world units) becomes the grid
+// width in columns; a negligible drag is a plain click and leaves the width
+// auto-fit. Holding BOTH buttons is the camera's orbit chord, so while both are
+// down we suppress box-select and the move commit (see _orbitChordLatched).
+//
 // Absorbs the former HeroController's ability input: Q/W/E/R arms a slot of the
 // CASTER (the selected unit with the most abilities — heroes in practice);
 // right-click then casts at the clicked point / on the caster, via the
@@ -23,6 +29,14 @@ public class PlayerCommander : Commander
     [Tooltip("Wall placed with V. A WallDefinition; must appear in this team's roster.")]
     [SerializeField] private WallDefinition placeWall;
 
+    [Header("Formation (right-drag to set grid width)")]
+    [Tooltip("World distance between adjacent columns; converts a right-drag length into a column count.")]
+    [SerializeField] private float columnSpacing = 2f;
+    [Tooltip("Smallest grid width (in columns) a deliberate right-drag can produce.")]
+    [SerializeField] private int   minDragColumns = 2;
+    [Tooltip("Right-drags shorter than this (world units) count as a plain click: width stays auto-fit.")]
+    [SerializeField] private float dragDeadzone = 1.5f;
+
     [Header("Player debug (runtime, read-only)")]
     public int selectedCount;
     public bool dragging;
@@ -33,6 +47,17 @@ public class PlayerCommander : Commander
     private EntityQuery _buildingQuery;
     private EntityQuery _resourceQuery;
     private Vector2 _dragStart;
+
+    // Right-drag (formation order) state.
+    private bool    _rmbDragging;
+    private float2  _rmbStart;       // terrain point under the press = move destination
+    private Entity  _rmbEnemy;       // enemy under the press point, if any
+    private float2  _rmbEnemyPos;
+
+    // Latched while the orbit chord (both buttons) is engaged, so the button-ups
+    // that end an orbit don't also fire a box-select or a move order. Cleared
+    // only once neither button is held.
+    private bool _orbitChordLatched;
 
     private static readonly KeyCode[] SlotKeys = { KeyCode.Q, KeyCode.W, KeyCode.E, KeyCode.R };
 
@@ -54,8 +79,20 @@ public class PlayerCommander : Commander
     {
         if (!WorldOk) return;
 
+        bool leftDown  = Input.GetMouseButton(0);
+        bool rightDown = Input.GetMouseButton(1);
+
+        // Both buttons = camera orbit chord. Latch it so the releases that end the
+        // orbit are not mistaken for a box-select / move commit.
+        if (leftDown && rightDown) _orbitChordLatched = true;
+
+        // ---- left mouse: box select ----
         if (Input.GetMouseButtonDown(0)) { _dragStart = Input.mousePosition; dragging = true; }
-        if (Input.GetMouseButtonUp(0) && dragging) { dragging = false; BoxSelect(); }
+        if (Input.GetMouseButtonUp(0) && dragging)
+        {
+            dragging = false;
+            if (!_orbitChordLatched) BoxSelect();
+        }
 
         // Q/W/E/R toggles an armed ability slot (only if the current caster has it).
         for (int i = 0; i < SlotKeys.Length; i++)
@@ -75,11 +112,20 @@ public class PlayerCommander : Commander
         if (Input.GetKeyDown(KeyCode.N) && GroundPoint(out float2 demoPos))
             TryDemolishNearest(demoPos);
 
+        // ---- right mouse: armed cast on press, else a formation drag ----
         if (Input.GetMouseButtonDown(1))
         {
             if (armedIndex >= 0) { TryCastArmed(); armedIndex = -1; }
-            else RightClick();
+            else BeginRightDrag();
         }
+        if (Input.GetMouseButtonUp(1) && _rmbDragging)
+        {
+            if (_orbitChordLatched) _rmbDragging = false;   // orbit consumed this gesture
+            else EndRightDrag();
+        }
+
+        // Release the orbit latch only once BOTH buttons are up.
+        if (!leftDown && !rightDown) _orbitChordLatched = false;
 
         selectedCount = _selectedQuery.CalculateEntityCount();
     }
@@ -197,14 +243,25 @@ public class PlayerCommander : Commander
         armedIndex = -1;   // selection changed; disarm
     }
 
-    private void RightClick()
+    // Press: lock in the order's destination (the terrain point under the cursor)
+    // and the enemy under it, if any. Width is decided on release from how far
+    // the cursor is dragged across the terrain.
+    private void BeginRightDrag()
     {
+        _rmbDragging = true;
+        _rmbEnemy    = Entity.Null;
+
+        // Destination = the terrain point under the press. GroundPoint raycasts
+        // the real terrain (see its note), so the drag measures true world
+        // distance over the ground.
+        if (!GroundPoint(out _rmbStart)) { _rmbDragging = false; return; }
+
         var cam = Camera.main; if (cam == null) return;
         var entities = AllUnitsQuery.ToEntityArray(Allocator.Temp);
         var teams = AllUnitsQuery.ToComponentDataArray<Team>(Allocator.Temp);
         var xforms = AllUnitsQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
 
-        Entity enemy = Entity.Null; float2 enemyPos = default; float best = 30f; // px
+        float best = 30f; // px
         Vector2 mouse = Input.mousePosition;
         for (int i = 0; i < entities.Length; i++)
         {
@@ -212,14 +269,32 @@ public class PlayerCommander : Commander
             Vector3 sp = cam.WorldToScreenPoint(xforms[i].Position);
             if (sp.z <= 0) continue;
             float d = Vector2.Distance(mouse, new Vector2(sp.x, sp.y));
-            if (d < best) { best = d; enemy = entities[i]; enemyPos = new float2(xforms[i].Position.x, xforms[i].Position.z); }
+            if (d < best) { best = d; _rmbEnemy = entities[i]; _rmbEnemyPos = new float2(xforms[i].Position.x, xforms[i].Position.z); }
         }
         entities.Dispose(); teams.Dispose(); xforms.Dispose();
+    }
+
+    // Release: commit the order. Drag length across the terrain (press point ->
+    // release point) becomes the grid width in columns; a negligible drag is a
+    // plain click and leaves the width auto-fit (0). An enemy under the original
+    // press point wins and is attacked (auto width).
+    private void EndRightDrag()
+    {
+        _rmbDragging = false;
 
         var selected = GetSelected();
         if (selected.Count == 0) { lastOrder = "(right-click ignored: nothing selected)"; return; }
-        if (enemy != Entity.Null) IssueAttack(selected, enemy, enemyPos);
-        else if (GroundPoint(out float2 gp)) IssueMove(selected, gp);
+
+        if (_rmbEnemy != Entity.Null) { IssueAttack(selected, _rmbEnemy, _rmbEnemyPos); return; }
+
+        int width = 0;   // 0 => CommandApplySystem auto-fits (current default)
+        if (GroundPoint(out float2 end))
+        {
+            float dragDist = math.distance(_rmbStart, end);
+            if (dragDist >= dragDeadzone)
+                width = math.max(minDragColumns, (int)math.round(dragDist / math.max(0.01f, columnSpacing)));
+        }
+        IssueMove(selected, _rmbStart, false, width);
     }
 
     private List<Entity> GetSelected()
@@ -304,7 +379,8 @@ public class PlayerCommander : Commander
             }
         }
 
-        if (!dragging) return;
+        // Selection rectangle — hidden while the orbit chord is engaged.
+        if (!dragging || _orbitChordLatched) return;
         Vector2 cur = Input.mousePosition;
         Vector2 a = new Vector2(_dragStart.x, Screen.height - _dragStart.y);
         Vector2 b = new Vector2(cur.x, Screen.height - cur.y);

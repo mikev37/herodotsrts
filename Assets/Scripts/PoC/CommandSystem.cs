@@ -29,14 +29,14 @@ public enum CommandKind : byte
 // NGO memcpys the whole struct. No hand-written serializer to drift out of sync.
 // (Wire cost: full 512-byte Units capacity is sent even for small selections —
 // trivial at RTS command rates; optimize with manual packing only if it matters.)
-public struct SimCommand : IBufferElementData, INetworkSerializeByMemcpy
-{
-    public uint                  Tick;            // execution tick
-    public int                   PlayerId;
-    public CommandKind           Kind;
-    public float2                TargetPos;       // Move/AttackMove destination, or Ability cast point
-    public int                   TargetStableId;  // AttackTarget victim
-    public byte                  AbilitySlot;     // Ability: which slot (0..3); caster = Units[0]
+public struct SimCommand : IBufferElementData, INetworkSerializeByMemcpy {
+    public uint Tick;            // execution tick
+    public int PlayerId;
+    public CommandKind Kind;
+    public float2 TargetPos;       // Move/AttackMove destination, or Ability cast point
+    public int TargetStableId;  // AttackTarget victim
+    public byte AbilitySlot;     // Ability: which slot (0..3); caster = Units[0]
+    public int FormationWidth;  // Move/AttackMove grid columns; 0 = auto-fit
     public FixedList512Bytes<int> Units;          // affected units (StableIds); up to ~125
 }
 
@@ -262,12 +262,10 @@ public partial struct CommandApplySystem : ISystem
             float2 fwd = c.Kind == CommandKind.Stop ? avgFacing
                                                     : math.normalizesafe(aim - center, avgFacing);
 
-            // Shape + width are ORDER properties. Width comes from the command
-            // (right-click-drag length, set in Commander). 0 => auto-fit.
-            // TODO(integration): set `width = c.FormationWidth;` once SimCommand
-            // carries it (see FORMATION_INTEGRATION.md, imp2). Defaults keep Grid.
+            // Shape + width are ORDER properties. Width is the right-drag length converted
+            // to columns by PlayerCommander (0 => auto-fit). Shape stays Grid for now.
             FormationShape shape = FormationShape.Grid;
-            int width = 0;
+            int width = c.FormationWidth;
             int cols = width > 0 ? math.min(width, n) : FormationGeometry.Cols(shape, n);
 
             // ---- stamp the initial frame; FormationSystem owns it from here ----

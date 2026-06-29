@@ -2,10 +2,13 @@ using UnityEngine;
 
 /// <summary>
 /// RTS Camera Controller
-/// - Scroll wheel        : Zoom (FOV)
-/// - Mouse near edge     : Pan along XZ plane
-/// - Middle mouse drag   : Pan along XZ plane
-/// - Right mouse drag    : Orbit (yaw + pitch)
+/// - Scroll wheel             : Zoom (FOV), anchored on the point under the cursor
+/// - Mouse near edge          : Pan along XZ plane
+/// - Middle mouse drag        : Pan along XZ plane
+/// - Left + Right mouse drag  : Orbit (yaw + pitch)
+///
+/// Orbit now requires BOTH mouse buttons so that a plain right-drag is free for
+/// unit orders (formation width in PlayerCommander).
 /// </summary>
 [RequireComponent(typeof(Camera))]
 public class RTSCameraController : MonoBehaviour
@@ -34,9 +37,10 @@ public class RTSCameraController : MonoBehaviour
     // -------------------------------------------------------------------------
 
     // -------------------------------------------------------------------------
-    // Right Click Orbit
+    // Orbit (Left + Right Mouse)
     // -------------------------------------------------------------------------
-    [Header("Orbit (Right Mouse)")]
+    [Header("Orbit (Left + Right Mouse)")]
+    [Tooltip("Degrees of rotation per pixel of mouse movement.")]
     public float orbitSensitivity    = 0.25f;
     public float pitchMin            = 10f;
     public float pitchMax            = 80f;
@@ -62,10 +66,11 @@ public class RTSCameraController : MonoBehaviour
     private bool     _dragging;
     private Vector3  _dragGroundOrigin;  // world point on ground under cursor at drag start
 
-    // right-mouse orbit
+    // orbit (left + right mouse)
     private bool     _orbiting;
     private Vector3  _orbitFocusPoint;   // world point we orbit around
     private float    _orbitRadius;
+    private Vector3  _lastMousePos;      // for frame-to-frame orbit deltas
 
     // =========================================================================
     void Awake()
@@ -90,48 +95,76 @@ public class RTSCameraController : MonoBehaviour
     }
 
     // =========================================================================
-    // Zoom
+    // Zoom (anchored on the cursor)
     // =========================================================================
-    void HandleZoom()
-    {
+    void HandleZoom() {
         float scroll = Input.GetAxis("Mouse ScrollWheel");
-        if (Mathf.Abs(scroll) > 0.001f && !_dragging)
-        {
-            _targetFov -= scroll * zoomSpeed * _targetFov; // proportional feel
-            _targetFov  = Mathf.Clamp(_targetFov, fovMin, fovMax);
-        }
+        if (Mathf.Abs(scroll) > 0.001f && !_dragging && !_orbiting)
+            _targetFov = Mathf.Clamp(_targetFov - scroll * zoomSpeed * _targetFov, fovMin, fovMax);
 
+        if (_orbiting || _dragging) return;   // those own the position this frame
+
+        // Sample under the cursor, ease the FOV, sample again — the shift pins the
+        // cursor's ground point against THIS frame's real FOV change, not the whole
+        // pending jump. Applied to the live position so there's no second smoothing lag.
+        Vector3 before = ScreenPointToGroundPoint(Input.mousePosition);
         _cam.fieldOfView = Mathf.Lerp(_cam.fieldOfView, _targetFov, Time.deltaTime * zoomSmoothing);
+        Vector3 after = ScreenPointToGroundPoint(Input.mousePosition);
+
+        Vector3 shift = before - after;
+        transform.position += shift;   // pin under cursor immediately
+        _targetPosition += shift;   // keep the pan target in sync so it doesn't drift back
+        ClampPosition();
     }
 
     // =========================================================================
-    // Right Mouse Orbit
+    // Orbit (Left + Right Mouse)
     // =========================================================================
     void HandleOrbit()
     {
-        if (Input.GetMouseButtonDown(1))
+        // Orbit requires BOTH mouse buttons held — leaves a plain right-drag free
+        // for unit orders. Either button releasing ends the orbit.
+        bool bothDown = Input.GetMouseButton(0) && Input.GetMouseButton(1);
+
+        if (!_orbiting && bothDown)
         {
             _orbiting = true;
-            // Pick a focus point on the ground plane (y=0) beneath the camera
+
+            // Re-sync the yaw/pitch targets to the LIVE transform BEFORE we
+            // reconstruct the orbit position from them below. If the targets had
+            // drifted from the actual rotation (smoothing lag, prior edits), the
+            // first frame would snap the camera onto the recomputed orbit sphere —
+            // that is the "jerk on right-click" / teleport.
+            Vector3 e    = transform.eulerAngles;
+            _targetYaw   = e.y;
+            _targetPitch = e.x;
+
             _orbitFocusPoint = GetGroundPoint();
             _orbitRadius     = Vector3.Distance(transform.position, _orbitFocusPoint);
-        }
 
-        if (Input.GetMouseButtonUp(1))
+            // Seed the delta tracker so the opening frame rotates by zero.
+            _lastMousePos = Input.mousePosition;
+        }
+        else if (_orbiting && !bothDown)
         {
             _orbiting = false;
         }
 
         if (!_orbiting) return;
 
-        float dx = Input.GetAxis("Mouse X");
-        float dy = Input.GetAxis("Mouse Y");
+        // Raw screen-space delta. We deliberately avoid Input.GetAxis("Mouse X/Y")
+        // here: its built-in smoothing carries residual velocity that fires on the
+        // first frame after a click, which is the other half of the start jerk.
+        // Seeded above, so frame 1 contributes a zero delta.
+        Vector3 mousePos = Input.mousePosition;
+        Vector2 delta    = (Vector2)(mousePos - _lastMousePos);
+        _lastMousePos    = mousePos;
 
-        _targetYaw   += dx * orbitSensitivity * 100f * Time.deltaTime;
-        _targetPitch -= dy * orbitSensitivity * 100f * Time.deltaTime;
+        _targetYaw   += delta.x * orbitSensitivity;   // degrees per pixel
+        _targetPitch -= delta.y * orbitSensitivity;
         _targetPitch  = Mathf.Clamp(_targetPitch, pitchMin, pitchMax);
 
-        // Recompute camera position from yaw/pitch/radius around focus
+        // Reconstruct the camera position from yaw/pitch/radius around the focus.
         Quaternion rot    = Quaternion.Euler(_targetPitch, _targetYaw, 0f);
         Vector3    offset = rot * new Vector3(0f, 0f, -_orbitRadius);
         _targetPosition   = _orbitFocusPoint + offset;
