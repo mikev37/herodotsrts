@@ -248,6 +248,8 @@ public class UnitManager : MonoBehaviour
             AvoidMeleeRange = def.avoidMeleeRange,
             RetreatHealthPct = def.retreatHealthFraction,
             CohesionRadius = def.cohesionRadius,
+            ReEngageHealthPct = .75f,
+            RetreatTime = 3
         });
         _em.SetComponentData(e, BuildAttack(def));
         _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = def.shield });

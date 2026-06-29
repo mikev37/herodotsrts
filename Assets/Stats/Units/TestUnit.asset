@@ -44,7 +44,7 @@ MonoBehaviour:
   - {fileID: 0}
   - {fileID: 0}
   attackNearbyRange: 6
-  avoidMeleeRange: 8
+  avoidMeleeRange: 0
   retreatHealthFraction: 0.25
   pursueDistance: 30
   cohesionRadius: 20
