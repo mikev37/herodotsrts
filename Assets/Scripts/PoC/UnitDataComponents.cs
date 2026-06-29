@@ -23,8 +23,10 @@ public struct UnitTuning : IComponentData
     public float AttackNearbyRange;   // aggression radius for AttackNearby
     public float AvoidMeleeRange;     // back-off radius for AvoidMelee
     public float RetreatHealthPct;    // RetreatLowHealth triggers below Current/Max
+    public float ReEngageHealthPct;   // RetreatLowHealth stops above Current/Max
     public float PursueDistance;      // AdvanceIndividual/AdvanceOnEnemy contribute only within this range
-    public float CohesionRadius;      // GroupCohesion activates beyond this distance from friendly center
+	public float CohesionRadius;      // GroupCohesion activates beyond this distance from friendly center
+    public float RetreatTime;         // Time to retreat from enemies when hit and below X health
 }
 
 // Unified attack: ONE countdown->act->cooldown timer for both melee and ranged.

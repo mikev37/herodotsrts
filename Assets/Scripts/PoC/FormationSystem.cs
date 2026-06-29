@@ -81,10 +81,11 @@ public partial struct FormationSystem : ISystem
 
     public void OnUpdate(ref SystemState state)
     {
+
         var em    = state.EntityManager;
-        float dt  = SystemAPI.Time.DeltaTime;
         int n     = _members.CalculateEntityCount();
         if (n == 0) return;
+
 
         var nf     = SystemAPI.GetSingleton<NavFields>();
         var lookup = SystemAPI.GetSingleton<PathLookup>();
@@ -101,6 +102,11 @@ public partial struct FormationSystem : ISystem
         var speeds = _members.ToComponentDataArray<Speed>(alloc);
         var vels   = _members.ToComponentDataArray<Velocity>(alloc);
 
+        // Pre-pass: clear every slot before the group loop re-fills it.
+        for (int i = 0; i < n; i++)
+            em.SetComponentData(ents[i], new FormationSlot { Has = false });
+
+
         // Group indices — each FormationId forms a contiguous run after sort.
         var grouped = new NativeList<int>(n, Allocator.Temp);
         for (int i = 0; i < n; i++)
@@ -116,7 +122,7 @@ public partial struct FormationSystem : ISystem
             int e   = s + 1;
             while (e < total && moves[grouped[e]].FormationId == fid) e++;
             activeFids.Add(fid);
-            BuildGroup(em, dt, s, e, grouped, ents, moves, design, tunes, percs, aos, xforms, sids, speeds, vels,
+            BuildGroup(em, s, e, grouped, ents, moves, design, tunes, percs, aos, xforms, sids, speeds, vels,
                        lookup.Map, nf.FineDir, nf.CoarseCost, nf.BlockOf, obs.CellComp, obs.CellType);
             s = e;
         }
@@ -138,7 +144,7 @@ public partial struct FormationSystem : ISystem
     // -----------------------------------------------------------------------
 
     private void BuildGroup(
-        EntityManager em, float dt, int s, int e,
+        EntityManager em, int s, int e,
         NativeList<int>          grouped,
         NativeArray<Entity>      ents,
         NativeArray<MoveTarget>  moves,
@@ -398,7 +404,7 @@ public partial struct FormationSystem : ISystem
                 if (math.lengthsq(anchorDir) < 1e-4f)
                     anchorDir = math.normalizesafe(effDest - anchor, effFwd);
             }
-            newAnchor = anchor + anchorDir * math.min(slowest * dt, remain);
+            newAnchor = anchor + anchorDir * math.min(slowest, remain);
         }
 
         // ---- write FormationSlot + live anchor/forward ------------------
@@ -412,8 +418,9 @@ public partial struct FormationSystem : ISystem
                 Anchor = newAnchor, Spacing = pitch,
             });
             MoveTarget mv = moves[i];
-            mv.Anchor  = newAnchor;
+            mv.Anchor = newAnchor;
             mv.Forward = effFwd;
+            if (arrived && !movingTarget) mv.HasTarget = false;  
             em.SetComponentData(ent, mv);
         }
         finalOrder.Dispose();

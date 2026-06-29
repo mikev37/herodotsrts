@@ -24,6 +24,9 @@ public struct FormationMember : IComponentData {
     public float Looseness;     // 0 rigid … 1 scatter (drives tolerance + scatter)
     public float Aggression;    // 0 pacifist, 1 holds the line, >1 charges
     public float Separation;    // personal-space radius for the soft push
+	public int ResumptionFormationId;
+    public uint RetreatUntilTick;   // tick the retreat commitment ends (0 = not retreating)
+    public int KiteShotCount;      // shots fired this kite volley before backing off
 }
 
 // Per-unit formation SLOT, rebuilt EVERY tick by FormationSystem from the living
@@ -108,6 +111,8 @@ public struct CombatStatus : IComponentData
     public bool InContactWithEnemy;
     public bool IsAttacking;      // behavior holds position and commits to attacking its target
     public bool IsBlocking;       // shield unit facing an enemy
+    public float RetreatSecondsLeft;
+    public int KiteShotCount;
 }
 
 // Marks a unit as dead: movement/combat stop, the view plays Die, then the
