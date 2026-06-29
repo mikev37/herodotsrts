@@ -131,7 +131,7 @@ public partial struct BehaviorSystem : ISystem
             float spread  = engaged ? tuning.CombatSpacing : tuning.IdleSpacing;
             float health_frac = health.Max > 0f ? health.Current / health.Max : 1f;
 
-            bool   hasSlot   = slot.Has;
+            bool   hasSlot   = slot.Has && order.FormationId > 0;
             float  pitch     = slot.Spacing > 0f ? slot.Spacing : spread;
             float2 slotWorld = order.Value;
             if (hasSlot)
@@ -156,7 +156,7 @@ public partial struct BehaviorSystem : ISystem
             //    line between me and my lead point, physically blocking the order.
             //    Clear it without leaving formation.
             // ================================================================
-            if (order.HasTarget && hasSlot && member.Aggression > 0f && target.Has)
+            if (order.HasTarget && hasSlot && target.Has)
             {
                 float2 leadPt  = position + objectiveDir * math.max(closeinRange, 1f);
                 float2 toEnemy = target.Info.Position - position;
@@ -179,7 +179,7 @@ public partial struct BehaviorSystem : ISystem
             //    the objective-front direction. Attack without leaving formation.
             //    looseness 0 = dead-ahead only; looseness 1 = full 360°.
             // ================================================================
-            if (order.HasTarget && hasSlot && member.Aggression > 0f && target.Has)
+            if (order.HasTarget && hasSlot && target.Has)
             {
                 float frontRange = engageRange * math.max(0f, member.Aggression);
                 if (targetDist <= frontRange)
@@ -230,7 +230,7 @@ public partial struct BehaviorSystem : ISystem
                     return;
                 }
             }
-
+           
             // ================================================================
             // 5) SURVIVAL — RETREAT. Below RetreatHealthPct triggers a timed
             //    commitment of RetreatTime seconds using LockstepConfig.FixedDt,
@@ -260,41 +260,41 @@ public partial struct BehaviorSystem : ISystem
                 Act(ref dest, position, position + away * FleeDistance);
                 return;
             }
-
-            // ================================================================
-            // 6) SURVIVAL — KITE. Units with AvoidMeleeRange alternate firing
-            //    and retreating. Fires up to max(1, aggression) shots per step
-            //    back; shot count persists on CombatStatus.
-            // ================================================================
-            if (tuning.AvoidMeleeRange > 0f && perception.HasClosestEnemy)
-            {
-                float closeDist    = math.distance(position, perception.ClosestEnemy.Position);
-                if (closeDist < tuning.AvoidMeleeRange)
-                {
-                    int shotsPerRetreat = (int)math.max(1f, member.Aggression);
-                    if (status.KiteShotCount < shotsPerRetreat
-                        && target.Has && targetDist <= engageRange)
-                    {
-                        status.IsAttacking = true;
-                        Attack(ref dest, position, target.Info.Position, enemyDir, ranged.IsRanged);
-                        status.KiteShotCount++;
-                        return;
-                    }
-                    BreakFormation(ref order, ref member);
-                    float2 away = math.normalizesafe(
-                        position - perception.ClosestEnemy.Position, -enemyDir);
-                    Act(ref dest, position,
-                        position + away * (tuning.AvoidMeleeRange - closeDist));
-                    status.KiteShotCount = 0;
-                    return;
-                }
-            }
-
+            
+           // ================================================================
+           // 6) SURVIVAL — KITE. Units with AvoidMeleeRange alternate firing
+           //    and retreating. Fires up to max(1, aggression) shots per step
+           //    back; shot count persists on CombatStatus.
+           // ================================================================
+           if (tuning.AvoidMeleeRange > 0f && perception.HasClosestEnemy)
+           {
+               float closeDist    = math.distance(position, perception.ClosestEnemy.Position);
+               if (closeDist < tuning.AvoidMeleeRange)
+               {
+                   int shotsPerRetreat = (int)math.max(1f, member.Aggression);
+                   if (status.KiteShotCount < shotsPerRetreat
+                       && target.Has && targetDist <= engageRange)
+                   {
+                       status.IsAttacking = true;
+                       Attack(ref dest, position, target.Info.Position, enemyDir, ranged.IsRanged);
+                       status.KiteShotCount++;
+                       return;
+                   }
+                   BreakFormation(ref order, ref member);
+                   float2 away = math.normalizesafe(
+                       position - perception.ClosestEnemy.Position, -enemyDir);
+                   Act(ref dest, position,
+                       position + away * (tuning.AvoidMeleeRange - closeDist));
+                   status.KiteShotCount = 0;
+                   return;
+               }
+           }
+           
             // ================================================================
             // 7) ENGAGE — default attack. Fires when holding or on attack-move
             //    and an enemy is within engage range. Breaks from formation.
             // ================================================================
-            if (perception.HasEnemies && member.Aggression > 0f
+            if (perception.HasEnemies
                 && target.Has && targetDist <= engageRange)
             {
                 status.IsAttacking = true;
@@ -340,7 +340,7 @@ public partial struct BehaviorSystem : ISystem
                 BreakFormation(ref order, ref member);
                 return;
             }
-
+            
             // ================================================================
             // 11) HOLD POSITION — nothing to fight, no active order. Rejoin
             //     formation if broken off and fight is over. Reset kite counter.
@@ -355,6 +355,7 @@ public partial struct BehaviorSystem : ISystem
             float2 idleDest = (hasSlot ? slotWorld : position) + sep;
             idleDest += YieldNudge(position, in perception, pitch);
             DriveOrHold(ref dest, position, idleDest);
+            
         }
 
         // ---- helpers -------------------------------------------------------
@@ -381,9 +382,9 @@ public partial struct BehaviorSystem : ISystem
         // rather than being re-caught by the formation move tiers (3/9).
         private static void BreakFormation(ref MoveTarget order, ref FormationMember member)
         {
-            if (order.FormationId == 0) return;
+            if (order.FormationId == -1) return;
             member.ResumptionFormationId = order.FormationId;
-            order.FormationId = 0;
+            order.FormationId = -1;
             order.HasTarget   = false;
         }
 
