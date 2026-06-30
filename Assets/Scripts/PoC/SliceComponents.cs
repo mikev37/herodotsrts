@@ -35,6 +35,9 @@ public struct DesiredDestination : IComponentData
     public bool Has;
     public bool UseFlowField;   // long-range commanded move -> route via field
 
+    // Width in cells for flow-field routing and LoS. <=1 = point unit (original behaviour).
+    public int PathWidth;
+
     // Desired facing, decided by BEHAVIOR (face target / facing consensus / ...).
     // Steering only executes it (turn rate); it does not choose. When HasFace is
     // false, steering falls back to facing the movement heading.

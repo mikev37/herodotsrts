@@ -65,6 +65,7 @@ public partial struct BehaviorSystem : ISystem
             FleeDistance     = 8f,     // retreat carrot length (world units)
             WeightYield      = 1.5f,   // idle lane-clear nudge magnitude
             CellType         = obstacles.CellType,
+            Clearance        = obstacles.Clearance,
             LosRange         = 20,     // max cells for LoS test; beyond this use the flow field
         }.ScheduleParallel();
     }
@@ -74,6 +75,7 @@ public partial struct BehaviorSystem : ISystem
     private partial struct BehaviorJob : IJobEntity
     {
         [ReadOnly] public NativeArray<byte> CellType;
+        [ReadOnly] public NativeArray<float> Clearance;
         public float HoldRadius;
         public float HeightRangeBonus, FleeDistance;
         public float WeightYield;
@@ -90,6 +92,7 @@ public partial struct BehaviorSystem : ISystem
             in GroundSpeedMultiplier       slope,
             in DynamicBuffer<UnitInfo>     contacts,
             in FormationSlot               slot,
+            in UnitRadius                  radius,
             ref FormationMember            member,
             ref CombatTarget               target,
             ref CombatStatus               status,
@@ -100,6 +103,9 @@ public partial struct BehaviorSystem : ISystem
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 fwd3     = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(fwd3.x, fwd3.z), new float2(0f, 1f));
+
+            // Own body width in cells; a formation move can stamp a larger value upstream.
+            dest.PathWidth = math.max(1, (int)math.ceil(2f * radius.Value / NavGrid.CellSize));
 
             status.IsAttacking = false;
 
@@ -421,12 +427,12 @@ public partial struct BehaviorSystem : ISystem
             info = default; return false;
         }
 
-        private bool Los(float2 from, float2 to) =>
-            NavTerrain.LineOfSight(from, to, CellType, LosRange);
+        private bool Los(float2 from, float2 to, int width) =>
+            NavTerrain.LineOfSight(from, to, CellType, LosRange, Clearance, width);
 
         private void Act(ref DesiredDestination d, float2 position, float2 value)
         {
-            d.Value = value; d.Has = true; d.UseFlowField = !Los(position, value);
+            d.Value = value; d.Has = true; d.UseFlowField = !Los(position, value, d.PathWidth);
             d.HasFace = false;
         }
 
@@ -437,7 +443,7 @@ public partial struct BehaviorSystem : ISystem
                             float2 targetPos, float2 enemyDir, bool isRanged)
         {
             if (isRanged) { d.Has = false; d.UseFlowField = false; }
-            else { d.Value = targetPos; d.Has = true; d.UseFlowField = !Los(position, targetPos); }
+            else { d.Value = targetPos; d.Has = true; d.UseFlowField = !Los(position, targetPos, d.PathWidth); }
             d.Face = enemyDir; d.HasFace = true;
         }
     }

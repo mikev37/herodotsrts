@@ -123,7 +123,7 @@ public partial struct FormationSystem : ISystem
             while (e < total && moves[grouped[e]].FormationId == fid) e++;
             activeFids.Add(fid);
             BuildGroup(em, s, e, grouped, ents, moves, design, tunes, percs, aos, xforms, sids, speeds, vels,
-                       lookup.Map, nf.FineDir, nf.CoarseCost, nf.BlockOf, obs.CellComp, obs.CellType);
+                       lookup.Map, nf.FineDir, nf.CoarseCost, nf.BlockOf, obs.CellComp, obs.CellType, obs.Clearance);
             s = e;
         }
 
@@ -161,7 +161,8 @@ public partial struct FormationSystem : ISystem
         NativeArray<int>         coarseCost,
         NativeArray<int>         blockOf,
         NativeArray<byte>        cellComp,
-        NativeArray<byte>        cellType)
+        NativeArray<byte>        cellType,
+        NativeArray<float>       clearance)
     {
         int count = e - s;
         MoveTarget lead    = moves[grouped[s]];
@@ -250,6 +251,10 @@ public partial struct FormationSystem : ISystem
             int i = grouped[k];
             pitch = math.max(pitch, threat ? tunes[i].CombatSpacing : tunes[i].IdleSpacing);
         }
+
+        // Formation's lateral width in cells: the corridor must fit the whole column.
+        int formWidth = math.clamp(
+            (int)math.ceil(cols * pitch / NavGrid.CellSize), 1, NavGrid.MaxWidth);
 
         // ================================================================
         //  TWO-PASS ROW BUCKET SORT
@@ -370,7 +375,7 @@ public partial struct FormationSystem : ISystem
         // only built when it is actually needed.
         // ================================================================
         bool anchorHasLos = !arrived &&
-            NavTerrain.LineOfSight(anchor, effDest, cellType, AnchorLosRange);
+            NavTerrain.LineOfSight(anchor, effDest, cellType, AnchorLosRange, clearance, formWidth);
 
         // Create or reuse the ghost entity for this formation.
         if (!_anchorEntities.TryGetValue(lead.FormationId, out Entity ghostEnt) || !em.Exists(ghostEnt))
@@ -384,6 +389,7 @@ public partial struct FormationSystem : ISystem
             Has          = !arrived,
             UseFlowField = !anchorHasLos && !arrived,
             HasFace      = false,
+            PathWidth    = formWidth,   // route the corridor for the whole formation's width
         });
         em.SetComponentData(ghostEnt, LocalTransform.FromPosition(new float3(anchor.x, 0f, anchor.y)));
 
@@ -399,7 +405,7 @@ public partial struct FormationSystem : ISystem
             else
             {
                 // Sample the flow field built from LAST TICK's ghost registration.
-                anchorDir = SampleFlowField(anchor, effDest, pathMap, fineDir, coarseCost, blockOf, cellComp);
+                anchorDir = SampleFlowField(anchor, effDest, formWidth, pathMap, fineDir, coarseCost, blockOf, cellComp);
                 // Tick 1 (ghost not yet registered) or open terrain (no field entry):
                 if (math.lengthsq(anchorDir) < 1e-4f)
                     anchorDir = math.normalizesafe(effDest - anchor, effFwd);
@@ -470,7 +476,7 @@ public partial struct FormationSystem : ISystem
     // exactly the same pathfinding fidelity as a real unit.
 
     private static float2 SampleFlowField(
-        float2 pos, float2 dest,
+        float2 pos, float2 dest, int width,
         NativeParallelHashMap<int,int> pathMap,
         NativeArray<float2> fineDir,
         NativeArray<int>    coarseCost,
@@ -478,7 +484,7 @@ public partial struct FormationSystem : ISystem
         NativeArray<byte>   cellComp)
     {
         int gi = NavGrid.Index(NavGrid.Cell(dest));
-        if (!pathMap.TryGetValue(gi, out int slot)) return float2.zero;
+        if (!pathMap.TryGetValue(NavGrid.PathKey(gi, width), out int slot)) return float2.zero;
         int2 c = NavGrid.Cell(pos);
         if (!NavGrid.InBounds(c.x, c.y)) return float2.zero;
         int big   = NavGrid.BigIndex(NavGrid.BigOf(c));

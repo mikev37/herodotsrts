@@ -67,11 +67,19 @@ public static class NavTerrain
     // Also closes diagonal seepage: a diagonal step is blocked unless both
     // orthogonal shoulder cells are standable.
     public static bool LineOfSight(float2 a, float2 b, in NativeArray<byte> cellType,
-                                   int maxCells)
+                                   int maxCells, in NativeArray<float> clearance = default, int width = 1)
     {
         int2 c0 = NavGrid.Cell(a), c1 = NavGrid.Cell(b);
         int dx = math.abs(c1.x - c0.x), dy = math.abs(c1.y - c0.y);
         if (dx + dy > maxCells) return false;
+
+        // Width gate: a wide unit only has straight-line sight if every cell on
+        // the ray has room for half its body. clearance already encodes distance
+        // to the nearest wall, so the centreline test is sufficient — no need to
+        // sample parallel offsets. Width 1 (or no clearance field supplied) skips
+        // this entirely and behaves exactly as before.
+        bool useW = width > 1 && clearance.IsCreated;
+        float halfW = NavGrid.HalfWidth(width);
 
         int sx = c1.x >= c0.x ? 1 : -1;
         int sy = c1.y >= c0.y ? 1 : -1;
@@ -85,6 +93,7 @@ public static class NavTerrain
         // wall. Connectivity breaks the ray at the sheer roof<->ground face, so
         // the unit keeps following the flow field down the ramp and around.
         if (!NavGrid.InBounds(x, y) || cellType[NavGrid.Index(x, y)] == NavCell.Impassable) return false;
+        if (useW && clearance[NavGrid.Index(x, y)] < halfW) return false;
         byte prevType = cellType[NavGrid.Index(x, y)];
 
         for (int guard = 0; guard <= maxCells + 2; guard++)
@@ -96,9 +105,11 @@ public static class NavTerrain
             {
                 int hx = x + sx, hy = y + sy;
                 bool shoulderX = NavGrid.InBounds(hx, y) &&
-                    NavCell.Connected(prevType, cellType[NavGrid.Index(hx, y)]);
+                    NavCell.Connected(prevType, cellType[NavGrid.Index(hx, y)]) &&
+                    (!useW || clearance[NavGrid.Index(hx, y)] >= halfW);
                 bool shoulderY = NavGrid.InBounds(x, hy) &&
-                    NavCell.Connected(prevType, cellType[NavGrid.Index(x, hy)]);
+                    NavCell.Connected(prevType, cellType[NavGrid.Index(x, hy)]) &&
+                    (!useW || clearance[NavGrid.Index(x, hy)] >= halfW);
                 if (!shoulderX || !shoulderY) return false;
             }
             if (stepX) { err -= dy; x += sx; }
@@ -106,6 +117,7 @@ public static class NavTerrain
             if (!NavGrid.InBounds(x, y)) return false;
             byte t = cellType[NavGrid.Index(x, y)];
             if (!NavCell.Connected(prevType, t)) return false;   // ray breaks at a non-traversable edge
+            if (useW && clearance[NavGrid.Index(x, y)] < halfW) return false;   // ...or at a sub-width pinch
             prevType = t;
         }
         return true;
@@ -126,9 +138,50 @@ public static class NavGrid
 
     public const int MaxPaths      = 128;
     public const int MaxFineBlocks = 4096;
-    public const int MaxComp       = 4;   // global: max tracked connected components per big tile
+    public const int MaxComp       = 8;   // raised from 4: the width-eroded graph splits union components
+
+    // ---- variable-width pathing: width in cells, 1 = point (original behaviour) ----
+    public const int   MaxWidth      = 64;    // largest supported width in cells (key packing + cache)
+    public const int   MaxWidthSlots = 8;     // distinct widths kept resident in the component cache (LRU)
+    public const float MaxClearance  = 16f;   // clearance cap in cells; bounds the seam-bleed a near-edge
+                                              // structure can have on a tile's checksum (Trap-2 fix)
 
     public static float2 Origin => new float2(-WorldSize * 0.5f, -WorldSize * 0.5f);
+
+    // Clearance threshold for a width-W body: wall-adjacent cells read 0.5, so width 1 admits all passable.
+    public static float HalfWidth(int width) => 0.5f * math.max(1, width);
+
+    // Does a width-W body fit centred on this cell? The one context-free passability test.
+    public static bool Fits(in NativeArray<float> clearance, int cellIndex, int width) =>
+        clearance[cellIndex] >= HalfWidth(width);
+
+    // Flow-field cache key: (goal cell index, width) -> slot. width is clamped
+    // into [1, MaxWidth] so the packing never collides across goals.
+    public static int PathKey(int goalCellIndex, int width) =>
+        goalCellIndex * MaxWidth + math.clamp(width, 1, MaxWidth);
+
+    // Uphill direction of the clearance field at `cell`, for walking a stranded
+    // wide unit back to room its body fits. Samples only Connected neighbours so
+    // it never points through a wall.
+    public static float2 ClearanceGradient(in NativeArray<float> clearance,
+                                           in NativeArray<byte> cellType, int2 cell)
+    {
+        byte t = cellType[Index(cell.x, cell.y)];
+        float h = clearance[Index(cell.x, cell.y)];
+        float r = ClearanceAt(clearance, cellType, cell.x + 1, cell.y, t, h);
+        float l = ClearanceAt(clearance, cellType, cell.x - 1, cell.y, t, h);
+        float u = ClearanceAt(clearance, cellType, cell.x, cell.y + 1, t, h);
+        float d = ClearanceAt(clearance, cellType, cell.x, cell.y - 1, t, h);
+        return math.normalizesafe(new float2(r - l, u - d));
+    }
+
+    private static float ClearanceAt(in NativeArray<float> clearance, in NativeArray<byte> cellType,
+                                     int x, int y, byte fromType, float fallback)
+    {
+        if (!InBounds(x, y)) return fallback;
+        int i = Index(x, y);
+        return NavCell.Connected(fromType, cellType[i]) ? clearance[i] : fallback;
+    }
 
     public static int2 Cell(float2 world)
     {
@@ -161,6 +214,10 @@ public struct ObstacleField : IComponentData
     public NativeArray<byte> Passable;   // UNION view: 0 = Impassable, 1 = walkable by someone (Ground/Roof/Transition)
     public NativeArray<byte> CellType;   // NavCell.* per cell — the typed surface (read by LoS + steering repulsion)
     public NativeArray<float> NavHeight; // walk-surface Y for Roof/Transition cells (Ground cells use terrain)
+    public NativeArray<float> Clearance; // CELL distance from each cell centre to the nearest BROKEN edge
+                                         // (impassable neighbour, sheer ground<->roof face, or map border).
+                                         // Context-free; thresholded by HalfWidth(W) to test fit for any
+                                         // width. Capped at MaxClearance. Derived; rebuilt with the grid.
     public NativeArray<byte> CellComp;   // component id of each cell WITHIN its big tile (255 = impassable)
     public NativeArray<byte> CompCount;  // number of components per big tile
     public NativeArray<int>  BigVersion;
@@ -172,6 +229,7 @@ public struct PathSlot
 {
     public int2 GoalCell;
     public int2 GoalBig;
+    public int  Width;                  // path width in cells this slot's field was solved for
     public int  BuiltCoarseVersion;
     public int  UsedTick;
     public byte Valid;
@@ -204,6 +262,7 @@ public partial struct ObstacleGridSystem : ISystem
     private NativeArray<byte> _passable;
     private NativeArray<byte> _cellType;
     private NativeArray<float> _navHeight;
+    private NativeArray<float> _clearance;
     private NativeArray<byte> _cellComp;
     private NativeArray<byte> _compCount;
     private NativeArray<int>  _bigVersion;
@@ -227,6 +286,7 @@ public partial struct ObstacleGridSystem : ISystem
         _passable    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _cellType    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _navHeight   = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
+        _clearance   = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
         _cellComp    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _compCount   = new NativeArray<byte>(NavGrid.BigCount, Allocator.Persistent);
         _bigVersion  = new NativeArray<int>(NavGrid.BigCount, Allocator.Persistent);
@@ -239,6 +299,7 @@ public partial struct ObstacleGridSystem : ISystem
             new ObstacleField
             {
                 Passable = _passable, CellType = _cellType, NavHeight = _navHeight,
+                Clearance = _clearance,
                 CellComp = _cellComp, CompCount = _compCount,
                 BigVersion = _bigVersion, Version = 0, CoarseVersion = 0,
             });
@@ -249,6 +310,7 @@ public partial struct ObstacleGridSystem : ISystem
         if (_passable.IsCreated)    _passable.Dispose();
         if (_cellType.IsCreated)    _cellType.Dispose();
         if (_navHeight.IsCreated)   _navHeight.Dispose();
+        if (_clearance.IsCreated)   _clearance.Dispose();
         if (_cellComp.IsCreated)    _cellComp.Dispose();
         if (_compCount.IsCreated)   _compCount.Dispose();
         if (_bigVersion.IsCreated)  _bigVersion.Dispose();
@@ -263,6 +325,7 @@ public partial struct ObstacleGridSystem : ISystem
         var passable = fieldRef.ValueRO.Passable;
         var cellType = fieldRef.ValueRO.CellType;
         var navHeight = fieldRef.ValueRO.NavHeight;
+        var clearance = fieldRef.ValueRO.Clearance;
         var cellComp = fieldRef.ValueRO.CellComp;
         var compCount = fieldRef.ValueRO.CompCount;
         var bigVer   = fieldRef.ValueRO.BigVersion;
@@ -437,6 +500,16 @@ public partial struct ObstacleGridSystem : ISystem
         // Derive the UNION passability the connectivity machinery consumes.
         for (int i = 0; i < passable.Length; i++) passable[i] = NavCell.ToPassable(cellType[i]);
 
+        // Wall-distance clearance: for each cell, the cell-distance from its
+        // centre to the nearest BROKEN edge (a neighbour it isn't NavCell.
+        // Connected to — impassable, the sheer side of a wall — or the map
+        // border). One context-free scalar; thresholded per query by HalfWidth.
+        // Folded into the per-tile checksum below so a structure near a tile
+        // SEAM (whose clearance bleeds up to MaxClearance cells into the
+        // neighbour without changing that neighbour's union passability) still
+        // bumps the neighbour's BigVersion and rebuilds wide-unit fields there.
+        ComputeClearance(cellType, clearance);
+
         bool anyMoved = false;
         var floodStack = new NativeArray<int>(NavGrid.SubCells, Allocator.Temp);
         for (int by = 0; by < NavGrid.BigTilesPerAxis; by++)
@@ -447,7 +520,14 @@ public partial struct ObstacleGridSystem : ISystem
             int sum = 0;
             for (int ly = 0; ly < NavGrid.SubPerAxis; ly++)
             for (int lx = 0; lx < NavGrid.SubPerAxis; lx++)
-                sum = sum * 31 + passable[NavGrid.Index(origin.x + lx, origin.y + ly)];
+            {
+                int ci = NavGrid.Index(origin.x + lx, origin.y + ly);
+                sum = sum * 31 + passable[ci];
+                // Quantise clearance (0.5-cell steps, capped) into the same hash
+                // so any change to the eroded graph — not just the union graph —
+                // dirties this tile.
+                sum = sum * 31 + (int)(math.min(clearance[ci], NavGrid.MaxClearance) * 2f);
+            }
             if (sum != _bigChecksum[b])
             {
                 _bigChecksum[b] = sum;
@@ -481,6 +561,73 @@ public partial struct ObstacleGridSystem : ISystem
         h ^= (v >> 16) & 0xFF;  h *= 16777619u;
         h ^= (v >> 24) & 0xFF;  h *= 16777619u;
         return h;
+    }
+
+    // Two-pass chamfer distance transform giving each passable cell the
+    // Euclidean-ish CELL distance from its centre to the nearest broken edge.
+    // A "broken edge" is a boundary to a cell this one is NOT NavCell.Connected
+    // to (impassable, or the sheer face of a wall) or the map border. Seeds sit
+    // at 0.5 (half a cell from the touched face); impassable cells are 0.
+    // Propagation crosses only Connected edges so distance never leaks THROUGH a
+    // wall, and the diagonal cost is sqrt(2) so diagonal gaps aren't over-wide
+    // (Manhattan would read a sqrt(2) gap as 2). Deterministic raster order.
+    private static void ComputeClearance(NativeArray<byte> cellType, NativeArray<float> dist)
+    {
+        const float INF = 1e9f;
+        float d1 = 1f, d2 = math.sqrt(2f);
+        int res = NavGrid.Res;
+
+        for (int y = 0; y < res; y++)
+        for (int x = 0; x < res; x++)
+        {
+            int i = NavGrid.Index(x, y);
+            byte t = cellType[i];
+            if (t == NavCell.Impassable) { dist[i] = 0f; continue; }
+            float d = INF;
+            if (x == 0       || !NavCell.Connected(t, cellType[NavGrid.Index(x - 1, y)])) d = 0.5f;
+            if (x == res - 1 || !NavCell.Connected(t, cellType[NavGrid.Index(x + 1, y)])) d = 0.5f;
+            if (y == 0       || !NavCell.Connected(t, cellType[NavGrid.Index(x, y - 1)])) d = 0.5f;
+            if (y == res - 1 || !NavCell.Connected(t, cellType[NavGrid.Index(x, y + 1)])) d = 0.5f;
+            dist[i] = d;
+        }
+
+        // forward pass: pull from already-settled W, NW, N, NE neighbours
+        for (int y = 0; y < res; y++)
+        for (int x = 0; x < res; x++)
+        {
+            int i = NavGrid.Index(x, y);
+            byte t = cellType[i];
+            if (t == NavCell.Impassable) continue;
+            float d = dist[i];
+            d = ClearRelax(d, t, x - 1, y,     d1, cellType, dist, res);
+            d = ClearRelax(d, t, x - 1, y - 1, d2, cellType, dist, res);
+            d = ClearRelax(d, t, x,     y - 1, d1, cellType, dist, res);
+            d = ClearRelax(d, t, x + 1, y - 1, d2, cellType, dist, res);
+            dist[i] = d;
+        }
+        // backward pass: pull from E, SE, S, SW; cap at MaxClearance
+        for (int y = res - 1; y >= 0; y--)
+        for (int x = res - 1; x >= 0; x--)
+        {
+            int i = NavGrid.Index(x, y);
+            byte t = cellType[i];
+            if (t == NavCell.Impassable) continue;
+            float d = dist[i];
+            d = ClearRelax(d, t, x + 1, y,     d1, cellType, dist, res);
+            d = ClearRelax(d, t, x + 1, y + 1, d2, cellType, dist, res);
+            d = ClearRelax(d, t, x,     y + 1, d1, cellType, dist, res);
+            d = ClearRelax(d, t, x - 1, y + 1, d2, cellType, dist, res);
+            dist[i] = math.min(d, NavGrid.MaxClearance);
+        }
+    }
+
+    private static float ClearRelax(float d, byte fromType, int nx, int ny, float cost,
+                                    NativeArray<byte> cellType, NativeArray<float> dist, int res)
+    {
+        if (nx < 0 || nx >= res || ny < 0 || ny >= res) return d;
+        int ni = NavGrid.Index(nx, ny);
+        if (!NavCell.Connected(fromType, cellType[ni])) return d;   // never flow across a wall
+        return math.min(d, dist[ni] + cost);
     }
 
     private static void LabelTile(NativeArray<byte> cellType, NativeArray<byte> cellComp,
@@ -547,6 +694,22 @@ public partial struct FlowFieldSystem : ISystem
     private NativeArray<int>      _blockUsed;
     private NativeParallelHashMap<int, int> _pathMap;
 
+    // ---- per-width connected-component cache (lazily built) ----------------
+    // The union CellComp/CompCount in ObstacleField label the grid for a point
+    // unit. A width-W unit sees an ERODED graph (cells with clearance < W/2 are
+    // walls), which can split a union component into several. We label that
+    // eroded graph per distinct width, ON DEMAND, and cache up to MaxWidthSlots
+    // widths (LRU). Each resident width keeps a full-grid CellComp, a per-big-
+    // tile CompCount, and the BigVersion each tile was last labelled against —
+    // so a structural change relabels only the dirtied tiles, only for widths
+    // actually in use. This is what lets formations of arbitrary, caller-chosen
+    // width path the whole map without precomputing every size.
+    private NativeArray<byte> _wComp;       // [MaxWidthSlots * CellCount]
+    private NativeArray<byte> _wCompCount;  // [MaxWidthSlots * BigCount]
+    private NativeArray<int>  _wTileVer;    // [MaxWidthSlots * BigCount]  (BigVersion labelled against)
+    private NativeArray<int>  _wWidth;      // [MaxWidthSlots]             (width resident here; -1 empty)
+    private NativeArray<int>  _wUsed;       // [MaxWidthSlots]             (LRU tick)
+
     private const int SeedScale = NavGrid.SubPerAxis * 14;
 
     public void OnCreate(ref SystemState state)
@@ -562,6 +725,13 @@ public partial struct FlowFieldSystem : ISystem
         _pathMap    = new NativeParallelHashMap<int, int>(NavGrid.MaxPaths * 2, Allocator.Persistent);
         for (int i = 0; i < _blockOf.Length; i++)  _blockOf[i]  = -1;
         for (int i = 0; i < _blockKey.Length; i++) _blockKey[i] = -1;
+
+        _wComp      = new NativeArray<byte>(NavGrid.MaxWidthSlots * NavGrid.CellCount, Allocator.Persistent);
+        _wCompCount = new NativeArray<byte>(NavGrid.MaxWidthSlots * NavGrid.BigCount, Allocator.Persistent);
+        _wTileVer   = new NativeArray<int>(NavGrid.MaxWidthSlots * NavGrid.BigCount, Allocator.Persistent);
+        _wWidth     = new NativeArray<int>(NavGrid.MaxWidthSlots, Allocator.Persistent);
+        _wUsed      = new NativeArray<int>(NavGrid.MaxWidthSlots, Allocator.Persistent);
+        for (int i = 0; i < _wWidth.Length; i++) _wWidth[i] = -1;
 
         state.EntityManager.AddComponentData(state.EntityManager.CreateEntity(), new NavFields
         {
@@ -583,6 +753,11 @@ public partial struct FlowFieldSystem : ISystem
         if (_blockKey.IsCreated)   _blockKey.Dispose();
         if (_blockUsed.IsCreated)  _blockUsed.Dispose();
         if (_pathMap.IsCreated)    _pathMap.Dispose();
+        if (_wComp.IsCreated)      _wComp.Dispose();
+        if (_wCompCount.IsCreated) _wCompCount.Dispose();
+        if (_wTileVer.IsCreated)   _wTileVer.Dispose();
+        if (_wWidth.IsCreated)     _wWidth.Dispose();
+        if (_wUsed.IsCreated)      _wUsed.Dispose();
     }
 
     [BurstCompile]
@@ -604,29 +779,58 @@ public partial struct FlowFieldSystem : ISystem
         var map = lookup.ValueRW.Map;
         map.Clear();
 
-        var goals = new NativeList<int2>(Allocator.Temp);
+        // Distinct (goalCell, width) pairs in flight this tick. Width travels on
+        // DesiredDestination.PathWidth (the explicit caller input); <=1 means a
+        // point unit and reproduces the original behaviour exactly.
+        var goals  = new NativeList<int3>(Allocator.Temp);   // (gc.x, gc.y, width)
+        var widths = new NativeList<int>(Allocator.Temp);    // distinct active widths
         foreach (var dest in SystemAPI.Query<RefRO<DesiredDestination>>())
         {
             if (!dest.ValueRO.Has || !dest.ValueRO.UseFlowField) continue;
             int2 gc = NavGrid.Cell(dest.ValueRO.Value);
             if (!NavGrid.InBounds(gc.x, gc.y)) continue;
+            int w = math.clamp(math.max(1, dest.ValueRO.PathWidth), 1, NavGrid.MaxWidth);
+
+            // A goal's width must be resident in the component cache this tick.
+            // Bound distinct widths to MaxWidthSlots so the lazy cache never has
+            // to evict a width another goal still needs within the same tick.
+            // Excess distinct widths spill (those units fall back to straight
+            // line for a tick), exactly as excess goals spill past MaxPaths.
+            bool wseen = false;
+            for (int i = 0; i < widths.Length; i++) if (widths[i] == w) { wseen = true; break; }
+            if (!wseen && widths.Length >= NavGrid.MaxWidthSlots) continue;
+
             bool seen = false;
-            for (int i = 0; i < goals.Length; i++) if (math.all(goals[i] == gc)) { seen = true; break; }
-            if (!seen && goals.Length < NavGrid.MaxPaths) goals.Add(gc);
+            for (int i = 0; i < goals.Length; i++)
+                if (goals[i].x == gc.x && goals[i].y == gc.y && goals[i].z == w) { seen = true; break; }
+            if (!seen && goals.Length < NavGrid.MaxPaths) goals.Add(new int3(gc.x, gc.y, w));
+            if (!wseen) widths.Add(w);
         }
+
+        // Bring every active width's eroded-graph labels up to date (only the
+        // tiles whose BigVersion moved are relabelled — see EnsureWidthLabels).
+        var labelStack = new NativeArray<int>(NavGrid.SubCells, Allocator.Temp);
+        for (int i = 0; i < widths.Length; i++)
+            GetWidthCache(widths[i], tick, obs, labelStack);
 
         for (int g = 0; g < goals.Length; g++)
         {
-            int2 gc = goals[g];
-            int slot = FindSlot(slots, gc);
+            int2 gc = new int2(goals[g].x, goals[g].y);
+            int  w  = goals[g].z;
+            int ci  = FindWidthCache(w);
+            if (ci < 0) continue;   // width not resident (shouldn't happen: capped above)
+            var wComp      = _wComp.GetSubArray(ci * NavGrid.CellCount, NavGrid.CellCount);
+            var wCompCount = _wCompCount.GetSubArray(ci * NavGrid.BigCount, NavGrid.BigCount);
+
+            int slot = FindSlot(slots, gc, w);
+            bool fresh = slot >= 0;
             if (slot < 0) slot = AllocSlot(slots, tick);
             var sl = slots[slot];
-            bool fresh = sl.Valid != 0 && math.all(sl.GoalCell == gc);
-            sl.GoalCell = gc; sl.GoalBig = NavGrid.BigOf(gc); sl.UsedTick = tick; sl.Valid = 1;
+            sl.GoalCell = gc; sl.GoalBig = NavGrid.BigOf(gc); sl.Width = w; sl.UsedTick = tick; sl.Valid = 1;
 
             if (!fresh || sl.BuiltCoarseVersion != obs.CoarseVersion)
             {
-                BuildCoarse(coarse, slot, gc, obs.CellComp, obs.CompCount);
+                BuildCoarse(coarse, slot, gc, wComp, wCompCount);
                 sl.BuiltCoarseVersion = obs.CoarseVersion;
                 int baseK = slot * NavGrid.BigCount;
                 for (int b = 0; b < NavGrid.BigCount; b++)
@@ -636,7 +840,7 @@ public partial struct FlowFieldSystem : ISystem
                 }
             }
             slots[slot] = sl;
-            map.TryAdd(NavGrid.Index(gc), slot);
+            map.TryAdd(NavGrid.PathKey(NavGrid.Index(gc), w), slot);
         }
 
         var seenNodes = new NativeHashSet<int>(256, Allocator.Temp);
@@ -645,11 +849,16 @@ public partial struct FlowFieldSystem : ISystem
         foreach (var (xform, dest) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<DesiredDestination>>())
         {
             if (!dest.ValueRO.Has || !dest.ValueRO.UseFlowField) continue;
+            int w  = math.clamp(math.max(1, dest.ValueRO.PathWidth), 1, NavGrid.MaxWidth);
             int gi = NavGrid.Index(NavGrid.Cell(dest.ValueRO.Value));
-            if (!map.TryGetValue(gi, out int slot)) continue;
+            if (!map.TryGetValue(NavGrid.PathKey(gi, w), out int slot)) continue;
             int2 cell = NavGrid.Cell(new float2(xform.ValueRO.Position.x, xform.ValueRO.Position.z));
             if (!NavGrid.InBounds(cell.x, cell.y)) continue;
-            MarkCorridor(seenNodes, seenTiles, keys, coarse, obs.CellComp, obs.CompCount, slot, cell);
+            int ci = FindWidthCache(w);
+            if (ci < 0) continue;
+            var wComp      = _wComp.GetSubArray(ci * NavGrid.CellCount, NavGrid.CellCount);
+            var wCompCount = _wCompCount.GetSubArray(ci * NavGrid.BigCount, NavGrid.BigCount);
+            MarkCorridor(seenNodes, seenTiles, keys, coarse, wComp, wCompCount, slot, cell);
         }
 
         var requests = new NativeList<int3>(Allocator.TempJob);   // passed to a job
@@ -682,24 +891,141 @@ public partial struct FlowFieldSystem : ISystem
                 ra[j + 1] = cur;
             }
 
-            new EikonalFineBuildJob
+            // The Eikonal solver floods over the WIDTH-eroded graph, so its
+            // CellComp (border seeding) and clearance gate depend on the slot's
+            // width. Requests carry mixed widths; run one job per distinct width,
+            // each fed that width's component labels and HalfWidth threshold. The
+            // per-slot goal-outward ordering is preserved inside each width's
+            // filtered sublist, and cross-seam seeding only ever reads a same-slot
+            // (hence same-width) neighbour block, so the split is exact.
+            var sub = new NativeList<int3>(Allocator.TempJob);
+            for (int wi = 0; wi < widths.Length; wi++)
             {
-                Requests   = ra,
-                Coarse     = coarse,
-                Slots      = slots,
-                Passable   = obs.Passable,
-                CellType   = obs.CellType,
-                CellComp   = obs.CellComp,
-                BlockOf    = blockOf,
-                FineDir    = nf.ValueRW.FineDir,
-                FineCost   = nf.ValueRW.FineCost,
-                FineBigVer = fineBigVer,
-                BigVersion = obs.BigVersion,
-            }.Run();   // sequential build; Run() executes the Burst job on this thread
-                       // (synchronous like the old Complete(), and Temp-safe)
+                int w  = widths[wi];
+                int ci = FindWidthCache(w);
+                if (ci < 0) continue;
+                sub.Clear();
+                for (int i = 0; i < ra.Length; i++)
+                    if (slots[ra[i].y].Width == w) sub.Add(ra[i]);
+                if (sub.Length == 0) continue;
+
+                new EikonalFineBuildJob
+                {
+                    Requests   = sub.AsArray(),
+                    Coarse     = coarse,
+                    Slots      = slots,
+                    Passable   = obs.Passable,
+                    CellType   = obs.CellType,
+                    Clearance  = obs.Clearance,
+                    HalfW      = NavGrid.HalfWidth(w),
+                    CellComp   = _wComp.GetSubArray(ci * NavGrid.CellCount, NavGrid.CellCount),
+                    BlockOf    = blockOf,
+                    FineDir    = nf.ValueRW.FineDir,
+                    FineCost   = nf.ValueRW.FineCost,
+                    FineBigVer = fineBigVer,
+                    BigVersion = obs.BigVersion,
+                }.Run();   // sequential build; Run() executes the Burst job on this thread
+                           // (synchronous like the old Complete(), and Temp-safe)
+            }
+            sub.Dispose();
         }
 
-        goals.Dispose(); seenNodes.Dispose(); seenTiles.Dispose(); keys.Dispose(); requests.Dispose();
+        goals.Dispose(); widths.Dispose(); labelStack.Dispose();
+        seenNodes.Dispose(); seenTiles.Dispose(); keys.Dispose(); requests.Dispose();
+    }
+
+    // ---- per-width component cache ----------------------------------------
+    // Return the cache row holding width w, allocating/evicting (LRU) if needed,
+    // and relabel any tiles whose BigVersion has moved since this row last saw
+    // them. On a fresh allocation every tile is stale, so the whole grid is
+    // labelled for w once; thereafter only structurally-changed tiles relabel.
+    private int GetWidthCache(int w, int tick, in ObstacleField obs, NativeArray<int> stack)
+    {
+        int ci = FindWidthCache(w);
+        if (ci < 0)
+        {
+            int pick = 0, oldest = int.MaxValue;
+            for (int s = 0; s < NavGrid.MaxWidthSlots; s++)
+            {
+                if (_wWidth[s] < 0) { pick = s; oldest = -1; break; }
+                if (_wUsed[s] < oldest) { oldest = _wUsed[s]; pick = s; }
+            }
+            ci = pick;
+            _wWidth[ci] = w;
+            int vbase = ci * NavGrid.BigCount;
+            for (int b = 0; b < NavGrid.BigCount; b++) _wTileVer[vbase + b] = int.MinValue;   // force full relabel
+        }
+        _wUsed[ci] = tick;
+
+        float halfW = NavGrid.HalfWidth(w);
+        int cbase = ci * NavGrid.CellCount;
+        int bbase = ci * NavGrid.BigCount;
+        var comp      = _wComp.GetSubArray(cbase, NavGrid.CellCount);
+        var compCount = _wCompCount.GetSubArray(bbase, NavGrid.BigCount);
+        for (int by = 0; by < NavGrid.BigTilesPerAxis; by++)
+        for (int bx = 0; bx < NavGrid.BigTilesPerAxis; bx++)
+        {
+            int b = NavGrid.BigIndex(bx, by);
+            if (_wTileVer[bbase + b] == obs.BigVersion[b]) continue;
+            int2 origin = new int2(bx, by) * NavGrid.SubPerAxis;
+            LabelTileW(obs.CellType, obs.Clearance, halfW, comp, compCount, origin, b, stack);
+            _wTileVer[bbase + b] = obs.BigVersion[b];
+        }
+        return ci;
+    }
+
+    private int FindWidthCache(int w)
+    {
+        for (int s = 0; s < NavGrid.MaxWidthSlots; s++) if (_wWidth[s] == w) return s;
+        return -1;
+    }
+
+    // Label 4-connected components of the WIDTH-ERODED graph within one big tile:
+    // a cell is open iff it is standable (not Impassable) AND has clearance for
+    // half the width. Identical to ObstacleGridSystem.LabelTile when halfW = 0.5
+    // (every passable cell qualifies), so width 1 yields the union labelling.
+    private static void LabelTileW(NativeArray<byte> cellType, NativeArray<float> clearance, float halfW,
+                                   NativeArray<byte> cellComp, NativeArray<byte> compCount,
+                                   int2 origin, int b, NativeArray<int> stack)
+    {
+        int sub = NavGrid.SubPerAxis;
+        for (int ly = 0; ly < sub; ly++)
+        for (int lx = 0; lx < sub; lx++)
+            cellComp[NavGrid.Index(origin.x + lx, origin.y + ly)] = 255;
+
+        byte comps = 0;
+        for (int ly = 0; ly < sub; ly++)
+        for (int lx = 0; lx < sub; lx++)
+        {
+            int idx = NavGrid.Index(origin.x + lx, origin.y + ly);
+            bool open = cellType[idx] != NavCell.Impassable && clearance[idx] >= halfW;
+            if (!open || cellComp[idx] != 255) continue;
+            byte id = comps < NavGrid.MaxComp ? comps : (byte)(NavGrid.MaxComp - 1);
+            if (comps < NavGrid.MaxComp) comps++;
+
+            int top = 0;
+            stack[top++] = ly * sub + lx;
+            cellComp[idx] = id;
+            while (top > 0)
+            {
+                int si = stack[--top];
+                int cx = si % sub, cy = si / sub;
+                byte fromType = cellType[NavGrid.Index(origin.x + cx, origin.y + cy)];
+                for (int d = 0; d < 4; d++)
+                {
+                    int nx = cx + (d == 0 ? 1 : d == 1 ? -1 : 0);
+                    int ny = cy + (d == 2 ? 1 : d == 3 ? -1 : 0);
+                    if (nx < 0 || nx >= sub || ny < 0 || ny >= sub) continue;
+                    int nidx = NavGrid.Index(origin.x + nx, origin.y + ny);
+                    if (cellComp[nidx] != 255) continue;
+                    if (cellType[nidx] == NavCell.Impassable || clearance[nidx] < halfW) continue;  // width-eroded
+                    if (!NavCell.Connected(fromType, cellType[nidx])) continue;                     // type-aware edge
+                    cellComp[nidx] = id;
+                    stack[top++] = ny * sub + nx;
+                }
+            }
+        }
+        compCount[b] = comps;
     }
 
     private static long SortKey(int3 req, NativeArray<int> coarse)
@@ -712,10 +1038,10 @@ public partial struct FlowFieldSystem : ISystem
         return (long)req.y * (1L << 20) + math.min(cost, (1 << 20) - 1);
     }
 
-    private static int FindSlot(NativeArray<PathSlot> slots, int2 gc)
+    private static int FindSlot(NativeArray<PathSlot> slots, int2 gc, int width)
     {
         for (int s = 0; s < NavGrid.MaxPaths; s++)
-            if (slots[s].Valid != 0 && math.all(slots[s].GoalCell == gc)) return s;
+            if (slots[s].Valid != 0 && math.all(slots[s].GoalCell == gc) && slots[s].Width == width) return s;
         return -1;
     }
     private static int AllocSlot(NativeArray<PathSlot> slots, int tick)
@@ -898,7 +1224,9 @@ public partial struct FlowFieldSystem : ISystem
         [ReadOnly] public NativeArray<PathSlot>  Slots;
         [ReadOnly] public NativeArray<byte>      Passable;
         [ReadOnly] public NativeArray<byte>      CellType;
-        [ReadOnly] public NativeArray<byte>      CellComp;
+        [ReadOnly] public NativeArray<float>     Clearance;  // wall-distance field (cells); width gate
+        public float HalfW;                                  // HalfWidth(slot width) — the clearance threshold
+        [ReadOnly] public NativeArray<byte>      CellComp;   // WIDTH-eroded components for this job's width
         [ReadOnly] public NativeArray<int>       BigVersion;
         [ReadOnly] public NativeArray<int>       BlockOf;    // slot*BigCount+big -> block (neighbour lookup)
 
@@ -910,6 +1238,21 @@ public partial struct FlowFieldSystem : ISystem
         // of the solver), matching the coarse octile scale + SeedScale.
         private const float EikF = 10f;
         private const float INF  = 1e15f;
+
+        // Width-aware standability: a cell holds cost for this job iff a body of
+        // the job's width fits centred on it. The one predicate that turns the
+        // point-unit solver into a width-W solver; HalfW = 0.5 (width 1) admits
+        // every non-impassable cell, so width 1 is byte-identical to before.
+        private bool StandW(int2 c)
+        {
+            int i = NavGrid.Index(c);
+            return CellType[i] != NavCell.Impassable && Clearance[i] >= HalfW;
+        }
+        // A traversable edge for this width: both ends fit AND the surfaces are
+        // NavCell.Connected (no sheer ground<->roof step).
+        private bool EdgeW(int2 a, int2 b) =>
+            StandW(a) && StandW(b) &&
+            NavCell.Connected(CellType[NavGrid.Index(a)], CellType[NavGrid.Index(b)]);
 
         public void Execute()
         {
@@ -939,7 +1282,7 @@ public partial struct FlowFieldSystem : ISystem
 
             // --- seeds (frozen boundary conditions) ---
             PathSlot sl = Slots[slot];
-            if (math.all(sl.GoalBig == bcoord))
+            if (math.all(sl.GoalBig == bcoord) && StandW(sl.GoalCell))
             {
                 int2 gl = sl.GoalCell - cellOrigin;
                 int gi = gl.y * sub + gl.x;
@@ -972,16 +1315,16 @@ public partial struct FlowFieldSystem : ISystem
                     int lx = e == 0 ? 0 : e == 1 ? sub - 1 : t;
                     int ly = e == 2 ? 0 : e == 3 ? sub - 1 : t;
                     int2 cell = cellOrigin + new int2(lx, ly);
-                    if (CellType[NavGrid.Index(cell)] == NavCell.Impassable) continue;
+                    if (!StandW(cell)) continue;
 
                     int2 ncell = new int2(e == 0 ? cell.x - 1 : e == 1 ? cell.x + 1 : cell.x,
                                           e == 2 ? cell.y - 1 : e == 3 ? cell.y + 1 : cell.y);
                     if (!NavGrid.InBounds(ncell.x, ncell.y)) continue;
-                    // Type-aware border edge: only connect components across the
-                    // tile boundary when the two cells are actually traversable
-                    // between (same surface or Transition-bridged), never across
-                    // a sheer ground<->roof step.
-                    if (!NavCell.Connected(CellType[NavGrid.Index(cell)], CellType[NavGrid.Index(ncell)])) continue;
+                    // Width-aware border edge: connect components across the tile
+                    // boundary only when a body of this width can actually pass
+                    // between the two cells (both fit, surfaces Connected) — never
+                    // across a sheer step or through a sub-width pinch.
+                    if (!EdgeW(cell, ncell)) continue;
 
                     int myCost = Coarse[baseC + big   * NavGrid.MaxComp + CellComp[NavGrid.Index(cell)]];
                     int nbCost = Coarse[baseC + nbBig * NavGrid.MaxComp + CellComp[NavGrid.Index(ncell)]];
@@ -1030,8 +1373,9 @@ public partial struct FlowFieldSystem : ISystem
                 FineDir[baseCost + si] = float2.zero;
                 float cc = FineCost[baseCost + si];
                 if (cc >= INF) continue;
-                byte ct = CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)];
-                if (ct == NavCell.Impassable) continue;
+                int2 here = new int2(cellOrigin.x + lx, cellOrigin.y + ly);
+                byte ct = CellType[NavGrid.Index(here)];
+                if (!StandW(here)) continue;   // no heading on a cell this width can't occupy
 
                 // Gradient only over CONNECTED neighbours. Without this, a roof
                 // edge cell sees the cheap ground cell across the sheer face
@@ -1065,10 +1409,10 @@ public partial struct FlowFieldSystem : ISystem
                 int nsi = nly * sub + nlx;
                 if (stateArr[nsi] == 2) continue;
                 int2 ncell = cellOrigin + new int2(nlx, nly);
-                // Type-aware: cost only flows between Connected cells, so the
-                // field never propagates across a sheer ground<->roof step.
-                if (!NavCell.Connected(CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)],
-                                       CellType[NavGrid.Index(ncell)])) continue;
+                // Width-aware: cost flows only across an edge a body of this width
+                // can traverse (both ends fit, surfaces Connected), so the field
+                // never propagates through a sub-width pinch or a sheer step.
+                if (!EdgeW(cellOrigin + new int2(lx, ly), ncell)) continue;
 
                 float t = SolveEikonal(nlx, nly, sub, cellOrigin, baseCost, stateArr);
                 if (t < FineCost[baseCost + nsi])
@@ -1106,8 +1450,7 @@ public partial struct FlowFieldSystem : ISystem
                 if (nlx < 0 || nlx >= sub || nly < 0 || nly >= sub) continue;
                 if (stateArr[nly * sub + nlx] != 2) continue;            // upwind: frozen neighbors only
                 int2 ncell = cellOrigin + new int2(nlx, nly);
-                if (!NavCell.Connected(CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)],
-                                       CellType[NavGrid.Index(ncell)])) continue;
+                if (!EdgeW(cellOrigin + new int2(lx, ly), ncell)) continue;
                 best = math.min(best, FineCost[baseCost + nly * sub + nlx]);
             }
             return best;
@@ -1116,11 +1459,13 @@ public partial struct FlowFieldSystem : ISystem
         private float SubCostOr(int baseCost, int lx, int ly, int sub, int2 cellOrigin, byte fromType, float fallback)
         {
             if (lx < 0 || lx >= sub || ly < 0 || ly >= sub) return fallback;
-            // Across a non-connected boundary (sheer ground<->roof), treat the
-            // neighbour as if it were this cell's own cost, so it adds nothing to
-            // the gradient — the direction follows only reachable cells.
-            byte nType = CellType[NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly)];
-            if (!NavCell.Connected(fromType, nType)) return fallback;
+            // Across a non-connected boundary (sheer ground<->roof) OR into a
+            // cell too narrow for this width, treat the neighbour as this cell's
+            // own cost so it adds nothing to the gradient — the heading follows
+            // only cells the body can actually occupy.
+            int ni = NavGrid.Index(cellOrigin.x + lx, cellOrigin.y + ly);
+            byte nType = CellType[ni];
+            if (!NavCell.Connected(fromType, nType) || Clearance[ni] < HalfW) return fallback;
             float c = FineCost[baseCost + ly * sub + lx];
             return c >= INF ? fallback : c;
         }

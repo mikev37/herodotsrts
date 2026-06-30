@@ -56,6 +56,7 @@ public partial struct SteeringSystem : ISystem
             CellType         = obstacles.CellType,
             NavHeight        = obstacles.NavHeight,
             CellComp         = obstacles.CellComp,
+            Clearance        = obstacles.Clearance,
         }.ScheduleParallel();
     }
 
@@ -74,6 +75,7 @@ public partial struct SteeringSystem : ISystem
         [ReadOnly] public NativeArray<byte> CellType;
         [ReadOnly] public NativeArray<float> NavHeight;
         [ReadOnly] public NativeArray<byte> CellComp;
+        [ReadOnly] public NativeArray<float> Clearance;
 
         private void Execute(
             Entity self,
@@ -97,10 +99,11 @@ public partial struct SteeringSystem : ISystem
             if (dest.Has)
             {
                 float2 dir = float2.zero;
+                int W = math.max(1, dest.PathWidth);
                 if (dest.UseFlowField)
                 {
                     int gi = NavGrid.Index(NavGrid.Cell(dest.Value));
-                    if (PathMap.TryGetValue(gi, out int slot))
+                    if (PathMap.TryGetValue(NavGrid.PathKey(gi, W), out int slot))
                     {
                         int2 c = NavGrid.Cell(pos);
                         if (NavGrid.InBounds(c.x, c.y))
@@ -115,8 +118,17 @@ public partial struct SteeringSystem : ISystem
                 }
                 if (math.lengthsq(dir) < 1e-4f)
                 {
-                    float2 to = dest.Value - pos;
-                    if (math.length(to) > ArriveRadius) dir = math.normalizesafe(to);
+                    // Stranded in a sub-width cell: climb the clearance gradient back to room the body fits.
+                    int2 c = NavGrid.Cell(pos);
+                    if (W > 1 && NavGrid.InBounds(c.x, c.y) &&
+                        Clearance[NavGrid.Index(c.x, c.y)] < NavGrid.HalfWidth(W))
+                        dir = NavGrid.ClearanceGradient(Clearance, CellType, c);
+
+                    if (math.lengthsq(dir) < 1e-4f)
+                    {
+                        float2 to = dest.Value - pos;
+                        if (math.length(to) > ArriveRadius) dir = math.normalizesafe(to);
+                    }
                 }
                 vel.desiredValue = math.lerp(vel.desiredValue, dir * locomotion, Dt);
                 desired += vel.desiredValue;
@@ -148,11 +160,13 @@ public partial struct SteeringSystem : ISystem
   
             float2 normalSum = float2.zero;
             float penetration = 0f;   // 0 = clear, 1 = pressed against a cell center
-            float falloff = radius.Value + NavGrid.CellSize;
+            // Ring scales with body radius; ring 1 reproduces the original single-cell scan.
+            int ring = math.max(1, (int)math.ceil(radius.Value / NavGrid.CellSize));
+            float falloff = radius.Value + ring * NavGrid.CellSize;
             int2 cell = NavGrid.Cell(pos);
 
-            for (int ox = -1; ox <= 1; ox++)
-            for (int oy = -1; oy <= 1; oy++)
+            for (int ox = -ring; ox <= ring; ox++)
+            for (int oy = -ring; oy <= ring; oy++)
             {
                 int nx = cell.x + ox, ny = cell.y + oy;
                 if (!NavGrid.InBounds(nx, ny)) continue;
