@@ -57,7 +57,7 @@ public partial struct AttackTimerSystem : ISystem
         private void Execute(
             [ChunkIndexInQuery] int sortKey,
             in LocalTransform xform,
-            in Team team,
+            in Player player,
             in Velocity vel,
             in CombatTarget target,
             in Ranged ranged,
@@ -89,7 +89,7 @@ public partial struct AttackTimerSystem : ISystem
                     attack.Timer -= Dt;
                     if (attack.Timer <= 0f)
                     {
-                        Fire(sortKey, xform, team, target, ranged, slope, ref attack);
+                        Fire(sortKey, xform, player, target, ranged, slope, ref attack);
                         attack.Phase = AttackPhase.Cooldown;
                         attack.Timer += attack.Cooldown;   // += carries the sub-tick remainder
                     }
@@ -106,7 +106,7 @@ public partial struct AttackTimerSystem : ISystem
             }
         }
 
-        private void Fire(int sortKey, in LocalTransform xform, in Team team,
+        private void Fire(int sortKey, in LocalTransform xform, in Player player,
                           in CombatTarget target,
                           in Ranged ranged, in GroundSpeedMultiplier slope, ref Attack attack)
         {
@@ -140,7 +140,7 @@ public partial struct AttackTimerSystem : ISystem
             {
                 Velocity = direction * attack.ProjSpeed,
                 Damage = damage,
-                Team = team.Value,
+                Player = player.Value,
                 Life = life,
                 TotalLife = life,
                 Rise = attack.ProjRise,

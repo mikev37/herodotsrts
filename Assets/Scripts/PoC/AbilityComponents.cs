@@ -62,7 +62,7 @@ public struct AbilityField : IComponentData
 {
     public int FieldId;
     public int AbilityId;           // index into AbilityManager's registry (VFX lookup)
-    public int Team;
+    public int Player;              // owning player id (ally/enemy resolution)
     public AffectFilter Affects;
     public ShapeType Shape;
     public float Radius, Width, Length;
@@ -110,6 +110,7 @@ public struct PendingCast : IComponentData
     public byte   Slot;
     public int    AbilityId;
     public uint   FireTick;
+    public uint   CastTick;    // tick at which the cast was committed (for spend-class ordering)
     public float2 TargetPos;   // clicked point at commit (WorldPoint geometry)
 }
 

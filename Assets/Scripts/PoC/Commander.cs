@@ -5,6 +5,7 @@ using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 // ===========================================================================
 // COMMANDER — the shared order API and THE single channel into the simulation.
@@ -19,7 +20,7 @@ using UnityEngine;
 //
 // The STREAM (outbox / recording / mode) is static — shared by all Commander
 // instances — because the sim has exactly one command timeline. Each instance
-// stamps its own team as PlayerId. Inspector mode/fileName on the instance with
+// stamps its own player id as PlayerId. Inspector mode/fileName on the instance with
 // configuresStream ticked configures the shared stream (use your PlayerCommander).
 //
 // In Network mode, run AI commanders on ONE machine only: their orders enter
@@ -30,13 +31,13 @@ public abstract class Commander : MonoBehaviour
     public enum LockstepMode { Live, Record, Playback, Network }
 
     [Header("Commander")]
-    [SerializeField] protected int team = 0;
-    public int Team => team;
+    [SerializeField, FormerlySerializedAs("team")] protected int player = 0;
+    public int Player => player;
 
-    // Runtime team assignment (Phase 4): in a network session the local
-    // PlayerCommander's team comes from the lobby (host-assigned via
+    // Runtime player assignment (Phase 4): in a network session the local
+    // PlayerCommander's id comes from the lobby (host-assigned via
     // LockstepNet), not the serialized Inspector value.
-    public void SetTeam(int newTeam) => team = newTeam;
+    public void SetPlayer(int newPlayer) => player = newPlayer;
 
     [Header("Lockstep stream (shared; configure on ONE instance)")]
     [Tooltip("Live = play normally; Record = play + save commands; Playback = replay a saved file; Network = LockstepNet distributes commands.")]
@@ -53,7 +54,7 @@ public abstract class Commander : MonoBehaviour
     public bool worldReady;
 
     protected EntityManager Em;
-    protected EntityQuery AllUnitsQuery;     // UnitTag + Team + LocalTransform
+    protected EntityQuery AllUnitsQuery;     // UnitTag + Player + LocalTransform
     private EntityQuery _clockQuery;
     private bool _ready;
 
@@ -74,7 +75,7 @@ public abstract class Commander : MonoBehaviour
         Em = world.EntityManager;
         AllUnitsQuery = Em.CreateEntityQuery(
             ComponentType.ReadOnly<UnitTag>(),
-            ComponentType.ReadOnly<Team>(),
+            ComponentType.ReadOnly<Player>(),
             ComponentType.ReadOnly<LocalTransform>(),
             ComponentType.Exclude<Immobile>());   // buildings/walls aren't selectable/orderable units
         _clockQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<SimClock>());
@@ -151,7 +152,7 @@ public abstract class Commander : MonoBehaviour
         lastOrder = $"Ability slot {slot} @ ({castPos.x:0.#},{castPos.y:0.#})";
     }
 
-    // Place building `defId` (this team's roster index; must be a
+    // Place building `defId` (this player's roster index; must be a
     // BuildingDefinition) centered near `pos`. Snapping and validation happen
     // deterministically at the execution tick (CommandApplySystem).
     protected void IssuePlaceBuilding(int defId, float2 pos)
@@ -161,7 +162,7 @@ public abstract class Commander : MonoBehaviour
         lastOrder = $"PlaceBuilding def {defId} @ ({pos.x:0.#},{pos.y:0.#})";
     }
 
-    // Demolish an own-team building by StableId (sets its health to 0 at the
+    // Demolish an own building by StableId (sets its health to 0 at the
     // execution tick; the normal death pipeline does the rest).
     protected void IssueDemolishBuilding(int stableId)
     {
@@ -177,7 +178,7 @@ public abstract class Commander : MonoBehaviour
         var cmd = new SimCommand
         {
             Tick           = CurrentTick() + (uint)LockstepConfig.InputDelayTicks,
-            PlayerId       = team,
+            PlayerId       = player,
             Kind           = kind,
             TargetPos      = pos,
             TargetStableId = targetId,
@@ -189,21 +190,116 @@ public abstract class Commander : MonoBehaviour
         if (Mode == LockstepMode.Record) RecordedList.Add(cmd);
     }
 
+    // Overload for commands that carry a secondary id (production unit defId, upgrade target defId).
+    private void Issue(CommandKind kind, float2 pos, int targetId, int targetId2, byte abilitySlot)
+    {
+        if (Mode == LockstepMode.Playback) return;
+        var cmd = new SimCommand
+        {
+            Tick            = CurrentTick() + (uint)LockstepConfig.InputDelayTicks,
+            PlayerId        = player,
+            Kind            = kind,
+            TargetPos       = pos,
+            TargetStableId  = targetId,
+            TargetStableId2 = targetId2,
+            AbilitySlot     = abilitySlot,
+            Units           = ToFixed(_selection),
+        };
+        Outbox.Enqueue(cmd);
+        if (Mode == LockstepMode.Record) RecordedList.Add(cmd);
+    }
+
+    // ---- economy verbs -------------------------------------------------------
+
+    protected void IssueHarvest(List<Entity> unitList, int nodeStableId)
+    {
+        if (unitList.Count == 0) return;
+        _selection.Clear();
+        foreach (var e in unitList)
+            if (Em.HasComponent<StableId>(e)) _selection.Add(Em.GetComponentData<StableId>(e).Value);
+        Issue(CommandKind.Harvest, default, nodeStableId, 0);
+        lastOrder = $"Harvest node {nodeStableId}";
+    }
+
+    protected void IssueSetRally(int buildingStableId, float2 pos)
+    {
+        Issue(CommandKind.SetRally, pos, buildingStableId, 0);
+        lastOrder = $"Rally → {pos}";
+    }
+
+    protected void IssueQueueProduction(int buildingStableId, int unitDefId)
+    {
+        Issue(CommandKind.QueueProduction, default, buildingStableId, unitDefId, 0);
+        lastOrder = $"Queue unit {unitDefId} at building {buildingStableId}";
+    }
+
+    protected void IssueCancelProduction(int buildingStableId, bool fromHead)
+    {
+        Issue(CommandKind.CancelProduction, default, buildingStableId, (byte)(fromHead ? 0 : 1));
+        lastOrder = $"Cancel production ({(fromHead ? "head" : "tail")})";
+    }
+
+    protected void IssueToggleBankPause(int bankStableId)
+    {
+        Issue(CommandKind.ToggleBankPause, default, bankStableId, 0);
+        lastOrder = "Toggle bank pause";
+    }
+
+    protected void IssuePlaceBlueprint(int defId, float2 pos)
+    {
+        Issue(CommandKind.PlaceBlueprint, pos, defId, 0);
+        lastOrder = $"Blueprint def {defId} @ {pos}";
+    }
+
+    protected void IssueToggleProducerLoop(int buildingStableId)
+    {
+        Issue(CommandKind.ToggleProducerLoop, default, buildingStableId, 0);
+        lastOrder = "Toggle loop";
+    }
+
+    protected void IssueToggleSpendPriority(int buildingStableId)
+    {
+        Issue(CommandKind.ToggleSpendPriority, default, buildingStableId, 0);
+        lastOrder = "Toggle spend priority";
+    }
+
+    protected void IssueMorph(List<Entity> unitList)
+    {
+        if (unitList.Count == 0) return;
+        _selection.Clear();
+        foreach (var e in unitList)
+            if (Em.HasComponent<StableId>(e)) _selection.Add(Em.GetComponentData<StableId>(e).Value);
+        Issue(CommandKind.Morph, default, 0, 0);
+        lastOrder = "Morph";
+    }
+
+    protected void IssueUpgrade(int buildingStableId, int targetDefId)
+    {
+        Issue(CommandKind.Upgrade, default, buildingStableId, targetDefId, 0);
+        lastOrder = $"Upgrade building {buildingStableId} → def {targetDefId}";
+    }
+
+    protected void IssueResearch(int buildingStableId, int techIndex)
+    {
+        Issue(CommandKind.Research, default, buildingStableId, (byte)techIndex);
+        lastOrder = $"Research [{techIndex}] at building {buildingStableId}";
+    }
+
 	private void OnDestroy() {
         SaveNow();
 	}
 
 	// --- helpers ------------------------------------------------------------
 
-	protected List<Entity> GetTeamUnits()
+	protected List<Entity> GetPlayerUnits()
     {
         var list = new List<Entity>();
         if (!WorldOk) return list;
         var entities = AllUnitsQuery.ToEntityArray(Allocator.Temp);
-        var teams = AllUnitsQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = AllUnitsQuery.ToComponentDataArray<Player>(Allocator.Temp);
         for (int i = 0; i < entities.Length; i++)
-            if (teams[i].Value == team) list.Add(entities[i]);
-        entities.Dispose(); teams.Dispose();
+            if (players[i].Value == player) list.Add(entities[i]);
+        entities.Dispose(); players.Dispose();
         return list;
     }
 

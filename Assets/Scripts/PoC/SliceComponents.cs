@@ -74,7 +74,7 @@ public struct Projectile : IComponentData
 {
     public float2 Velocity;       // horizontal velocity
     public float Damage;
-    public int Team;
+    public int Player;            // owning player id
     public float Life;            // seconds remaining
     public float TotalLife;       // life at launch (for arc progress)
     public float Rise;            // arc bulge height
@@ -100,7 +100,7 @@ public struct IncomingProjectile : IBufferElementData
     public float2 Direction;  // normalized travel direction (for backstab mitigation)
     public float  Damage;
     public float  HitRadius;
-    public int    Team;
+    public int    Player;         // owning player id
 }
 
 // Per-frame projectile spatial hash. Built by ProjectileSystem before

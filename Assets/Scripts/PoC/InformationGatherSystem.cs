@@ -83,7 +83,7 @@ public partial struct InformationGatherSystem : ISystem {
         private void Execute(
             Entity self,
             in LocalTransform xform,
-            in Team team,
+            in Player player,
             in UnitTuning meUnit,
             in Attack myAttack,
             in Defense myDefense,
@@ -141,7 +141,7 @@ public partial struct InformationGatherSystem : ISystem {
                         if (!neighbor.IsBuilding && !heightBlocked && effectiveDist <= ContactRadius)
                             contacts.Add(neighbor);
 
-                        if (neighbor.Team != team.Value) {
+                        if (neighbor.Player != player.Value && !neighbor.IsNonCombatant) {
                             if (effectiveDist > meUnit.PursueDistance && !myAttack.isRange)
                                 continue;
                             if (heightBlocked)
@@ -243,7 +243,7 @@ public partial struct InformationGatherSystem : ISystem {
                         int key = ((projCellX + offsetX) * 73856093) ^ ((projCellY + offsetY) * 19349663);
                         if (!ProjMap.TryGetFirstValue(key, out IncomingProjectile proj, out var pit)) continue;
                         do {
-                            if (proj.Team == team.Value) continue;
+                            if (proj.Player == player.Value) continue;
                             if (math.distance(position, proj.Position) > proj.HitRadius) continue;
                             incomingProjectiles.Add(proj);
                         }

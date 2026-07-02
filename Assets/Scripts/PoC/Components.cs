@@ -57,9 +57,9 @@ public struct UnitRadius : IComponentData
     public float Value;
 }
 
-public struct Team : IComponentData
+public struct Player : IComponentData
 {
-    public int Value;      // 0 = player, 1 = enemy, etc.
+    public int Value;      // owning player id (single ownership axis; no separate "team" concept)
 }
 
 public struct Health : IComponentData
@@ -97,7 +97,7 @@ public struct UnitTag : IComponentData { }
 // Presentation bridge. The SIM owns this enum; the GameObject view layer reads
 // it and drives the Animator. Sim never touches an Animator directly.
 // ---------------------------------------------------------------------------
-public enum AnimState : byte { Idle, Walk, Block, Attack, Die }
+public enum AnimState : byte { Idle, Walk, Block, Attack, Die, Harvest, Build, Deliver, Morph }
 
 public struct UnitAnim : IComponentData
 {
@@ -152,7 +152,7 @@ public struct UnitInfo : IBufferElementData
     public Entity Entity;
     public int    StableId;       // deterministic identity (tie-breaking, debugging)
     public int    DefId;          // unit type (e.g. "form a wall with units of my type")
-    public int    Team;
+    public int    Player;         // owning player id
     public float2 Position;
     public float  Height;         // terrain height under the unit
     public float2 Velocity;
@@ -171,6 +171,7 @@ public struct UnitInfo : IBufferElementData
     public float  StrikeArcDot;   // cos(arc/2) for cleave strikes
     public bool   Cleave;         // strike hits everyone in the arc, not just the target
     public bool   IsBuilding;     // entity carries BuildingTag; Radius is then the
+    public bool   IsNonCombatant; // entity carries NonCombatant; ignored by targeting and combat
                                   // footprint's inscribed radius and consumers
                                   // measure range to the surface, not the center
 }

@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 // ---------------------------------------------------------------------------
 // Lives on the VISUAL PREFAB (the 3D model + Animator), NOT on the entity.
@@ -19,7 +20,7 @@ using UnityEngine;
 public class UnitView : MonoBehaviour
 {
     [SerializeField] private Animator animator;
-    [SerializeField] private TeamColorTarget teamColor;
+    [SerializeField, FormerlySerializedAs("teamColor")] private PlayerColorTarget playerColor;
 
     private static readonly int StateParam = Animator.StringToHash("State");
     private int _lastState = -1;
@@ -29,14 +30,14 @@ public class UnitView : MonoBehaviour
     private void Reset()
     {
         animator = GetComponentInChildren<Animator>();
-        teamColor = GetComponentInChildren<TeamColorTarget>();
+        playerColor = GetComponentInChildren<PlayerColorTarget>();
     }
 
     public void Bind() // called when pulled from the pool for reuse
     {
         _lastState = -1;
         if (animator == null) animator = GetComponentInChildren<Animator>();
-        if (teamColor == null) teamColor = GetComponentInChildren<TeamColorTarget>();
+        if (playerColor == null) playerColor = GetComponentInChildren<PlayerColorTarget>();
     }
 
     public void Apply(AnimState state)
@@ -47,11 +48,11 @@ public class UnitView : MonoBehaviour
         animator.SetInteger(StateParam, s);
     }
 
-    // Tints the team/commander color onto the prefab's marked slots only.
-    // No-op (and materials untouched) if the prefab has no TeamColorTarget.
-    public void SetTeamColor(Color color)
+    // Tints the player/commander color onto the prefab's marked slots only.
+    // No-op (and materials untouched) if the prefab has no PlayerColorTarget.
+    public void SetPlayerColor(Color color)
     {
-        if (teamColor != null) teamColor.Apply(color);
+        if (playerColor != null) playerColor.Apply(color);
     }
 
 	internal void setHP(float current) {

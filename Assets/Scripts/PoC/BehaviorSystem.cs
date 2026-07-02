@@ -396,7 +396,7 @@ public partial struct BehaviorSystem : ISystem
 
         // Personal-space push from contacts within radius. Enemies reach tier 7/8
         // before tier 11 so in practice only friendly contacts push here, but the
-        // filter is correctness-by-tier rather than by explicit team check.
+        // filter is correctness-by-tier rather than by explicit player check.
         private static float2 Separation(float2 position,
                                          in DynamicBuffer<UnitInfo> contacts, float radius)
         {

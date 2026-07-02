@@ -10,7 +10,7 @@ using UnityEngine;
 //
 //   * On-screen HUD (Game view) with all the live counts from SimDebug.
 //   * Scene-view gizmos: flow-field directions, blocked obstacle cells, each
-//     unit's team/facing, lines to its target and its desired destination,
+//     unit's player/facing, lines to its target and its desired destination,
 //     and selection highlight.
 //
 // Everything is toggleable in the inspector, and the live stats are mirrored
@@ -46,7 +46,7 @@ public class DebugOverlay : MonoBehaviour
 
     [Header("Live stats (read-only)")]
     public float fps;
-    public int unitsTeam0, unitsTeam1, aliveTotal, deadTotal, projectiles;
+    public int unitsPlayer0, unitsPlayer1, aliveTotal, deadTotal, projectiles;
     public int wallFormers, tuckers, kiters, advancers;
     public int overridden, firing, inContact, selected;
     public int obstacleVersion, blockedCells;
@@ -59,7 +59,7 @@ public class DebugOverlay : MonoBehaviour
     private struct UnitGiz
     {
         public Vector3 Pos, Forward, TargetPos, DestPos;
-        public int Team; public bool HasTarget, HasDest, Selected;
+        public int Player; public bool HasTarget, HasDest, Selected;
     }
     private readonly List<(Vector3 pos, Vector3 dir)> _flowArrows = new();
     private readonly List<(Vector3 pos, Vector3 dir)> _fineArrows = new();
@@ -92,7 +92,7 @@ public class DebugOverlay : MonoBehaviour
         _unitQuery = _em.CreateEntityQuery(
             ComponentType.ReadOnly<UnitTag>(),
             ComponentType.ReadOnly<LocalTransform>(),
-            ComponentType.ReadOnly<Team>(),
+            ComponentType.ReadOnly<Player>(),
             ComponentType.ReadOnly<CombatTarget>(),
             ComponentType.ReadOnly<DesiredDestination>());
         _ready = true;
@@ -130,7 +130,7 @@ public class DebugOverlay : MonoBehaviour
     {
         if (_debugQuery.IsEmptyIgnoreFilter) return;
         var d = _debugQuery.GetSingleton<SimDebug>();
-        unitsTeam0 = d.UnitsTeam0; unitsTeam1 = d.UnitsTeam1;
+        unitsPlayer0 = d.UnitsPlayer0; unitsPlayer1 = d.UnitsPlayer1;
         aliveTotal = d.AliveTotal; deadTotal = d.DeadTotal; projectiles = d.Projectiles;
         wallFormers = d.WallFormers; tuckers = d.Tuckers; kiters = d.Kiters; advancers = d.Advancers;
         overridden = d.Overridden; firing = d.Firing; inContact = d.InContact;
@@ -233,7 +233,7 @@ public class DebugOverlay : MonoBehaviour
         // Units (capped + strided for perf).
         var entities = _unitQuery.ToEntityArray(Allocator.Temp);
         var xforms = _unitQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
-        var teams = _unitQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = _unitQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var targets = _unitQuery.ToComponentDataArray<CombatTarget>(Allocator.Temp);
         var dests = _unitQuery.ToComponentDataArray<DesiredDestination>(Allocator.Temp);
 
@@ -271,7 +271,7 @@ public class DebugOverlay : MonoBehaviour
             {
                 Pos = new Vector3(p.x, gizmoY, p.z),
                 Forward = new Vector3(fwd.x, 0f, fwd.z),
-                Team = teams[i].Value,
+                Player = players[i].Value,
                 HasTarget = targets[i].Has,
                 TargetPos = new Vector3(targets[i].Info.Position.x, gizmoY, targets[i].Info.Position.y),
                 HasDest = dests[i].Has,
@@ -280,7 +280,7 @@ public class DebugOverlay : MonoBehaviour
             });
         }
 
-        entities.Dispose(); xforms.Dispose(); teams.Dispose(); targets.Dispose(); dests.Dispose();
+        entities.Dispose(); xforms.Dispose(); players.Dispose(); targets.Dispose(); dests.Dispose();
     }
 
     // Cheapest component cost of a big tile (display-grade summary of the
@@ -303,7 +303,7 @@ public class DebugOverlay : MonoBehaviour
 
         if (!worldReady) { Line("NO ECS WORLD"); return; }
         Line($"FPS: {fps:0}");
-        Line($"Units  T0:{unitsTeam0}  T1:{unitsTeam1}  alive:{aliveTotal}");
+        Line($"Units  P0:{unitsPlayer0}  P1:{unitsPlayer1}  alive:{aliveTotal}");
         Line($"Dead:{deadTotal}   Projectiles:{projectiles}");
         Line($"Flags  Wall:{wallFormers} Tuck:{tuckers} Kite:{kiters} Adv:{advancers}");
         Line($"Overridden by hero: {overridden}");
@@ -360,7 +360,7 @@ public class DebugOverlay : MonoBehaviour
             }
             if (showUnitFacing)
             {
-                Gizmos.color = u.Team == 0 ? new Color(0.3f, 0.6f, 1f) : new Color(1f, 0.5f, 0.3f);
+                Gizmos.color = u.Player == 0 ? new Color(0.3f, 0.6f, 1f) : new Color(1f, 0.5f, 0.3f);
                 Gizmos.DrawRay(u.Pos, u.Forward * 0.8f);
             }
             if (showTargetLines && u.HasTarget)

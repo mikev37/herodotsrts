@@ -74,7 +74,7 @@ public partial struct ContactCombatSystem : ISystem
             in UnitRadius radius,
             in Mass mass,
             in Defense defense,
-            in Team team,
+            in Player player,
             DynamicBuffer<UnitInfo> contacts,
             DynamicBuffer<IncomingProjectile> incomingProjectiles)
         {
@@ -88,7 +88,8 @@ public partial struct ContactCombatSystem : ISystem
             for (int i = 0; i < contacts.Length; i++)
             {
                 UnitInfo neighbor = contacts[i];
-                if (neighbor.Team == team.Value) continue;
+                if (neighbor.Player == player.Value) continue;
+                if (neighbor.IsNonCombatant) continue;   // nodes/neutral buildings can't be attacked
 
                 float2 fromNeighbor = position - neighbor.Position;   // attacker -> me
                 float distance = math.length(fromNeighbor);
@@ -175,7 +176,7 @@ public partial struct ContactCombatSystem : ISystem
             {
                 UnitInfo body = contacts[i];
                 if (body.Entity == self || body.Entity == attacker.Entity) continue;
-                if (body.Team == attacker.Team) continue;
+                if (body.Player == attacker.Player) continue;
                 float2 toBody = body.Position - attacker.Position;
                 float t = math.dot(toBody, line) / lineLengthSq;     // position along attacker->me
                 if (t <= 0.1f || t >= 0.9f) continue;                 // must be BETWEEN, not at an endpoint

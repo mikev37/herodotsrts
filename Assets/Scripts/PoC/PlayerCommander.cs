@@ -24,9 +24,9 @@ using UnityEngine;
 public class PlayerCommander : Commander
 {
     [Header("Buildings")]
-    [Tooltip("Building placed with B. Must appear in this team's UnitManager roster (countPerTeam 0 is fine).")]
+    [Tooltip("Building placed with B. Must appear in the RosterDefinition asset.")]
     [SerializeField] private BuildingDefinition placeBuilding;
-    [Tooltip("Wall placed with V. A WallDefinition; must appear in this team's roster.")]
+    [Tooltip("Wall placed with V. A WallDefinition; must appear in the RosterDefinition asset.")]
     [SerializeField] private WallDefinition placeWall;
 
     [Header("Formation (right-drag to set grid width)")]
@@ -69,10 +69,10 @@ public class PlayerCommander : Commander
         _clockQuery2 = Em.CreateEntityQuery(ComponentType.ReadOnly<SimClock>());
         _buildingQuery = Em.CreateEntityQuery(
             ComponentType.ReadOnly<BuildingTag>(),
-            ComponentType.ReadOnly<Team>(),
+            ComponentType.ReadOnly<Player>(),
             ComponentType.ReadOnly<StableId>(),
             ComponentType.ReadOnly<LocalTransform>());
-        _resourceQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<ResourcePoolTag>());
+        _resourceQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<PlayerBankTag>());
     }
 
     private void Update()
@@ -111,6 +111,45 @@ public class PlayerCommander : Commander
             TryPlaceBuilding(placeWall, wallPos);
         if (Input.GetKeyDown(KeyCode.N) && GroundPoint(out float2 demoPos))
             TryDemolishNearest(demoPos);
+
+        // G = morph selected units (free toggle, e.g. trebuchet siege/unsiege)
+        if (Input.GetKeyDown(KeyCode.G))
+            IssueMorph(GetPlayerUnits().FindAll(e => Em.IsComponentEnabled<Selected>(e)));
+
+        // X = cancel production head on the selected building; Shift+X = cancel tail
+        if (Input.GetKeyDown(KeyCode.X))
+            TryBuildingAction(e => IssueCancelProduction(Em.GetComponentData<StableId>(e).Value,
+                                                         fromHead: !Input.GetKey(KeyCode.LeftShift)));
+
+        // L = toggle producer loop on selected building
+        if (Input.GetKeyDown(KeyCode.L))
+            TryBuildingAction(e => IssueToggleProducerLoop(Em.GetComponentData<StableId>(e).Value));
+
+        // P = pause/unpause selected building's bank
+        if (Input.GetKeyDown(KeyCode.P))
+            TryBuildingAction(e => IssueToggleBankPause(Em.GetComponentData<StableId>(e).Value));
+
+        // H = harvest: send selected harvesters to node under cursor
+        if (Input.GetKeyDown(KeyCode.H) && GroundPoint(out float2 harvestPos))
+        {
+            // Find nearest NodeTag entity to the ground point
+            int nodeSid = FindNearestNodeStableId(harvestPos);
+            if (nodeSid >= 0)
+            {
+                var harvesters = GetPlayerUnits().FindAll(e =>
+                    Em.IsComponentEnabled<Selected>(e) && Em.HasComponent<HarvestTask>(e));
+                if (harvesters.Count == 0)  // fall back to any selected unit with carryCapacity
+                    harvesters = GetPlayerUnits().FindAll(e => Em.IsComponentEnabled<Selected>(e));
+                IssueHarvest(harvesters, nodeSid);
+            }
+        }
+
+        // ---- context-sensitive build/produce/upgrade/research menus ----------
+        // When a single building is selected, the asdf row (and qwer for
+        // buildings with no ability slots) drives the building's economy menus.
+        // Priority: produce > build(for builders) > upgrade > research.
+        // Keys 1-4 map to slots 0-3 via MenuKeys below.
+        TryBuildingMenuKeys();
 
         // ---- right mouse: armed cast on press, else a formation drag ----
         if (Input.GetMouseButtonDown(1))
@@ -183,12 +222,12 @@ public class PlayerCommander : Commander
     private void TryPlaceBuilding(BuildingDefinition def, float2 pos)
     {
         if (def == null) { lastOrder = "(place ignored: no definition assigned)"; return; }
-        int defId = UnitManager.Instance != null ? UnitManager.Instance.GetDefId(team, def) : -1;
+        int defId = UnitFactory.Instance != null ? UnitFactory.Instance.Roster.GetId(def) : -1;
         if (defId < 0)
         {
-            Debug.LogWarning($"[Place] ignored: '{def.displayName}' is not in team {team}'s UnitManager roster. " +
-                             "Add a roster entry for it (countPerTeam 0 is fine) — the roster index is the network def id.");
-            lastOrder = $"(place ignored: '{def.displayName}' not in team {team} roster)";
+            Debug.LogWarning($"[Place] ignored: '{def.displayName}' is not in the roster asset. " +
+                             "Add it to the RosterDefinition — the roster index is the network def id.");
+            lastOrder = $"(place ignored: '{def.displayName}' not in roster)";
             return;
         }
         IssuePlaceBuilding(defId, pos);
@@ -197,21 +236,146 @@ public class PlayerCommander : Commander
     private void TryDemolishNearest(float2 pos)
     {
         var entities = _buildingQuery.ToEntityArray(Allocator.Temp);
-        var teams = _buildingQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = _buildingQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var sids = _buildingQuery.ToComponentDataArray<StableId>(Allocator.Temp);
         var xforms = _buildingQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
 
         int best = -1; float bestD = float.MaxValue;
         for (int i = 0; i < entities.Length; i++)
         {
-            if (teams[i].Value != team) continue;
+            if (players[i].Value != player) continue;
             float d = math.distancesq(pos, new float2(xforms[i].Position.x, xforms[i].Position.z));
             if (d < bestD) { bestD = d; best = i; }
         }
         if (best >= 0) IssueDemolishBuilding(sids[best].Value);
         else lastOrder = "(N ignored: no own building found)";
 
-        entities.Dispose(); teams.Dispose(); sids.Dispose(); xforms.Dispose();
+        entities.Dispose(); players.Dispose(); sids.Dispose(); xforms.Dispose();
+    }
+
+    // Invoke an action on the single selected own building, if exactly one is selected.
+    private void TryBuildingAction(System.Action<Entity> act)
+    {
+        var sel = _selectedQuery.ToEntityArray(Allocator.Temp);
+        Entity found = Entity.Null;
+        for (int i = 0; i < sel.Length; i++)
+            if (Em.HasComponent<BuildingTag>(sel[i]) && Em.HasComponent<Player>(sel[i]) &&
+                Em.GetComponentData<Player>(sel[i]).Value == player)
+            { found = sel[i]; break; }
+        sel.Dispose();
+        if (found != Entity.Null) act(found);
+    }
+
+    // Find the nearest NodeTag entity to a world point; returns its StableId or -1.
+    private int FindNearestNodeStableId(float2 pos)
+    {
+        using var q = Em.CreateEntityQuery(
+            ComponentType.ReadOnly<NodeTag>(),
+            ComponentType.ReadOnly<StableId>(),
+            ComponentType.ReadOnly<LocalTransform>());
+        var ents  = q.ToEntityArray(Allocator.Temp);
+        var sids  = q.ToComponentDataArray<StableId>(Allocator.Temp);
+        var xfs   = q.ToComponentDataArray<LocalTransform>(Allocator.Temp);
+        int best  = -1; float bestD = float.MaxValue;
+        for (int i = 0; i < ents.Length; i++)
+        {
+            float d = math.distancesq(pos, new float2(xfs[i].Position.x, xfs[i].Position.z));
+            if (d < bestD) { bestD = d; best = sids[i].Value; }
+        }
+        ents.Dispose(); sids.Dispose(); xfs.Dispose();
+        return best;
+    }
+
+    // Context-sensitive building economy menu.
+    // With a single own building selected, the number row 1-4 drives produce/
+    // build/upgrade/research slots in that priority order.
+    private static readonly KeyCode[] MenuKeys = { KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4 };
+
+    private void TryBuildingMenuKeys()
+    {
+        var roster = UnitFactory.Instance?.Roster;
+        if (roster == null) return;
+
+        var sel = _selectedQuery.ToEntityArray(Allocator.Temp);
+
+        // ---- BUILDING context: single selected own building ------------------
+        Entity bld = Entity.Null;
+        for (int i = 0; i < sel.Length; i++)
+            if (Em.HasComponent<BuildingTag>(sel[i]) && Em.HasComponent<Player>(sel[i]) &&
+                Em.GetComponentData<Player>(sel[i]).Value == player && Em.HasComponent<UnitDefId>(sel[i]))
+            { if (bld != Entity.Null) { bld = Entity.Null; break; }   // more than one — ambiguous
+              bld = sel[i]; }
+
+        if (bld != Entity.Null)
+        {
+            int sid   = Em.GetComponentData<StableId>(bld).Value;
+            int defId = Em.GetComponentData<UnitDefId>(bld).Value;
+            var bdef  = roster.GetDefinition(defId) as BuildingDefinition;
+
+            if (bdef != null)
+            {
+                var busy = EconomyQuery.BuildingBusy(Em, bld, queueingProduction: true);
+
+                for (int i = 0; i < MenuKeys.Length; i++)
+                {
+                    if (!Input.GetKeyDown(MenuKeys[i])) continue;
+
+                    // Produce
+                    if (bdef.isProducer && bdef.produces != null && i < bdef.produces.Count &&
+                        (busy == EconomyQuery.ActivityKind.None || busy == EconomyQuery.ActivityKind.Production))
+                    {
+                        int uid = roster.GetId(bdef.produces[i]);
+                        if (uid >= 0) { IssueQueueProduction(sid, uid); sel.Dispose(); return; }
+                    }
+                    // Building upgrade (Keep → Castle)
+                    if (bdef.buildingUpgrades != null && i < bdef.buildingUpgrades.Count &&
+                        busy == EconomyQuery.ActivityKind.None)
+                    {
+                        int uid = roster.GetId(bdef.buildingUpgrades[i]);
+                        if (uid >= 0) { IssueUpgrade(sid, uid); sel.Dispose(); return; }
+                    }
+                    // Research tech
+                    if (bdef.researches != null && i < bdef.researches.Count &&
+                        busy == EconomyQuery.ActivityKind.None)
+                    { IssueResearch(sid, i); sel.Dispose(); return; }
+                }
+
+                // R = set rally (producer buildings only; doesn't conflict with ability key
+                // since buildings rarely have abilities)
+                if (Input.GetKeyDown(KeyCode.R) && bdef.isProducer && GroundPoint(out float2 rallyPos))
+                    IssueSetRally(sid, rallyPos);
+            }
+        }
+
+        // ---- UNIT context: builder unit pressing 1-4 to place a building ----
+        // Find a representative builder from the selection (the one with the most
+        // builds entries, to handle mixed selections gracefully — use its list).
+        BuildingDefinition[] buildsMenu = null;
+        int buildMenuLen = 0;
+        for (int i = 0; i < sel.Length; i++)
+        {
+            if (!Em.HasComponent<Player>(sel[i])) continue;
+            if (Em.GetComponentData<Player>(sel[i]).Value != player) continue;
+            if (!Em.HasComponent<UnitDefId>(sel[i])) continue;
+            var udef = roster.GetDefinition(Em.GetComponentData<UnitDefId>(sel[i]).Value);
+            if (udef?.builds == null || udef.builds.Count == 0) continue;
+            if (udef.builds.Count > buildMenuLen)
+            { buildMenuLen = udef.builds.Count; buildsMenu = udef.builds.ToArray(); }
+        }
+
+        if (buildsMenu != null && buildsMenu.Length > 0 && GroundPoint(out float2 blueprintPos))
+        {
+            for (int i = 0; i < MenuKeys.Length && i < buildsMenu.Length; i++)
+            {
+                if (!Input.GetKeyDown(MenuKeys[i])) continue;
+                var bdef2 = buildsMenu[i];
+                if (bdef2 == null) continue;
+                int uid = roster.GetId(bdef2);
+                if (uid >= 0) { IssuePlaceBlueprint(uid, blueprintPos); sel.Dispose(); return; }
+            }
+        }
+
+        sel.Dispose();
     }
 
     // --- selection / orders ----------------------------------------------------
@@ -225,13 +389,13 @@ public class PlayerCommander : Commander
             Mathf.Max(_dragStart.x, end.x), Mathf.Max(_dragStart.y, end.y));
 
         var entities = AllUnitsQuery.ToEntityArray(Allocator.Temp);
-        var teams = AllUnitsQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = AllUnitsQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var xforms = AllUnitsQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
 
         for (int i = 0; i < entities.Length; i++)
         {
             bool sel = false;
-            if (teams[i].Value == team)
+            if (players[i].Value == player)
             {
                 Vector3 sp = cam.WorldToScreenPoint(xforms[i].Position);
                 sel = sp.z > 0 && rect.Contains(new Vector2(sp.x, sp.y));
@@ -239,7 +403,7 @@ public class PlayerCommander : Commander
             if (Em.IsComponentEnabled<Selected>(entities[i]) != sel)
                 Em.SetComponentEnabled<Selected>(entities[i], sel);
         }
-        entities.Dispose(); teams.Dispose(); xforms.Dispose();
+        entities.Dispose(); players.Dispose(); xforms.Dispose();
         armedIndex = -1;   // selection changed; disarm
     }
 
@@ -258,20 +422,20 @@ public class PlayerCommander : Commander
 
         var cam = Camera.main; if (cam == null) return;
         var entities = AllUnitsQuery.ToEntityArray(Allocator.Temp);
-        var teams = AllUnitsQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = AllUnitsQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var xforms = AllUnitsQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
 
         float best = 30f; // px
         Vector2 mouse = Input.mousePosition;
         for (int i = 0; i < entities.Length; i++)
         {
-            if (teams[i].Value == team) continue;
+            if (players[i].Value == player) continue;
             Vector3 sp = cam.WorldToScreenPoint(xforms[i].Position);
             if (sp.z <= 0) continue;
             float d = Vector2.Distance(mouse, new Vector2(sp.x, sp.y));
             if (d < best) { best = d; _rmbEnemy = entities[i]; _rmbEnemyPos = new float2(xforms[i].Position.x, xforms[i].Position.z); }
         }
-        entities.Dispose(); teams.Dispose(); xforms.Dispose();
+        entities.Dispose(); players.Dispose(); xforms.Dispose();
     }
 
     // Release: commit the order. Drag length across the terrain (press point ->
@@ -366,17 +530,11 @@ public class PlayerCommander : Commander
             GUI.Label(new Rect(10, Screen.height - 30, 900, 22), sb.ToString());
         }
 
-        // Team resource readout (always shown; reads the sim's pool directly).
-        if (WorldOk && !_resourceQuery.IsEmpty)
+        // Resource readout — reads the local player's economy bank (ResourceAmount).
+        if (WorldOk && !_resourceQuery.IsEmpty && EconomyQuery.TryGetBank(Em, player, out var res))
         {
-            var poolEntity = _resourceQuery.GetSingletonEntity();
-            var pool = Em.GetBuffer<TeamResources>(poolEntity);
-            if (team >= 0 && team < pool.Length)
-            {
-                var res = pool[team].Amounts;
-                GUI.Label(new Rect(10, Screen.height - 52, 900, 22),
-                          $"Gold {res.x}   Wood {res.y}   Stone {res.z}");
-            }
+            GUI.Label(new Rect(10, Screen.height - 52, 900, 22),
+                      $"Gold {res.Gold}   Wood {res.Wood}   Food {res.Food}");
         }
 
         // Selection rectangle — hidden while the orbit chord is engaged.

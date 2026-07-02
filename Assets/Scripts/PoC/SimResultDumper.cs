@@ -101,12 +101,12 @@ public class SimResultDumper : MonoBehaviour
             ComponentType.ReadOnly<StableId>(),
             ComponentType.ReadOnly<LocalTransform>(),
             ComponentType.ReadOnly<Health>(),
-            ComponentType.ReadOnly<Team>());
+            ComponentType.ReadOnly<Player>());
 
         var ids    = q.ToComponentDataArray<StableId>(Allocator.Temp);
         var xforms = q.ToComponentDataArray<LocalTransform>(Allocator.Temp);
         var hps    = q.ToComponentDataArray<Health>(Allocator.Temp);
-        var teams  = q.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = q.ToComponentDataArray<Player>(Allocator.Temp);
 
         uint tick = 0;
         var cq = em.CreateEntityQuery(typeof(SimClock));
@@ -114,9 +114,9 @@ public class SimResultDumper : MonoBehaviour
         cq.Dispose();
 
         // Gather and sort by StableId so the report is order-independent and diffable.
-        var rows = new List<(int id, int team, float x, float z, float hp)>(ids.Length);
+        var rows = new List<(int id, int player, float x, float z, float hp)>(ids.Length);
         for (int i = 0; i < ids.Length; i++)
-            rows.Add((ids[i].Value, teams[i].Value, xforms[i].Position.x, xforms[i].Position.z, hps[i].Current));
+            rows.Add((ids[i].Value, players[i].Value, xforms[i].Position.x, xforms[i].Position.z, hps[i].Current));
         rows.Sort((a, b) => a.id.CompareTo(b.id));
 
         double totalHp = 0;
@@ -125,7 +125,7 @@ public class SimResultDumper : MonoBehaviour
         {
             totalHp += r.hp;
             uint a = math.hash(new uint4(math.asuint(r.x), math.asuint(r.z), math.asuint(r.hp), (uint)r.id));
-            checksum += a ^ (uint)(r.team * 2654435761u);
+            checksum += a ^ (uint)(r.player * 2654435761u);
         }
 
         var sb = new StringBuilder();
@@ -133,9 +133,9 @@ public class SimResultDumper : MonoBehaviour
         sb.AppendLine($"units={rows.Count}");
         sb.AppendLine($"totalHP={totalHp:R}");
         sb.AppendLine($"checksum={checksum:X8}");
-        sb.AppendLine("# id,team,x,z,hp  (x/z/hp printed as raw float bits for exact diff)");
+        sb.AppendLine("# id,player,x,z,hp  (x/z/hp printed as raw float bits for exact diff)");
         foreach (var r in rows)
-            sb.AppendLine($"{r.id},{r.team},{math.asuint(r.x):X8},{math.asuint(r.z):X8},{math.asuint(r.hp):X8}");
+            sb.AppendLine($"{r.id},{r.player},{math.asuint(r.x):X8},{math.asuint(r.z):X8},{math.asuint(r.hp):X8}");
 
         // Encode mode + instance + tick in the filename. The instance tag matters:
         // MPPM virtual players share the SAME persistentDataPath (same company/
@@ -153,6 +153,6 @@ public class SimResultDumper : MonoBehaviour
         File.WriteAllText(path, sb.ToString());
         Debug.Log($"[Lockstep] dumped {rows.Count} units (HP {totalHp:R}, checksum {checksum:X8}) to {path}");
 
-        ids.Dispose(); xforms.Dispose(); hps.Dispose(); teams.Dispose();
+        ids.Dispose(); xforms.Dispose(); hps.Dispose(); players.Dispose();
     }
 }

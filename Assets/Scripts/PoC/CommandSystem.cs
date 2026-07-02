@@ -20,7 +20,18 @@ public enum CommandKind : byte
 {
     None = 0, Move = 1, AttackMove = 2, Stop = 3, AttackTarget = 4, Ability = 5,
     PlaceBuilding = 6,      // TargetPos = desired center (snapped at apply), TargetStableId = roster defId of the BuildingDefinition
-    DemolishBuilding = 7,   // TargetStableId = StableId of an own-team building; flows through normal death
+    DemolishBuilding = 7,   // TargetStableId = StableId of an own building; flows through normal death
+    Harvest = 8,            // Units[]: harvesters; TargetStableId = node StableId
+    SetRally = 9,           // TargetStableId = building StableId; TargetPos = rally world point
+    QueueProduction = 10,   // TargetStableId = building StableId; TargetStableId2 = unit defId to produce
+    CancelProduction = 11,  // TargetStableId = building StableId; AbilitySlot 0=head, 1=tail
+    ToggleBankPause = 12,   // TargetStableId = bank entity StableId
+    PlaceBlueprint = 13,    // same as PlaceBuilding but spawns under Construction
+    ToggleProducerLoop = 14,// TargetStableId = building StableId
+    ToggleSpendPriority = 15, // TargetStableId = building StableId
+    Morph = 17,             // Units[]: unit(s) to morph via morphTarget
+    Upgrade = 18,           // TargetStableId = building StableId; TargetStableId2 = target upgrade defId
+    Research = 19,          // TargetStableId = building StableId; AbilitySlot = index into building.researches
 }
 
 // One order. The struct is fully unmanaged/blittable (FixedList included), so it
@@ -34,7 +45,8 @@ public struct SimCommand : IBufferElementData, INetworkSerializeByMemcpy {
     public int PlayerId;
     public CommandKind Kind;
     public float2 TargetPos;       // Move/AttackMove destination, or Ability cast point
-    public int TargetStableId;  // AttackTarget victim
+    public int TargetStableId;  // AttackTarget victim / building StableId
+    public int TargetStableId2; // secondary id (unit defId for production/upgrade, etc.)
     public byte AbilitySlot;     // Ability: which slot (0..3); caster = Units[0]
     public int FormationWidth;  // Move/AttackMove grid columns; 0 = auto-fit
     public FixedList512Bytes<int> Units;          // affected units (StableIds); up to ~125
@@ -168,8 +180,8 @@ public partial struct CommandApplySystem : ISystem
         NativeArray<byte> passable = hasGrid ? SystemAPI.GetSingleton<ObstacleField>().Passable : default;
         NativeArray<byte> cellType = hasGrid ? SystemAPI.GetSingleton<ObstacleField>().CellType : default;
         bool hasTerrain = SystemAPI.TryGetSingleton<TerrainHeightField>(out var terrain) && terrain.IsValid;
-        Entity resourceEntity = SystemAPI.HasSingleton<ResourcePoolTag>()
-            ? SystemAPI.GetSingletonEntity<ResourcePoolTag>() : Entity.Null;
+        var bankMap = SystemAPI.HasSingleton<PlayerBankRegistry>()
+            ? SystemAPI.GetSingleton<PlayerBankRegistry>().Map : default;
 
         // 1) Pull this tick's commands out of the buffer (and drop expired ones)
         //    BEFORE applying anything: ability casts are structural changes that
@@ -189,7 +201,7 @@ public partial struct CommandApplySystem : ISystem
 
             if (c.Kind == CommandKind.Ability)
             {
-                CommitAbility(ref state, c, tick, map, hasGrid, passable, cellType, hasTerrain, terrain, resourceEntity);
+                CommitAbility(ref state, c, tick, map, hasGrid, passable, cellType, hasTerrain, terrain, bankMap);
                 continue;
             }
 
@@ -202,12 +214,12 @@ public partial struct CommandApplySystem : ISystem
 
             if (c.Kind == CommandKind.DemolishBuilding)
             {
-                // Own-team buildings only; "demolish" is just health -> 0 so the
+                // Own buildings only; "demolish" is just health -> 0 so the
                 // normal death pipeline (anim, view recycle, obstacle unblock,
                 // checksum) handles everything.
                 if (map.TryGetValue(c.TargetStableId, out Entity b) &&
                     em.HasComponent<BuildingTag>(b) && em.HasComponent<Health>(b) &&
-                    em.GetComponentData<Team>(b).Value == c.PlayerId)
+                    em.GetComponentData<Player>(b).Value == c.PlayerId)
                 {
                     var hp = em.GetComponentData<Health>(b);
                     hp.Current = 0f;
@@ -216,8 +228,248 @@ public partial struct CommandApplySystem : ISystem
                 continue;
             }
 
+            // AttackTarget needs the resolved entity; declare here so it's in scope
+            // for both the aim calculation below AND the switch case.
             Entity atkTarget = Entity.Null;
-            if (c.Kind == CommandKind.AttackTarget) map.TryGetValue(c.TargetStableId, out atkTarget);
+
+            // ================================================================
+            // Economy commands — all building-targeted (no unit loop needed).
+            // BuildingBusy guards (§26) are the AUTHORITATIVE one-job-per-
+            // building enforcement: even if a rogue client sends conflicting
+            // commands, they are rejected here identically on every peer.
+            // ================================================================
+
+            if (c.Kind == CommandKind.Harvest)
+            {
+                // Assign a harvest task to every unit in the selection.
+                for (int u = 0; u < c.Units.Length; u++)
+                {
+                    if (!map.TryGetValue(c.Units[u], out Entity harv)) continue;
+                    if (!em.HasComponent<HarvestTask>(harv)) em.AddComponent<HarvestTask>(harv);
+                    em.SetComponentData(harv, new HarvestTask
+                    {
+                        NodeStableId  = c.TargetStableId,
+                        DepotStableId = -1,
+                        Phase         = HarvestPhase.ToNode,
+                    });
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.SetRally)
+            {
+                if (map.TryGetValue(c.TargetStableId, out Entity rb) &&
+                    em.GetComponentData<Player>(rb).Value == c.PlayerId)
+                {
+                    if (!em.HasComponent<RallyPoint>(rb)) em.AddComponent<RallyPoint>(rb);
+                    em.SetComponentData(rb, new RallyPoint { Value = c.TargetPos, Has = 1 });
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.QueueProduction)
+            {
+                if (!map.TryGetValue(c.TargetStableId, out Entity pb)) { continue; }
+                if (em.GetComponentData<Player>(pb).Value != c.PlayerId) { continue; }
+                if (!em.HasComponent<ProducerTag>(pb)) { continue; }
+                // Guard: can't queue while constructing, upgrading, or researching
+                var busy = EconomyQuery.BuildingBusy(em, pb, queueingProduction: true);
+                if (busy != EconomyQuery.ActivityKind.None) { continue; }
+                if (!em.HasBuffer<ProductionItem>(pb)) em.AddBuffer<ProductionItem>(pb);
+                em.GetBuffer<ProductionItem>(pb).Add(new ProductionItem { UnitDefId = c.TargetStableId2 });
+                continue;
+            }
+
+            if (c.Kind == CommandKind.CancelProduction)
+            {
+                if (!map.TryGetValue(c.TargetStableId, out Entity cpb)) { continue; }
+                if (em.GetComponentData<Player>(cpb).Value != c.PlayerId) { continue; }
+                if (!em.HasBuffer<ProductionItem>(cpb)) { continue; }
+                var cpq = em.GetBuffer<ProductionItem>(cpb);
+                // AbilitySlot 0 = cancel head (refund paid), 1 = cancel tail (no refund yet)
+                if (c.AbilitySlot == 0 && cpq.Length > 0)
+                {
+                    var head = cpq[0];
+                    // Refund whatever was already paid (pay-as-you-build partial)
+                    if (head.Paid.Any && bankMap.IsCreated && bankMap.TryGetValue(c.PlayerId, out Entity refBank))
+                    {
+                        var rb2 = em.GetComponentData<ResourceBank>(refBank);
+                        rb2.Amounts += head.Paid;
+                        em.SetComponentData(refBank, rb2);
+                    }
+                    cpq.RemoveAt(0);
+                }
+                else if (c.AbilitySlot == 1 && cpq.Length > 0)
+                {
+                    cpq.RemoveAt(cpq.Length - 1);   // tail hasn't started — no refund
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.ToggleBankPause)
+            {
+                if (map.TryGetValue(c.TargetStableId, out Entity bpe) && em.HasComponent<ResourceBank>(bpe))
+                {
+                    var bk = em.GetComponentData<ResourceBank>(bpe);
+                    bk.Paused = bk.Paused == 0 ? (byte)1 : (byte)0;
+                    em.SetComponentData(bpe, bk);
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.PlaceBlueprint)
+            {
+                // Same as PlaceBuilding but spawns under Construction so builders
+                // must complete it. Validation is identical (same sim state →
+                // same verdict on every peer).
+                if (hasGrid)
+                {
+                    var factory = UnitFactory.Instance;
+                    if (factory != null)
+                    {
+                        var bpDef = factory.Roster.GetDefinition(c.TargetStableId) as BuildingDefinition;
+                        if (bpDef != null)
+                        {
+                            int2 ext = new int2(math.max(1, bpDef.footprintX), math.max(1, bpDef.footprintZ));
+                            bool cc = !(bpDef is WallDefinition);
+                            var verd = BuildingFootprint.ValidatePlacement(c.TargetPos, ext, bpDef.maxHeightDelta,
+                                                                           cellType, hasTerrain, terrain, cc, out float3 bpPos);
+                            if (verd == PlacementVerdict.Ok)
+                            {
+                                var bpEnt = factory.Create(bpDef, c.TargetStableId, c.PlayerId, bpPos);
+                                // Add Construction so it starts at 1 HP and requires builders
+                                em.AddComponentData(bpEnt, new Construction
+                                {
+                                    Progress          = 0f,
+                                    BuildTime         = math.max(1f, bpDef.buildTime),
+                                    Cost              = new ResourceAmount { Gold = bpDef.costGold, Wood = bpDef.costWood, Food = bpDef.costFood },
+                                    Paid              = default,
+                                    HealthPerProgress = bpDef.maxHealth / math.max(1f, bpDef.buildTime),
+                                    SelfPower         = bpDef.selfBuildPower,   // >0 = Protoss self-build (no worker needed)
+                                    SacrificeDefId    = bpDef.sacrifice         // sacrifice flag baked into ConstructionSystem
+                                                        ? (factory.Roster.GetId(bpDef) >= 0
+                                                           ? factory.Roster.GetId(bpDef) : -1)
+                                                        : -1,
+                                });
+                                var hp2 = em.GetComponentData<Health>(bpEnt);
+                                hp2.Current = 1f;
+                                em.SetComponentData(bpEnt, hp2);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.ToggleProducerLoop)
+            {
+                if (map.TryGetValue(c.TargetStableId, out Entity lpb) &&
+                    em.GetComponentData<Player>(lpb).Value == c.PlayerId &&
+                    em.HasBuffer<ProductionItem>(lpb))
+                {
+                    var lpq = em.GetBuffer<ProductionItem>(lpb);
+                    if (lpq.Length > 0)
+                    {
+                        var last = lpq[lpq.Length - 1];
+                        last.Loop = last.Loop == 0 ? (byte)1 : (byte)0;
+                        lpq[lpq.Length - 1] = last;
+                    }
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.ToggleSpendPriority)
+            {
+                if (map.TryGetValue(c.TargetStableId, out Entity spe) &&
+                    em.GetComponentData<Player>(spe).Value == c.PlayerId)
+                {
+                    if (!em.HasComponent<SpendPriority>(spe)) em.AddComponent<SpendPriority>(spe);
+                    var sp = em.GetComponentData<SpendPriority>(spe);
+                    sp.High = sp.High == 0 ? (byte)1 : (byte)0;
+                    em.SetComponentData(spe, sp);
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.Morph)
+            {
+                // Free morph (e.g. trebuchet siege): arm a MorphState with zero
+                // cost. Rejected if the unit is already morphing.
+                for (int u = 0; u < c.Units.Length; u++)
+                {
+                    if (!map.TryGetValue(c.Units[u], out Entity me)) continue;
+                    if (em.HasComponent<MorphState>(me)) continue;   // already morphing
+                    var mdef = UnitFactory.Instance?.Roster.GetDefinition(
+                        em.HasComponent<UnitDefId>(me) ? em.GetComponentData<UnitDefId>(me).Value : -1);
+                    if (mdef?.morphTarget == null) continue;
+                    int toId = UnitFactory.Instance.Roster.GetId(mdef.morphTarget);
+                    if (toId < 0) continue;
+                    bool toBuilding = mdef.morphTarget is BuildingDefinition;
+                    em.AddComponentData(me, new MorphState
+                    {
+                        TargetDefId  = toId,
+                        ToBuilding   = (byte)(toBuilding ? 1 : 0),
+                        Progress     = 0f,
+                        BuildTime    = math.max(1, mdef.morphTicks),
+                        Cost         = default,
+                        Paid         = default,
+                    });
+                }
+                continue;
+            }
+
+            if (c.Kind == CommandKind.Upgrade)
+            {
+                // Paid upgrade (e.g. Keep → Castle). TargetStableId = building,
+                // TargetStableId2 = target upgrade defId from building.upgrades.
+                if (!map.TryGetValue(c.TargetStableId, out Entity upe)) { continue; }
+                if (em.GetComponentData<Player>(upe).Value != c.PlayerId) { continue; }
+                if (EconomyQuery.BuildingBusy(em, upe, false) != EconomyQuery.ActivityKind.None) { continue; }
+                var upDef = UnitFactory.Instance?.Roster.GetDefinition(c.TargetStableId2);
+                if (upDef == null) { continue; }
+                bool upToBuilding = upDef is BuildingDefinition;
+                em.AddComponentData(upe, new MorphState
+                {
+                    TargetDefId  = c.TargetStableId2,
+                    ToBuilding   = (byte)(upToBuilding ? 1 : 0),
+                    Progress     = 0f,
+                    BuildTime    = math.max(1f, upDef is BuildingDefinition upbd ? upbd.buildTime : 50f),
+                    Cost         = upDef is BuildingDefinition upbd2
+                                    ? new ResourceAmount { Gold = upbd2.costGold, Wood = upbd2.costWood, Food = upbd2.costFood }
+                                    : default,
+                    Paid         = default,
+                });
+                continue;
+            }
+
+            if (c.Kind == CommandKind.Research)
+            {
+                if (!map.TryGetValue(c.TargetStableId, out Entity resb)) { continue; }
+                if (em.GetComponentData<Player>(resb).Value != c.PlayerId) { continue; }
+                if (EconomyQuery.BuildingBusy(em, resb, false) != EconomyQuery.ActivityKind.None) { continue; }
+                var resBDef = UnitFactory.Instance?.Roster.GetDefinition(
+                    em.GetComponentData<UnitDefId>(resb).Value) as BuildingDefinition;
+                if (resBDef == null || c.AbilitySlot >= resBDef.researches.Count) { continue; }
+                var tech = resBDef.researches[c.AbilitySlot];
+                if (tech == null) { continue; }
+                int fromId = tech.fromUnit != null ? UnitFactory.Instance.Roster.GetId(tech.fromUnit) : -1;
+                int toId   = tech.toUnit   != null ? UnitFactory.Instance.Roster.GetId(tech.toUnit)   : -1;
+                if (!em.HasBuffer<BankDeposit>(resb)) em.AddBuffer<BankDeposit>(resb);
+                if (!em.HasBuffer<BankRequest>(resb)) em.AddBuffer<BankRequest>(resb);
+                em.AddComponentData(resb, new ResearchTask
+                {
+                    FromDefId   = fromId,
+                    ToDefId     = toId,
+                    MorphTicks  = math.max(1, tech.upgradeMorphTicks),
+                    Progress    = 0f,
+                    BuildTime   = math.max(1f, tech.researchTime),
+                    Cost        = new ResourceAmount { Gold = tech.costGold, Wood = tech.costWood, Food = tech.costFood },
+                    Paid        = default,
+                });
+                continue;
+            }
+            if (c.Kind == CommandKind.AttackTarget && map.TryGetValue(c.TargetStableId, out var atk))
+                if (!em.HasComponent<NonCombatant>(atk)) atkTarget = atk;   // §24: cannot order attack on non-combatant
 
             // ---- collect the formation members + the group frame --------------
             int cap = c.Units.Length;
@@ -310,14 +562,14 @@ public partial struct CommandApplySystem : ISystem
     private void ApplyPlaceBuilding(in SimCommand c, NativeArray<byte> cellType,
                                     bool hasTerrain, in TerrainHeightField terrain)
     {
-        var um = UnitManager.Instance;
-        if (um == null) { Debug.LogWarning("[Building] placement dropped: no UnitManager in the scene."); return; }
+        var factory = UnitFactory.Instance;
+        if (factory == null) { Debug.LogWarning("[Building] placement dropped: no UnitFactory in the scene."); return; }
 
-        int team = c.PlayerId;
-        var def = um.GetDefinition(team, c.TargetStableId) as BuildingDefinition;
+        int player = c.PlayerId;
+        var def = factory.Roster.GetDefinition(c.TargetStableId) as BuildingDefinition;   // def id is global now
         if (def == null)
         {
-            Debug.LogWarning($"[Building] placement dropped: roster def {c.TargetStableId} (team {team}) is not a BuildingDefinition.");
+            Debug.LogWarning($"[Building] placement dropped: roster def {c.TargetStableId} (player {player}) is not a BuildingDefinition.");
             return;
         }
 
@@ -335,7 +587,7 @@ public partial struct CommandApplySystem : ISystem
             return;
         }
 
-        um.SpawnUnit(def, c.TargetStableId, team, spawnPos);
+        factory.Create(def, c.TargetStableId, player, spawnPos);
     }
 
     // Spawns the AbilityField entity for an Ability command, exactly like the old
@@ -351,12 +603,12 @@ public partial struct CommandApplySystem : ISystem
     // charging, off cooldown, mana, commander resources, cast range
     // (WorldPoint), and — for spawn abilities — that the spawn point is valid
     // (building footprint rule, or a passable cell for units) and the spawned
-    // definition is in the team roster.
+    // definition is in the player roster.
     private void CommitAbility(ref SystemState state, in SimCommand c, uint tick,
                                NativeParallelHashMap<int, Entity> map,
                                bool hasGrid, NativeArray<byte> passable, NativeArray<byte> cellType,
                                bool hasTerrain, in TerrainHeightField terrain,
-                               Entity resourceEntity)
+                               NativeParallelHashMap<int, Entity> bankMap)
     {
         var em = state.EntityManager;
         var mgr = AbilityManager.Instance;
@@ -384,16 +636,15 @@ public partial struct CommandApplySystem : ISystem
         var mana = em.GetComponentData<Mana>(caster);
         if (mana.Current < spec.ManaCost) return;                           // can't afford — fizzle, nothing consumed
 
-        int team = em.HasComponent<Team>(caster) ? em.GetComponentData<Team>(caster).Value : c.PlayerId;
+        int player = em.HasComponent<Player>(caster) ? em.GetComponentData<Player>(caster).Value : c.PlayerId;
 
-        // Commander resources: check all three before consuming any.
-        bool hasResources = resourceEntity != Entity.Null && em.HasBuffer<TeamResources>(resourceEntity);
-        if (math.any(spec.Cost > 0))
+        // Commander resources now come from the player's economy bank (ResourceAmount).
+        Entity bankEntity = Entity.Null;
+        if (bankMap.IsCreated) bankMap.TryGetValue(player, out bankEntity);
+        if (spec.Cost.Any)
         {
-            if (!hasResources) return;                                      // no pool in the scene -> nothing to pay from
-            var pool = em.GetBuffer<TeamResources>(resourceEntity);
-            if (team < 0 || team >= pool.Length) return;
-            if (math.any(pool[team].Amounts < spec.Cost)) return;           // can't afford — fizzle, nothing consumed
+            if (bankEntity == Entity.Null) return;                          // no bank -> can't pay, fizzle
+            if (!ResourceAmount.Covers(em.GetComponentData<ResourceBank>(bankEntity).Amounts, spec.Cost)) return;
         }
 
         // Cast range: WorldPoint casts farther than CastRange from the caster fizzle.
@@ -408,11 +659,11 @@ public partial struct CommandApplySystem : ISystem
         // window is the same accepted overlap as two same-tick placements).
         if (spec.HasSpawn != 0)
         {
-            var um = UnitManager.Instance;
+            var factory = UnitFactory.Instance;
             var sdef = mgr.GetDefinition(abilityId) != null ? mgr.GetDefinition(abilityId).spawnUnit : null;
-            if (um == null || sdef == null || um.GetDefId(team, sdef) < 0)
+            if (factory == null || sdef == null || factory.Roster.GetId(sdef) < 0)
             {
-                Debug.LogWarning($"[Ability] cast dropped: spawn def missing or not in team {team} roster.");
+                Debug.LogWarning($"[Ability] cast dropped: spawn def missing or not in player {player} roster.");
                 return;
             }
             if (!hasGrid) return;
@@ -443,12 +694,11 @@ public partial struct CommandApplySystem : ISystem
         mana.Current -= spec.ManaCost;
         em.SetComponentData(caster, mana);
 
-        if (math.any(spec.Cost > 0))
+        if (spec.Cost.Any)
         {
-            var pool = em.GetBuffer<TeamResources>(resourceEntity);
-            var tr = pool[team];
-            tr.Amounts -= spec.Cost;
-            pool[team] = tr;
+            var bank = em.GetComponentData<ResourceBank>(bankEntity);       // atomic settle-at-cast on the player bank
+            bank.Amounts -= spec.Cost;
+            em.SetComponentData(bankEntity, bank);
         }
 
         cds.ReadyTick[slot] = tick + spec.ChargeUpTicks + spec.CooldownTicks;   // cooldown runs from the fire tick
@@ -456,10 +706,11 @@ public partial struct CommandApplySystem : ISystem
 
         em.SetComponentData(caster, new PendingCast
         {
-            Active = 1,
-            Slot = (byte)slot,
+            Active    = 1,
+            Slot      = (byte)slot,
             AbilityId = abilityId,
-            FireTick = tick + spec.ChargeUpTicks,
+            FireTick  = tick + spec.ChargeUpTicks,
+            CastTick  = tick,   // used by ResourceBankSystem for priority ordering (earlier cast = higher priority)
             TargetPos = c.TargetPos,
         });
     }

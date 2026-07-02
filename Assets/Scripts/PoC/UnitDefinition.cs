@@ -2,7 +2,7 @@ using UnityEngine;
 
 // ===========================================================================
 // THE SINGLE SOURCE OF TRUTH for a unit. Stats, the view/projectile prefabs,
-// per-unit tuning, and behavior toggles all live here. At spawn the UnitManager
+// per-unit tuning, and behavior toggles all live here. At spawn UnitFactory.Create
 // copies these onto the entity (stats + a UnitTuning component + a BehaviorFlags
 // bitmask). Add a unit = make one of these and drop it in the manager roster.
 //
@@ -82,6 +82,44 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Abilities this unit can cast. When a selection is ordered to cast, the " +
              "selected unit with the MOST abilities is the caster.")]
     public AbilityDefinition[] abilities = new AbilityDefinition[4];
+
+    [Header("Economy — production cost")]
+    [Tooltip("Resources drawn from the player bank, pay-as-you-build, when this unit is queued.")]
+    public int prodCostGold = 0, prodCostWood = 0, prodCostFood = 0;
+    [Tooltip("Ticks to complete production at a building (multiplied by tick rate).")]
+    public float productionTime = 5f;
+    [Tooltip("Food consumed while this unit is alive (population cap cost).")]
+    public int foodCost = 0;
+
+    [Header("Economy — builder")]
+    [Tooltip("Build power contributed per tick to adjacent scaffolds. >0 = this unit is a builder.")]
+    public float buildPower = 0f;
+    [Tooltip("Buildings this unit (as a builder) can place. Drives the in-game build menu keys.")]
+    public System.Collections.Generic.List<BuildingDefinition> builds = new();
+
+    [Header("Economy — harvester")]
+    [Tooltip("Resources pulled per tick from a node. >0 = this unit can harvest.")]
+    public int harvestRate = 0;
+    [Tooltip("Cargo capacity. Triggers return-to-depot when full.")]
+    public int carryCapacity = 0;
+
+    [Header("Economy — hauler")]
+    [Tooltip("A hauler carries a colony's holdings to the nearest capital then is destroyed. Free to sustain (foodCost should be 0).")]
+    public bool isHauler = false;
+
+    [Header("UI")]
+    [Tooltip("Icon shown in build/produce menus, progress bar, and queue strip.")]
+    public Sprite icon;
+
+    [Header("Morph (free toggle — e.g. siege/unsiege, building settles into unit)")]
+    [Tooltip("The OTHER form this unit toggles to (siege/unsiege, etc.). Null = cannot morph. G key triggers it.")]
+    public UnitDefinition morphTarget;
+    [Tooltip("Transition duration in ticks.")]
+    public int morphTicks = 30;
+
+    [Header("Upgrade (one-way, paid — e.g. Knight → Paladin via a TechDefinition)")]
+    [Tooltip("Forms this unit can upgrade INTO. Cost + time come from the target's own costGold/Wood/Food + buildTime.")]
+    public System.Collections.Generic.List<UnitDefinition> upgrades = new();
 
 
     [Header("Behavior ranges")]
