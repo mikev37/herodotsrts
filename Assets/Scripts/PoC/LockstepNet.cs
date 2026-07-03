@@ -192,14 +192,13 @@ public class LockstepNet : MonoBehaviour
             Debug.LogError("[Lockstep] no ready UnitFactory in scene — can't start.");
             return;
         }
-        // The host's world is built by MapBootstrap (placements run at Start, long
-        // before a lobby "Start Game" click). If it hasn't finished for some reason
-        // — e.g. it was misconfigured to skip — fail loudly rather than capture and
-        // distribute an empty map to every client.
-        var bootstrap = FindFirstObjectByType<MapBootstrap>();
-        if (bootstrap != null && !bootstrap.PlacementsDone)
+        // The host's world is placed by UnitFactory at Start (every scattered
+        // MapBootstrap, spawned in deterministic order), long before a lobby
+        // "Start Game" click. If that hasn't finished, fail loudly rather than
+        // capture and distribute an empty/partial map.
+        if (!factory.PlacementsDone)
         {
-            Debug.LogError("[Lockstep] MapBootstrap hasn't finished placing the starting map yet — can't start.");
+            Debug.LogError("[Lockstep] map placements haven't finished yet — can't start.");
             return;
         }
         _started = true;

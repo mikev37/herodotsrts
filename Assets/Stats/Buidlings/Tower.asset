@@ -1,0 +1,91 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 371c4bb6cd491b7469497ac807c4f46e, type: 3}
+  m_Name: Tower
+  m_EditorClassIdentifier: 
+  displayName: Tower
+  viewPrefab: {fileID: 3547851351359589952, guid: 18469ee2f9f2dd14092bcc09c047f8c8, type: 3}
+  speed: 0
+  radius: 1
+  mass: 50
+  turnSpeed: 0
+  separationStrength: 8
+  combatSpacing: 1.3
+  idleSpacing: 2.2
+  maxHealth: 500
+  deathAnimSeconds: 2
+  armor: 0
+  shield: 0
+  receivesAbilities: 0
+  attackInterval: 1
+  attackCooldown: 1
+  attackDamage: 0
+  meleeCleave: 0
+  meleeStrikeArc: 120
+  meleeRange: 1.2
+  isRanged: 1
+  projectile: {fileID: 11400000, guid: d8e2101adbd385944b406faf3480e26f, type: 2}
+  attackRange: 10
+  isHero: 0
+  maxMana: 100
+  manaRegen: 2
+  abilities:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  prodCostGold: 0
+  prodCostWood: 0
+  prodCostFood: 0
+  productionTime: 0
+  foodCost: 0
+  buildPower: 0
+  builds: []
+  harvestRate: 0
+  carryCapacity: 0
+  isHauler: 0
+  icon: {fileID: 0}
+  morphEffectPrefab: {fileID: 0}
+  morphTarget: {fileID: 0}
+  morphTicks: 30
+  upgrades: []
+  attackNearbyRange: 8
+  avoidMeleeRange: 6
+  retreatHealthFraction: 0.25
+  pursueDistance: 40
+  cohesionRadius: 20
+  frontPriority: 0
+  looseness: 0
+  aggression: 1
+  formationSpacing: 3
+  footprintX: 3
+  footprintZ: 3
+  maxHeightDelta: 1
+  isDepot: 0
+  isIntake: 0
+  isColony: 0
+  isProducer: 0
+  isRelay: 0
+  buildTime: 50
+  costGold: 0
+  costWood: 0
+  costFood: 0
+  selfBuildPower: 0
+  sacrifice: 0
+  resourceType: 0
+  haulerUnit: {fileID: 0}
+  haulThreshold: 200
+  relayRate: 20
+  relayRange: 25
+  produces: []
+  researches: []
+  buildingUpgrades: []

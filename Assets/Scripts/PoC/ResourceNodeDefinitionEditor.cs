@@ -1,8 +1,9 @@
 using UnityEditor;
 
 // Custom inspector for ResourceNodeDefinition. Draws the shared building
-// allowlist (which already includes "resourceType" via BuildingDefinitionEditor)
-// plus the node-specific fields: amount, despawnWhenDepleted, huskLingerSeconds.
+// allowlist, then the node-specific fields (resourceType lives on the node now,
+// not on BuildingDefinition — a depot accepts ALL types, so type only means
+// something for a node's yield).
 [CustomEditor(typeof(ResourceNodeDefinition))]
 public class ResourceNodeDefinitionEditor : Editor
 {
@@ -19,6 +20,7 @@ public class ResourceNodeDefinitionEditor : Editor
 
         EditorGUILayout.Space();
         EditorGUILayout.LabelField("Resource Node", EditorStyles.boldLabel);
+        EditorGUILayout.PropertyField(serializedObject.FindProperty("resourceType"), true);
         EditorGUILayout.PropertyField(serializedObject.FindProperty("amount"), true);
         EditorGUILayout.PropertyField(serializedObject.FindProperty("despawnWhenDepleted"), true);
         EditorGUILayout.PropertyField(serializedObject.FindProperty("huskLingerSeconds"), true);

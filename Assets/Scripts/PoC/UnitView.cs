@@ -22,8 +22,17 @@ public class UnitView : MonoBehaviour
     [SerializeField] private Animator animator;
     [SerializeField, FormerlySerializedAs("teamColor")] private PlayerColorTarget playerColor;
 
+    [Tooltip("If the prefab has no PlayerColorTarget, tint ALL renderers with the player color as a " +
+             "fallback (so units are colored out of the box). Turn off if a prefab should never be tinted " +
+             "(e.g. a neutral resource node) — or add a PlayerColorTarget to tint only specific slots.")]
+    [SerializeField] private bool autoTintAllRenderers = true;
+
     private static readonly int StateParam = Animator.StringToHash("State");
+    private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+    private static readonly int ColorId     = Shader.PropertyToID("_Color");
     private int _lastState = -1;
+    private MaterialPropertyBlock _mpb;
+    private Renderer[] _fallbackRenderers;
 
     public float HP;
 
@@ -48,11 +57,29 @@ public class UnitView : MonoBehaviour
         animator.SetInteger(StateParam, s);
     }
 
-    // Tints the player/commander color onto the prefab's marked slots only.
-    // No-op (and materials untouched) if the prefab has no PlayerColorTarget.
+    // Tints the player/commander color. Priority:
+    //   1. a PlayerColorTarget on the prefab (tints only its marked slots) — the
+    //      precise, artist-controlled path;
+    //   2. otherwise, if autoTintAllRenderers, a MaterialPropertyBlock tint on
+    //      every renderer — so units are colored with zero prefab setup.
+    // Uses a property block (never instantiates materials, no per-unit leak).
     public void SetPlayerColor(Color color)
     {
-        if (playerColor != null) playerColor.Apply(color);
+        if (playerColor != null) { playerColor.Apply(color); return; }
+        if (!autoTintAllRenderers) return;
+
+        _mpb ??= new MaterialPropertyBlock();
+        if (_fallbackRenderers == null || _fallbackRenderers.Length == 0)
+            _fallbackRenderers = GetComponentsInChildren<Renderer>(true);
+
+        foreach (var r in _fallbackRenderers)
+        {
+            if (r == null) continue;
+            r.GetPropertyBlock(_mpb);
+            _mpb.SetColor(BaseColorId, color);   // URP lit
+            _mpb.SetColor(ColorId, color);       // built-in / other
+            r.SetPropertyBlock(_mpb);
+        }
     }
 
 	internal void setHP(float current) {

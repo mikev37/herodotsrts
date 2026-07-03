@@ -14,8 +14,8 @@ using UnityEngine;
 public class ProjectileViewManager : MonoBehaviour
 {
     [Header("Config")]
-    [Tooltip("The UnitFactory holding the roster (used to resolve projectile view prefabs).")]
-    [SerializeField] private UnitFactory factory;
+    // Roster auto-resolved (single project asset) — no hand-wiring.
+    private RosterDefinition roster;
     [Tooltip("Used when a projectile definition has no view prefab assigned.")]
     [SerializeField] private GameObject fallbackPrefab;
 
@@ -35,7 +35,7 @@ public class ProjectileViewManager : MonoBehaviour
         var world = World.DefaultGameObjectInjectionWorld;
         worldReady = world != null && world.IsCreated;
         if (!worldReady) { Debug.LogWarning("[ProjectileViewManager] No ECS world found."); return; }
-        if (factory == null) Debug.LogWarning("[ProjectileViewManager] No UnitFactory assigned.");
+        roster = RosterDefinition.Get();
         _em = world.EntityManager;
         _query = _em.CreateEntityQuery(
             ComponentType.ReadOnly<ProjectileTag>(),
@@ -75,7 +75,7 @@ public class ProjectileViewManager : MonoBehaviour
 
     private Transform Acquire(int id)
     {
-        var prefab = factory != null && factory.Roster != null ? factory.Roster.GetProjectileViewPrefab(id) : null;
+        var prefab = roster != null ? roster.GetProjectileViewPrefab(id) : null;
         if (prefab == null) prefab = fallbackPrefab;
         if (prefab == null) return null;
 

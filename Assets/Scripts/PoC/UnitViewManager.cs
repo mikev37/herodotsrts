@@ -16,8 +16,10 @@ public class UnitViewManager : MonoBehaviour
 {
     public static UnitViewManager Instance { get; private set; }
 
-    [Tooltip("The same RosterDefinition asset the UnitFactory uses.")]
-    public RosterDefinition roster;
+    // Auto-resolved single project asset (same one the factory uses) — not a
+    // hand-wired field. Guarantees the view manager and factory never disagree
+    // about the def-id space.
+    private RosterDefinition roster;
 
     [Header("Player colors (index = player id)")]
     public Color[] playerColors =
@@ -25,10 +27,6 @@ public class UnitViewManager : MonoBehaviour
         new Color(0.30f, 0.55f, 1.00f),
         new Color(1.00f, 0.40f, 0.30f),
     };
-
-    [Tooltip("One-shot VFX spawned UNPARENTED at a morph swap, so it survives the prefab changeover " +
-             "(an effect parented to either view would be pooled/destroyed with it). Should self-destruct.")]
-    public GameObject morphEffectPrefab;
 
     [Header("Debug (runtime, read-only)")]
     public bool worldReady;
@@ -54,6 +52,7 @@ public class UnitViewManager : MonoBehaviour
         worldReady = world != null && world.IsCreated;
         if (!worldReady) { Debug.LogWarning("[UnitViewManager] No ECS world."); return; }
         _em = world.EntityManager;
+        roster = RosterDefinition.Get();
         if (roster != null) roster.EnsureBuilt();
 
         _viewQuery = _em.CreateEntityQuery(
@@ -83,9 +82,12 @@ public class UnitViewManager : MonoBehaviour
             // swap the view if this entity MORPHED (UnitDefId changed under the same Entity)
             if (_views.TryGetValue(e, out var view) && _typeOf.TryGetValue(view, out var vdef) && vdef != ids[i].Value)
             {
-                // detached one-shot VFX at the swap point — survives because it's parented to nothing
-                if (morphEffectPrefab != null)
-                    Destroy(Instantiate(morphEffectPrefab, xforms[i].Position, xforms[i].Rotation), 4f);
+                // Per-unit morph VFX: the effect belongs to the definition being
+                // morphed INTO (a Castle's completion burst differs from a siege
+                // tank deploying). Spawned unparented so it survives the view swap.
+                var targetDef = roster != null ? roster.GetDefinition(ids[i].Value) : null;
+                if (targetDef != null && targetDef.morphEffectPrefab != null)
+                    Destroy(Instantiate(targetDef.morphEffectPrefab, xforms[i].Position, xforms[i].Rotation), 4f);
                 Release(view); _views.Remove(e); view = null;
             }
 

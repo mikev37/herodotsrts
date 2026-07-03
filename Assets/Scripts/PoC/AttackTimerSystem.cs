@@ -1,4 +1,5 @@
 using Unity.Burst;
+using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
@@ -53,9 +54,11 @@ public partial struct AttackTimerSystem : ISystem
     {
         public float Dt, HeightDamageBonus, HeightBonusCap;
         public EntityCommandBuffer.ParallelWriter Ecb;
+        [ReadOnly] public ComponentLookup<Immobile> ImmobileLk;
 
         private void Execute(
             [ChunkIndexInQuery] int sortKey,
+            Entity self,
             in LocalTransform xform,
             in Player player,
             in Velocity vel,
@@ -66,6 +69,7 @@ public partial struct AttackTimerSystem : ISystem
             ref CombatStatus status)
         {
             attack.Pulse = 0f;
+            bool isImmobile = ImmobileLk.HasComponent(self);
 
             // Not committed (moving, no target, ordered away) -> cycle resets.
             if (!status.IsAttacking || !target.Has)
@@ -75,8 +79,14 @@ public partial struct AttackTimerSystem : ISystem
                 return;
             }
             float2 enemydir = target.Info.Position - xform.Position.xz;
-            //moving or not facing the enemy = no attack
-            if (math.length(vel.Value) > 1 || math.dot(xform.Forward().xz, enemydir) < .65f) return;
+            // Immobile attackers (towers) can't rotate or move — SteeringSystem
+            // skips them — so the "must be stationary and facing" gate would block
+            // them forever. They're always eligible to fire; mobile units must
+            // stop and face first.
+            if (!isImmobile)
+            {
+                if (math.length(vel.Value) > 1 || math.dot(xform.Forward().xz, enemydir) < .65f) return;
+            }
 
             switch (attack.Phase)
             {

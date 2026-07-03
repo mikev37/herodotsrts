@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
@@ -19,8 +21,10 @@ public class UnitFactory : MonoBehaviour
 {
     public static UnitFactory Instance { get; private set; }
 
-    [Tooltip("The roster asset (def-id registry).")]
-    public RosterDefinition roster;
+    // The roster is a single project asset, auto-resolved (RosterDefinition.Get)
+    // — not a hand-wired field, so it can't be mis-assigned or left null in a
+    // fresh scene. There is exactly one roster; wiring it per-scene was a foot-gun.
+    private RosterDefinition roster;
     public RosterDefinition Roster => roster;
 
     [Header("Starting bank (per player)")]
@@ -28,6 +32,34 @@ public class UnitFactory : MonoBehaviour
     public int playerCount = 2;
 
     public bool Ready { get; private set; }
+
+    // ---- map-placement coordination (folded in from the old coordinator) ----
+    // MapBootstrap components register here (static, so registration survives
+    // whatever order Awake/Start run in). After the factory is Ready it spawns
+    // them all in ONE deterministic pass, so StableIds match on every peer.
+    // PlacementsDone is the single gate LockstepNet checks before capturing the
+    // starting snapshot.
+    private static readonly List<MapBootstrap> _bootstraps = new();
+    public bool PlacementsDone { get; private set; }
+
+    public static void RegisterBootstrap(MapBootstrap b)
+    {
+        if (!_bootstraps.Contains(b)) _bootstraps.Add(b);
+        // Late registration (runtime-instantiated after the initial pass): spawn
+        // immediately so it isn't silently dropped. Outside the deterministic
+        // startup set — route runtime map spawns through a command if they must
+        // be lockstep-safe.
+        var f = Instance;
+        if (f != null && f.Ready && f.PlacementsDone && !IsNetworkClient() &&
+            f.roster != null && b != null && b.definition != null)
+        {
+            Debug.LogWarning($"[UnitFactory] '{b.name}' registered after the initial spawn pass — " +
+                             "spawning immediately (not part of the deterministic startup set).", b);
+            b.Spawn(f.roster);
+        }
+    }
+
+    public static void UnregisterBootstrap(MapBootstrap b) => _bootstraps.Remove(b);
 
     private EntityManager _em;
     private EntityArchetype _archetype;
@@ -44,7 +76,8 @@ public class UnitFactory : MonoBehaviour
         var world = World.DefaultGameObjectInjectionWorld;
         if (world == null || !world.IsCreated) { Debug.LogWarning("[UnitFactory] No ECS world."); return; }
         _em = world.EntityManager;
-        if (roster == null) { Debug.LogError("[UnitFactory] No RosterDefinition assigned."); return; }
+        roster = RosterDefinition.Get();
+        if (roster == null) return;   // Get() already logged how to fix it
         roster.EnsureBuilt();          // also deterministically pre-registers the projectile-view id space
         _terrainQuery = _em.CreateEntityQuery(ComponentType.ReadOnly<TerrainHeightField>());
 
@@ -68,13 +101,40 @@ public class UnitFactory : MonoBehaviour
 
         Ready = true;
 
-        // Initial world content (starting armies, resource nodes, obstacle buildings)
-        // is authored via MapBootstrap, not spawned here — it waits for `Ready` and
-        // then calls Create() per placement with a real per-entry owner player. That
-        // single mechanism replaces the old per-team rank-spawn (SpawnAll) with
-        // something that scales to any player count and unifies units/buildings/nodes.
-        // On a networked client MapBootstrap self-skips; the world instead arrives via
-        // SimSnapshot.Restore.
+        SpawnAllPlacements();      // authored map content, in deterministic order
+    }
+
+    // Spawns every registered MapBootstrap in a deterministic global order
+    // (order, then name, then position) — identical on every peer regardless of
+    // scene-load or Awake/OnEnable ordering. A networked CLIENT skips this (its
+    // world arrives via SimSnapshot.Restore).
+    private void SpawnAllPlacements()
+    {
+        if (IsNetworkClient()) { PlacementsDone = true; return; }
+
+        var ordered = _bootstraps
+            .Where(b => b != null)
+            .OrderBy(b => b.order)
+            .ThenBy(b => b.name, System.StringComparer.Ordinal)
+            .ThenBy(b => b.transform.position.x)
+            .ThenBy(b => b.transform.position.z)
+            .ToList();
+
+        int total = 0, groups = 0;
+        foreach (var b in ordered)
+        {
+            int made = b.Spawn(roster);
+            if (made > 0) { total += made; groups++; }
+        }
+
+        PlacementsDone = true;
+        Debug.Log($"[UnitFactory] spawned {total} entities from {groups} placements (deterministic order).");
+    }
+
+    internal static bool IsNetworkClient()
+    {
+        var nm = Unity.Netcode.NetworkManager.Singleton;
+        return nm != null && nm.IsListening && nm.IsClient && !nm.IsServer;
     }
 
     // ---- entity creation (was SpawnUnit) -----------------------------------

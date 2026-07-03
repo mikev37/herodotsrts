@@ -111,6 +111,11 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Icon shown in build/produce menus, progress bar, and queue strip.")]
     public Sprite icon;
 
+    [Tooltip("One-shot VFX spawned (unparented, at the unit's transform) when this unit is the RESULT " +
+             "of a morph/upgrade — so a Keep→Castle, a siege tank deploying, and a Knight→Paladin can each " +
+             "have their own effect. Null = no effect. Should self-destruct.")]
+    public GameObject morphEffectPrefab;
+
     [Header("Morph (free toggle — e.g. siege/unsiege, building settles into unit)")]
     [Tooltip("The OTHER form this unit toggles to (siege/unsiege, etc.). Null = cannot morph. G key triggers it.")]
     public UnitDefinition morphTarget;

@@ -37,7 +37,8 @@ public class BuildingDefinition : UnitDefinition
     // Economy — role (what this building does in the resource loop)
     // -------------------------------------------------------------------------
     [Header("Economy — role")]
-    [Tooltip("Harvesters can deliver resources here.")]
+    [Tooltip("Harvesters can deliver resources here. A depot accepts ALL resource types " +
+             "(there is no per-depot type restriction — the harvester's cargo is deposited as-is).")]
     public bool isDepot = false;
 
     [Tooltip("CAPITAL: a depot whose holdings stream directly to the player bank each tick. " +
@@ -74,14 +75,6 @@ public class BuildingDefinition : UnitDefinition
     [Tooltip("If true, the first builder unit that walks onto the scaffold is consumed — " +
              "its destruction instantly completes construction (sacrifice mechanic).")]
     public bool sacrifice = false;
-
-    // -------------------------------------------------------------------------
-    // Economy — resource type
-    // -------------------------------------------------------------------------
-    [Header("Economy — resource type")]
-    [Tooltip("The resource type this depot accepts from harvesters, or that this node yields. " +
-             "Also used by colonies to match their hauler's cargo type.")]
-    public ResourceType resourceType = ResourceType.Gold;
 
     // -------------------------------------------------------------------------
     // Economy — colony / hauler

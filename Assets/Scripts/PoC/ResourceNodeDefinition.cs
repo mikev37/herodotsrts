@@ -13,6 +13,8 @@ using UnityEngine;
 public class ResourceNodeDefinition : BuildingDefinition
 {
     [Header("Resource node")]
+    [Tooltip("The single resource type this node yields to harvesters.")]
+    public ResourceType resourceType = ResourceType.Gold;
     [Tooltip("Initial bank amount (also the per-slot capacity). Depletes as harvesters pull; 0 = empty/despawn.")]
     public int amount = 1000;
     [Tooltip("When the node empties, despawn it after huskLingerSeconds instead of leaving a permanent husk/stump.")]
@@ -32,6 +34,5 @@ public class ResourceNodeDefinition : BuildingDefinition
         isHero          = false;
         footprintX      = 2;
         footprintZ      = 2;
-        resourceType    = ResourceType.Gold;
     }
 }
