@@ -45,6 +45,7 @@ public partial struct AttackTimerSystem : ISystem
             HeightDamageBonus = 0.05f,   // global: ranged damage bonus per meter of height advantage
             HeightBonusCap = 6f,         // global: height advantage stops counting beyond this (meters)
             Ecb = ecb,
+            ImmobileLk = SystemAPI.GetComponentLookup<Immobile>(true),   // fresh each tick (matches house style)
         }.ScheduleParallel();
     }
 

@@ -1,277 +1,309 @@
-# Marble Combat — RTS DOTS Vertical Slice
+# Herodotus RTS — Deterministic ECS Battle Simulation
 
-A Unity 6 / Entities **1.4** proof-of-concept for a large-scale, behavior-driven
-RTS with **no physics engine**. The simulation runs as ECS entities (cache-
-coherent, Burst, parallel); visuals are ordinary pooled GameObjects slaved to
-those entities. Heroes and UI live in the managed (GameObject) world and talk to
-the sim through data.
+A large-scale real-time-strategy battle sim built on **Unity 6 DOTS** (Entities 1.2). The simulation is a pure, deterministic, Burst-compiled ECS world; rendering, input, and networking are thin layers bolted onto its edges. The whole thing is engineered around one property — **bit-exact determinism** — because that property is what makes lockstep networking, instant replay, save/load, and desync recovery all fall out of the *same* mechanism.
 
-This slice demonstrates, end to end:
-
-- **Flow-field pathfinding** around obstacles — terrain doodads *and* buildings
-  created/destroyed during play, with units re-routing automatically.
-- **Ranged units with simulated projectiles** (entities, not physics bodies —
-  the thing the old GrabPass sim choked on).
-- **A GameObject hero** that changes nearby unit behavior — the GO↔DOTS bridge,
-  driven both directions.
-- **Woven role behaviors** that produce emergent formations (shield wall, spears
-  behind shields, skirmisher kiting, attackers seeking the best target).
-- **An RTS control scheme** (box-select, move, attack) built on one abstract
-  `Commander` the **AI shares**.
-
-> ⚠️ Structured scaffold, **not compiler-tested**. Targets current API
-> (`ISystem`, `IJobEntity`, `SystemAPI`, Bakers, SubScenes). Expect a few small
-> fix-ups — likely spots are listed at the bottom.
+> If you read one thing, read [The determinism contract](#the-determinism-contract). Every non-obvious design choice in this codebase exists to protect it.
 
 ---
 
-## Architecture in one breath
+## Table of contents
 
-Two worlds that never reference each other directly:
-
-- **Simulation = entities.** Lightweight data + systems. This is what scales.
-- **Visuals/heroes/UI = GameObjects.** A `UnitViewManager` copies each entity's
-  transform onto a pooled view and pushes its `AnimState` into an Animator.
-
-The only link is data: `UnitTypeId` (which prefab) + `AnimState` (which clip).
-That keeps every system Burst-compiled and parallel.
+- [What this is](#what-this-is)
+- [The determinism contract](#the-determinism-contract)
+- [Architecture at a glance](#architecture-at-a-glance)
+- [The tick pipeline](#the-tick-pipeline)
+- [Subsystems in depth](#subsystems-in-depth)
+- [The data model](#the-data-model)
+- [Abilities & modifiers](#abilities--modifiers)
+- [Navigation](#navigation)
+- [The commander layer](#the-commander-layer)
+- [Networking (lockstep)](#networking-lockstep)
+- [Snapshots: one mechanism, four jobs](#snapshots-one-mechanism-four-jobs)
+- [The view layer](#the-view-layer)
+- [Running & testing](#running--testing)
+- [File map](#file-map)
+- [Extending the sim](#extending-the-sim)
 
 ---
 
-## The simulation pipeline (system order)
+## What this is
 
-Everything runs in `SimulationSystemGroup`, ordered by `[UpdateAfter]`:
+Thousands of units push, ram, shoot, and cast on heightmapped terrain, organized into formations, commanded either by a human or an AI, and kept perfectly in sync across the network without replicating a single position. Design goals, in priority order:
+
+1. **Determinism first.** Identical inputs ⇒ identical state, bit for bit, on every machine and every replay.
+2. **Emergent physicality.** Downhill chargers hit harder, shields brace and hold a line, units slide along walls — these are consequences of the math, not special cases.
+3. **Data-driven content.** Units, abilities, buildings, walls, and projectiles are authored as `ScriptableObject` definitions; no per-unit code.
+4. **Clean layer separation.** The sim never references an `Animator`, a `Camera`, a `GameObject`, or a network variable. Those live outside and read the sim.
+
+**Environment:** Unity `6000.0.3f1` · Entities & Entities Graphics `1.2.4` · Netcode for GameObjects `2.12.0` · URP `17.0.3`.
+
+---
+
+## The determinism contract
+
+The simulation is **iteration-order-sensitive**. Neighbor loops sum floats (separation, contact impulses, obstacle normals), and floating-point addition isn't associative, so the *order* units are visited perturbs the result. Chunk layout — which is affected by structural changes (spawns, deaths, tag adds) — determines that order. From this single fact, everything follows:
+
+- **Every peer performs identical structural changes in the same tick.** Spawns and deaths are driven by deterministic sim state, never by local events.
+- **No wall-clock time in the sim.** `SystemAPI.Time.DeltaTime` is a fixed `1/30 s`, forced by a rate manager (`LockstepBootstrap`). No `Time.time`, no `UnityEngine.Random`, no frame-rate coupling.
+- **Identity is stable, not `Entity`.** Raw `Entity` values differ per world/run, so units are referenced by `StableId` (assigned in deterministic spawn order). Orders and replays name units by `StableId`; a registry rebuilt each tick maps it back to the live entity.
+- **Derived state never enters the checksum.** The checksum exists to detect desync of *source* state cheaply and totally. Anything recomputable from source state (perception, animation, formation slots) is excluded — if it diverged, its inputs already diverged and were already caught.
+- **When anyone desyncs, everyone restores.** Because the world is order-sensitive, you can't patch just the one bad unit on the one bad peer. A network sim world only ever *comes into existence* by restoring a snapshot, and recovery re-restores everyone from the host's baseline. (See [Snapshots](#snapshots-one-mechanism-four-jobs).)
+
+The single guardrail that catches violations: `SimChecksumSystem` folds each unit's `(pos, hp, vel, team, StableId, navCtx)` into an **order-independent** hash every tick, and `ChecksumHistorySystem` keeps ~34 s of history so the *first* divergent tick is identifiable, not just the fact of divergence.
+
+---
+
+## Architecture at a glance
 
 ```
-SpatialHashSystem      build the neighbor grid (core of scaling)
-  ObstacleGridSystem   rasterize buildings/doodads -> passability grid
-  FlowFieldSystem      BFS flow field toward the current goal (rebuilt on change)
-  TargetingSystem      every unit picks its best enemy from the hash
-  HeroAuraSystem       heroes stamp a BehaviorMode onto units in range
-  BehaviorSystem       THE resolver: one DesiredDestination per unit
-  SlopeSystem          terrain speed multiplier (downhill hits harder, emergent)
-  SteeringSystem       flow-follow + separation + obstacle repulsion + integrate
-  ContactCombatSystem  melee impact damage + knockback (no physics)
-  RangedAttackSystem   spawn projectile entities on cooldown
-  ProjectileSystem     move projectiles, hit enemies, apply damage
-  AnimationStateSystem map sim signals -> Idle/Walk/Block/Attack/Die
-  DeathSystem          let the Die clip play, then destroy the entity
+┌─────────────────────────────────────────────────────────────────────┐
+│  OUTSIDE THE SIM (managed, per-client, never hashed)                  │
+│                                                                       │
+│  PlayerCommander / AICommander ─┐         UnitView · ProjectileView   │
+│  (intent: mouse, AI timers)     │         TeamColorTarget · Animator  │
+│                                 │              ▲  (reads AnimState)    │
+│  LockstepNet (NGO relay) ───────┤              │                      │
+│                                 ▼              │                      │
+│                          Commander.Outbox ─────┼──────────────┐       │
+└─────────────────────────────────┼─────────────┼──────────────┼───────┘
+                                  │ commands     │ read-only    │
+┌─────────────────────────────────▼─────────────┴──────────────▼───────┐
+│  THE SIM (Burst ECS, deterministic, SimulationSystemGroup @ 30 Hz)    │
+│                                                                       │
+│  SimClock → StableIds → Commands → Sensing/Fields → Decision →        │
+│  Locomotion → Combat → Bookkeeping → Checksum                         │
+│                                                                       │
+│  State lives only in components. Snapshots (de)serialize it whole.    │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
----
+Two rules define the boundary:
 
-## Files
-
-| File | Role |
-|------|------|
-| `Components.cs` | Core components + spatial-hash & spawner singletons |
-| `SliceComponents.cs` | Roles, orders, navigation grid, projectiles, hero aura |
-| `UnitDefinition.cs` | `UnitDefinition` ScriptableObject (per-role stats) |
-| `UnitAuthoring.cs` | `UnitAuthoring` component + its Baker + `UnitTypeId` |
-| `UnitSpawnerAuthoring.cs` | `UnitSpawnerAuthoring` component + its Baker |
-| `SpawnSystem.cs` | Spawns a mixed composition per team, once |
-| `SpatialHashSystem.cs` | Per-frame parallel neighbor grid — **the scaling core** |
-| `Navigation.cs` | `ObstacleGridSystem` + `FlowFieldSystem` (pathfinding) |
-| `TargetingSystem.cs` | Per-unit best-enemy selection (nearest, weighted weak) |
-| `HeroAuraSystem.cs` | Applies hero auras to friendly units in range |
-| `HeroLink.cs` | `HeroLink` MonoBehaviour — the GO↔DOTS hero bridge |
-| `BehaviorSystem.cs` | Role resolver → emergent formations |
-| `SlopeSystem.cs` + `TerrainFieldBootstrap.cs` | Terrain slope speed modifier |
-| `SteeringSystem.cs` | Locomotion: flow field + separation + obstacle avoidance |
-| `ContactCombatSystem.cs` | Melee impact damage + knockback |
-| `Projectiles.cs` | `RangedAttackSystem` + `ProjectileSystem` |
-| `ProjectileViewManager.cs` | Pooled projectile visuals |
-| `AnimationStateSystem.cs` | Sim → animation state |
-| `DeathSystem.cs` | Death lifecycle |
-| `Commander.cs` | abstract `Commander` — the shared order API |
-| `PlayerCommander.cs` | RTS mouse input on the shared verbs |
-| `AICommander.cs` | Timer-driven AI on the same verbs |
-| `BuildingManager.cs` | Runtime place/remove obstacle buildings |
-| `DebugComponents.cs` | `SimDebug` singleton + `SimDebugSystem` (live counts) |
-| `DebugOverlay.cs` | HUD + Scene-view gizmos; live read-only inspector stats |
-| `UnitView.cs` / `UnitViewManager.cs` | Pooled animated GameObject views |
-
-> **One MonoBehaviour/ScriptableObject per file**, named to match the class —
-> Unity won't load a component otherwise. ECS `ISystem` and `IComponentData`
-> structs have no such rule, so those stay grouped; `Baker<T>` classes can sit
-> beside their authoring component.
+- **Intent flows in** through the `Commander` stream (stamped to execute `InputDelayTicks` ahead, relayed over the network). Everything *reactive* — targeting, formation, steering, auto-behavior — is a deterministic sim system, not intent.
+- **State flows out** read-only to views. Views translate `AnimState`, position, and team color into `GameObject`s; the sim never calls back.
 
 ---
 
-## How each requested feature works
+## The tick pipeline
 
-### Pathfinding around dynamic obstacles (flow field)
-`ObstacleGridSystem` rasterizes every `Obstacle` entity into a passability grid
-each frame and bumps a version when the set changes. `FlowFieldSystem` runs a BFS
-from the goal cell over passable cells and derives a per-cell direction toward
-the goal — **rebuilt only when the goal or obstacles change**, so it's cheap.
-Units on a long commanded move follow the field (routing around buildings);
-local role movement steers straight. `BuildingManager` adds/removes obstacle
-entities at runtime (B / N keys), and the field recomputes on its next tick —
-buildings and terrain doodads are the same `Obstacle` component.
+Every system lives in `SimulationSystemGroup`, driven at a fixed 30 Hz. Ordering is expressed with `[UpdateBefore/After]` and the `OrderFirst/OrderLast` bands. In dependency order:
 
-*PoC limit:* one shared field toward the latest commanded goal. Multiple
-simultaneous group destinations want a small cache of fields keyed by goal cell —
-same algorithm, N of them.
+**Frame open**
+1. **`SimClockSystem`** *(OrderFirst)* — advances the authoritative tick counter.
+2. **`StableIdRegistrySystem`** *(OrderFirst)* — rebuilds the `StableId → Entity` map for this tick.
 
-### Ranged units + projectiles
-Skirmishers carry a `RangedAttack`. `RangedAttackSystem` fires a real
-`Projectile` **entity** at the target when in range and off cooldown;
-`ProjectileSystem` flies it, checks the hash for an enemy hit, applies damage,
-and despawns. Projectiles are pure data — no rigidbodies, no GrabPass sampling —
-so thousands are fine.
+**Input**
+3. **`CommandIngestSystem`** — pulls this tick's commands (local + networked) into the `SimCommand` buffer.
+4. **`CommandApplySystem`** — applies orders: move/attack/stop, ability *commit* (mana + resource checks, arms `PendingCast`), and building placement (the one structural op driven by a command).
 
-### Hero ↔ DOTS bridge
-`HeroLink` (MonoBehaviour) is your rich GameObject hero. It owns a lightweight
-hero **entity** carrying a `HeroAura`. Each frame it pushes its transform +
-current ability mode **into** the entity (GO→ECS), and reads the count of units
-it's affecting **back** (ECS→GO). `HeroAuraSystem` does the heavy per-unit work
-in Burst: stamping `Aggressive`/`Defensive`/`Default` onto friendly units in
-radius. Keys 1/2/3 toggle the mode; WASD moves the hero.
+**Sensing & world fields**
+5. **`AttackTimerSystem`** *(before hash)* — runs the charge→fire→cooldown cycle; melee sets a one-tick `Pulse`, ranged spawns a projectile. Ordered before the hash so this tick's `Pulse` is visible this tick.
+6. **`SpatialHashSystem`** — buckets units and publishes the `UnitInfo` snapshot every neighbor query reads.
+7. **`ObstacleGridSystem`** — rebuilds cell passability from `Immobile` footprints, terrain slope, and water.
+8. **`FlowFieldSystem`** — maintains the hierarchical navigation fields (lazily, per requested path).
+9. **`ProjectileSystem`** — advances each projectile's arc and builds the `ProjectileHash`.
+10. **`AbilityFieldSystem`** — each unit tests which active ability fields it's inside and stamps their modifiers into its `ActiveModifier` buffer.
+11. **`ModifierTickSystem`** — applies value effects (damage/heal), ticks modifier timers, drops expired ones.
+12. **`StatResolveSystem`** — recomputes every unit's *live* stats (`Speed`, `Attack`, `Defense`, `UnitTuning`, `BehaviorOverride`) from `BaseStats` + surviving modifiers. This is why the rest of the sim never had to change when modifiers were added.
+13. **`InformationGatherSystem`** — the one perception sweep: fills each unit's `Perception`, its `ContactList` neighbor snapshot, and its `IncomingProjectile` buffer. One scan, one truth — physics and combat can't disagree about who's touching whom.
 
-### Woven role behaviors (Game-of-Life style)
-`BehaviorSystem` is the single decision point. After order/hero overrides, each
-role applies one simple rule and the patterns emerge from interaction:
-- **Shield** — slides laterally to line up with nearby friendly shields, facing
-  the enemy → a **wall** forms.
-- **Spear** — tucks in just behind the nearest friendly shield.
-- **Skirmisher** — keeps a preferred distance from the nearest enemy (kite).
-- **Attacker** — advances onto its best target (from `TargetingSystem`).
+**Decision**
+14. **`FormationSystem`** — rebuilds formation slot assignments every tick (handles attrition, new orders, reorientation).
+15. **`AbilityCastSystem`** — fires armed casts whose `FireTick` is now (spawns ability fields / spawn-units).
+16. **`BehaviorSystem`** — the positional decision layer. Produces a *desired position* per unit (slot + offset + scatter) and sets `CombatStatus`. Never a velocity — steering owns that.
 
-No behavior "knows" about a phalanx; tune the constants and the formations change.
+**Locomotion & combat**
+17. **`SlopeSystem`** — samples terrain height/slope into `GroundSpeedMultiplier` and each unit's `Height`.
+18. **`SteeringSystem`** — turns the desired position into motion: flow-field following for long moves, separation, obstacle sliding, integration, and facing.
+19. **`ContactCombatSystem`** — receiver-side melee/contact/projectile resolution. `impact = enemyMass × closingSpeed`; downhill units close faster and hit harder. Each unit writes only its own components (parallel, Burst-safe).
+20. **`ProjectileCleanupSystem`** — destroys projectiles marked stale (hit) or expired.
+21. **`AnimationStateSystem`** — derives each unit's `AnimState` purely from sim data.
 
-### RTS UI on a shared Commander
-`Commander` (abstract) owns the order verbs — `IssueMove`, `IssueAttack`,
-`IssueStop` — which write ECS components and set the flow-field goal.
-`PlayerCommander` drives them from mouse input (left-drag box select, right-click
-ground = move, right-click enemy = attack). `AICommander` drives the *same verbs*
-on a timer. Add a smarter AI by overriding `Tick()` — the order plumbing is shared.
+**Bookkeeping**
+22. **`DeathSystem`** — lingers dead units for their death-anim duration, then destroys via an end-of-frame ECB.
+23. **`ManaRegenSystem`** — regenerates mana (add-only; consumption is at cast commit).
+24. **`SimDebugSystem`** — services debug requests.
+
+**Frame close**
+25. **`SimChecksumSystem`** *(OrderLast)* — folds source state into the order-independent tick checksum.
+26. **`ChecksumHistorySystem`** *(OrderLast)* — records it into the ring buffer for divergence detection.
 
 ---
 
-## Setup (~20 min)
+## Subsystems in depth
 
-1. **Unity 6.x**, 3D project (URP or built-in). Units live on the `y = 0` plane.
-2. **Package Manager → install** `com.unity.entities` (Burst/Collections/
-   Mathematics/Jobs come as deps). Entities Graphics is **not** needed — views
-   are GameObjects.
-3. Drop all scripts into `Assets/Scripts/`.
-4. **Stats → ScriptableObjects.** Create → MarbleCombat → Unit Definition. Make
-   four: Shield, Spear, Skirmisher (`isRanged = true`), Attacker. Give each a
-   distinct `viewTypeId` (0/1/2/3) and `role`.
-5. **View prefabs** (the art), one per role: model + `Animator` with an int param
-   **"State"** (0 Idle,1 Walk,2 Block,3 Attack,4 Die) + the `UnitView` component.
-   *No art yet?* Use a Capsule with no Animator — units still move/fight, just
-   without animation.
-6. **Sim prefabs** (art-free), one per role: empty GameObject + `UnitAuthoring`
-   pointing at the matching SO. These get baked; no renderer needed.
-7. **SubScene** → add `UnitSpawnerAuthoring`, assign the 4 **sim** prefabs, set
-   `countPerTeam`.
-8. **Main scene objects:**
-   - top-down `Camera`;
-   - `UnitViewManager` with `viewPrefabsByType[0..3]` = the 4 **view** prefabs;
-   - `ProjectileViewManager` with a small projectile prefab;
-   - `PlayerCommander` (team 0) and `AICommander` (team 1);
-   - a hero GameObject with `HeroLink` (team 0);
-   - `BuildingManager` with a building prefab (or it falls back to a cube);
-   - a `DebugOverlay` GameObject (HUD + Scene-view gizmos — highly recommended);
-   - *(optional)* a Unity `Terrain` + `TerrainFieldBootstrap` for slopes.
-9. Press Play. Start at `countPerTeam = 200`, then crank it.
+### Perception — one sweep, shared by everyone
+`InformationGatherSystem` is the sim's single sensing pass. From the spatial hash it computes, per unit: nearest/most-dangerous/most-exposed enemy, nearest friendly, enemy & friendly centers of mass, a reusable **ContactList** (the exact neighbor set steering and contact combat both consume), and incoming projectiles. Line-of-sight currently applies a *soft priority penalty* (`NoLosMultiplier`) rather than a hard visibility gate.
 
-**Mental model for any new unit:** ScriptableObject = numbers, view prefab =
-looks, sim prefab = the thing that gets baked. Sim and visuals meet only through
-`UnitTypeId` + `AnimState`.
+### Behavior — positions, not velocities
+`BehaviorSystem` answers only "where do I want to be this tick?" — `slotWorld = anchor + offset(shape, index) + scatter(looseness)`. Formation slots come fresh each tick from `FormationSystem`; `hasSlot` gates every formation-dependent decision. Ranges are measured to the target, with height adding reach for ranged units. Everything about *how we actually get there* belongs to steering.
+
+### Formations — a living maintainer
+`FormationSystem` rebuilds slot assignment every tick: depth-sort members along the facing axis, slice into shape-dependent rows (`Grid`/`Wall` uniform, `Wedge` = 1,2,3,…), lateral-sort within each row, `StableId` as the final tiebreak. The shared anchor advances at the slowest member's pace, gated by a straggler tolerance scaled by `Looseness`. `FormationGeometry` is the single shared encoding both assignment and placement decode against, so a unit's world slot is always consistent.
+
+### Steering — locomotion & collision
+Heads toward the destination (sampling the flow field for long commanded moves, straight for short local goals), adds neighbor separation, responds to obstacles with a composite surface normal and smooth falloff (cancels the into-wall velocity component to slide along edges), then integrates. External forces move position but don't corrupt `vel.desiredValue`; `vel.Value` is back-calculated from the actual step so combat's closing-speed math stays honest. Facing: attackers face their target, movers face their motion, otherwise hold.
+
+### Combat — emergent, receiver-side
+`AttackTimerSystem` runs a clean charge→fire→recover cycle that resets on break-off, so no unit ever starts mid-swing. `ContactCombatSystem` resolves both physical ramming and declared strikes receiver-side over the shared ContactList, so physics and damage never disagree. Knockback pushes away from the rammer, scaled by `impact / ownMass`.
+
+### Stats & modifiers — recomputed, not mutated
+Ability effects are `ActiveModifier` entries. `ModifierTickSystem` applies value changes and expiry; `StatResolveSystem` recomputes live stats from `BaseStats` + surviving modifiers each frame. Buffs revert cleanly because nothing is destructively edited — the resolved value simply stops including an expired modifier.
 
 ---
 
-## Controls
+## The data model
 
-| Input | Action |
-|-------|--------|
-| Left-drag | Box-select your units |
-| Right-click ground | Move order (routes via flow field) |
-| Right-click enemy | Attack order |
-| WASD | Move hero |
-| 1 / 2 / 3 | Hero aura: Aggressive / Defensive / Default |
-| B | Place a building under the cursor |
-| N | Remove the nearest building |
+Everything is a component; there is no hidden state. Key groups:
 
----
+| Group | Components |
+|---|---|
+| **Kinematics** | `Velocity`, `Speed`, `Mass`, `KnockbackVelocity`, `UnitRadius`, `GroundSpeedMultiplier`, `MoveTarget`, `DesiredDestination` |
+| **Identity / team** | `UnitTag`, `Team`, `StableId`, `UnitDefId`, `Selected`, `HeroTag` |
+| **Combat** | `Health`, `Attack`, `Defense`, `UnitTuning`, `CombatStatus`, `CombatTarget`, `AttackOrder`, `Ranged`, `Dead`, `DeathTimer` |
+| **Formation** | `FormationMember`, `FormationSlot` |
+| **Perception** | `UnitInfo`, `Perception`, `SpatialHash`, `IncomingProjectile` |
+| **Abilities** | `BaseStats`, `ActiveModifier`, `Mana`, `PendingCast`, `AbilitySlots`, `AbilityCooldowns`, `AbilityField`, `FieldModifier` |
+| **Projectiles** | `Projectile`, `ProjectileTag`, `ProjectileHash`, `ProjectileView` |
+| **Structures** | `BuildingTag`, `Immobile`, `AbilityImmune`, `Wall`, `NavContext`, `Obstacle` |
+| **Economy** | `TeamResources`, `ResourcePoolTag` |
+| **View / anim** | `UnitAnim`, `AnimState` |
 
-## Debugging (added so you can report specifics)
-
-Because this is coded blind, there's a full instrumentation layer:
-
-- **`DebugOverlay`** — drop on one GameObject. On-screen HUD (Game view) with
-  live counts: units per team, alive/dead, projectiles, role breakdown, units
-  under Aggressive/Defensive hero modes, firing/in-contact, selection count,
-  flow-field validity + goal cell, obstacle version + blocked-cell count. It also
-  draws **Scene-view gizmos** (each individually toggleable): flow-field arrows,
-  blocked obstacle cells, per-unit team/facing, lines to each unit's target,
-  lines to each desired destination, and selection rings. Gizmo data is
-  snapshotted after the sim frame, so it never touches a NativeArray mid-job.
-- **Per-component runtime fields** — every MonoBehaviour (`HeroLink`,
-  `PlayerCommander`, `AICommander`, `BuildingManager`, both view managers,
-  `TerrainFieldBootstrap`) exposes read-only `Debug (runtime)` fields that update
-  live in the inspector during play (affected-unit count, selected count, last
-  order issued, active/pooled views, building count, world-ready flags…).
-- **`SimDebug` singleton** — `SimDebugSystem` fills it each frame; the HUD reads
-  it. You can also inspect it directly in the Entities window.
-
-**When something looks wrong, tell me:** the HUD numbers, which gizmo layer is
-off (e.g. "flow arrows point into the building", "no target lines", "shields
-don't line up"), and any console warnings. That localizes almost any issue.
-
-> Gizmos draw in the **Scene** view during play, not the Game view — keep a
-> Scene view visible while testing.
+Units are authored as `UnitDefinition` `ScriptableObject`s and instantiated directly by `UnitManager` (no baking, no SubScene): behaviors pack into a bitmask, and each entity remembers its definition index as `UnitDefId` for view lookup.
 
 ---
 
-## Fixes applied in this pass
+## Abilities & modifiers
 
-- Dead units leave the spatial hash, so corpses are no longer targeted or able
-  to deal contact damage.
-- The hero no longer creates an `EntityQuery` per frame (leak); it caches one and
-  owns its aura entity via `OnEnable`/`OnDisable`.
-- All managed scripts guard against a missing/destroyed ECS world and a missing
-  `Camera.main`.
-- `BuildingManager` and `TerrainFieldBootstrap` destroy the entities they create;
-  navigation systems dispose persistent arrays via stored handles.
-- The spawner skips unassigned role prefabs (Bakers warn at bake time); ranged
-  fire guards against zero projectile speed.
+A fully data-driven effects system. An `AbilityDefinition` compiles to a blittable `AbilitySpec` plus a set of `FieldModifier`s. The lifecycle:
+
+1. **Commit** (`CommandApplySystem`): checks cooldown, mana, and (optionally) team resources — all-or-nothing — then arms `PendingCast` with a `FireTick`.
+2. **Fire** (`AbilityCastSystem`): at `FireTick`, spawns an `AbilityField` (shaped `ShapeType`, anchored by `AnchorType` — including hero-follow) and/or a spawn-unit (this is the "peasant builds a farm for 100 wood" path — a build ability with a building spawn-unit and a resource cost).
+3. **Apply** (`AbilityFieldSystem`): units inside a field stamp its modifiers into `ActiveModifier`. `PersistentArea` refreshes while inside and expires on leave; `CastOnce` stamps exactly once then self-destructs.
+4. **Resolve** (`ModifierTick` + `StatResolve`): value effects apply and timers tick; live stats recompute from what survives.
+
+Modifiers are expressive: `ModTarget` × `ModMode` (add/mul/override) × `CapMode`/`CapRef` (clamping), with `AffectFilter` for who's eligible. Flag modifiers even drive `BehaviorOverride`, which is how auras influence decisions (this replaced the old bespoke hero-aura system).
 
 ---
 
-## Likely fix-up spots
+## Navigation
 
-- **Nothing appears:** confirm `UnitViewManager` has all 4 view prefabs assigned
-  and the SubScene baked (Window → Entities → Hierarchy shows units).
-- **`LocalTransform.FromPosition` / `FromPositionRotationScale`** — names are
-  stable in 1.x; verify against your exact package version.
-- **Rewindable allocator** (`state.WorldUpdateAllocator`) is used for transient
-  per-frame arrays; on lifetime errors switch to `Allocator.TempJob` + Dispose.
-- **ECB singletons** — combat/projectile/death use
-  `EndSimulationEntityCommandBufferSystem.Singleton`; present in the default
-  world, but verify if you customize bootstrap.
-- **`HeroLink.CountAffected`** creates an `EntityQuery` per frame for clarity —
-  cache it in `Start` before shipping.
-- **Flow field is single-goal** — see the note under pathfinding above.
+A tiled **hierarchical flow-field** engine, not per-unit A*:
+
+- **`ObstacleGridSystem`** rebuilds a passability grid each tick from `Immobile` footprints, slope, and water level.
+- **`FlowFieldSystem`** maintains a two-level structure: a **coarse portal graph** over big tiles (with connected-component analysis, so long walls and cliffs are routed *around* rather than into), and **fine per-block direction fields** solved lazily only for blocks a live path actually needs, cached and invalidated by tile version. Fine fields are solved with the **Eikonal equation** (fast-marching, Godunov upwind) for smooth true-distance gradients rather than blocky octile steps. Results are published in `NavFields`; steering samples the field for long moves and falls back to straight-line + obstacle-sliding for short ones.
+
+The grid also carries `NavContext` (Ground / Roof / Transition) and per-cell surface height, which is what lets units stand and fight on walls.
 
 ---
 
-## Scaling caveat
+## The commander layer
 
-The sim scales well past your target; the ceiling is **one Animator per unit**,
-not the simulation — comfortable into the low thousands with off-screen view
-culling. Past that, keep this exact bridge but swap the visual backend for
-GPU-animated instanced meshes (animation baked to a texture). Unity ships no
-built-in entity animation, so plan that swap if counts get large.
+`Commander` is the abstract intent API — a small shared verb set (`IssueMove`, `IssueAttack`, `IssueStop`, `IssueAbility`, `PlaceBuilding`) that stamps each command to execute `InputDelayTicks` ahead and pushes it onto the outbox (which the network relay drains). Two implementations:
+
+- **`PlayerCommander`** — classic RTS input: left-drag box select, right-click to move/attack, right-drag to set formation width, `Q/W/E/R` to arm a caster's ability slots. (Holding both mouse buttons is the camera orbit chord, suppressing select/commit.)
+- **`AICommander`** — timer-driven strategic intent, issuing the same verbs no differently than a human.
+
+Because commander output is the *only* thing that enters the sim from outside, and it enters as timestamped commands, the AI and the player are interchangeable and fully replayable.
 
 ---
 
-## Natural next steps
+## Networking (lockstep)
 
-1. **Multi-goal flow-field cache** so separate groups route to separate places.
-2. **Facing-aware combat** — more damage from behind (facing is already stored).
-3. **Hero civ-swap ability** — structural change via ECB (infantry → knights).
-4. **GPU-animated views** for large unit counts.
+`LockstepNet` implements host-relayed deterministic lockstep on top of **Netcode for GameObjects** — but NGO is used *only* as a connection manager and reliable message channel (`CustomMessaging`). None of its replication, `NetworkVariable`, or spawn machinery touches the sim. The sim stays our deterministic ECS world; only **commands** cross the wire.
+
+The turn protocol, per execution tick `T`:
+
+1. Every peer submits its commands for tick `T` to the host (an empty submission is still sent as a "ready" signal). Peers run `InputDelayTicks` (2) ahead of execution — that gap is the latency budget.
+2. The host collects all peers' submissions and relays the complete command set for `T` back out.
+3. Every peer executes tick `T` with the identical command set. Identical inputs + deterministic sim ⇒ identical state.
+
+`LockstepBootstrap` installs the fixed-rate manager that makes this sound: it drives `SimulationSystemGroup` at a wall-clock 30 Hz via an accumulator, so `DeltaTime` is constant everywhere. Without it a system group free-runs one step per frame — the component logs loudly if that happens.
+
+---
+
+## Snapshots: one mechanism, four jobs
+
+`SimSnapshot` serializes the **complete** simulation state to a byte blob and rebuilds a world from one. Because the sim is order-sensitive, this single mechanism *is*:
+
+- **Game start / late join** — a joining peer receives the host's baseline and restores it; that's how its sim world is born.
+- **Save / load** — the same blob, to disk.
+- **Desync recovery** — when a checksum mismatch is detected, *every* peer (host included) re-restores from the host's baseline, because you can't selectively patch an order-sensitive world.
+
+The invariant that makes it trustworthy: a capture→restore round-trip must reproduce the pre-restore state hash bit-for-bit, proving the serializer covers every hashed bit. That's the `F6` self-test below.
+
+---
+
+## The view layer
+
+Entirely downstream and per-client:
+
+- **`UnitManager`** — owns units. Backs entities from the roster on start; each `LateUpdate` slaves a pooled `viewPrefab` (looked up by `UnitDefId`) to each entity and tints team color via `TeamColorTarget`.
+- **`UnitView`** — lives on the prefab, translates the entity's `AnimState` into a single Animator `State` int (`0 Idle · 1 Walk · 2 Block · 3 Attack · 4 Die`). The sim never touches an Animator, which is the whole reason it stays Burst-compiled.
+- **`ProjectileViewManager`** — pools a visual per projectile, resolved per firing unit's definition.
+- **`TerrainFieldBootstrap`** — samples the Unity `Terrain` into the ECS `TerrainHeightField` once so Burst systems read elevation without managed calls.
+
+Swapping art, rigs, or the entire animation backend touches only this layer.
+
+---
+
+## Running & testing
+
+**Play (single-player):** open the scene, ensure a `LockstepBootstrap`, `UnitManager`, and `TerrainFieldBootstrap` are present, and press Play. With no `LockstepNet` in the scene the sim free-runs at a fixed 30 ticks/s at any frame rate — this is the determinism test bed.
+
+**Play (networked):** add `LockstepNet`. The sim stays frozen until *Start Game*, then each tick additionally requires that tick's networked turn. Use Unity's Multiplayer Play Mode (MPPM) to run host + client roles in one editor.
+
+**Determinism & desync harness** (`SimResultDumper` + `SnapshotDebug`, keyboard-driven, most work offline):
+
+| Key | Action |
+|---|---|
+| `F6` | **Round-trip self-test** — capture the live world, restore in place, compare hashes. Equal ⇒ the serializer is complete. No network needed. |
+| `F8` | **Inject desync** — corrupt one unit's health by 1 locally. On a client this forces a real divergence: the next checksum report disagrees, the host logs the divergent tick, and the resync pipeline heals everyone. |
+| `F10` / `F11` | Save / restore the sim to/from the save file. (In a session, use the host's Load Save so every peer rebuilds.) |
+| *(dump hotkey)* | `SimResultDumper` writes a full end-state report (sorted by `StableId`) to a file. Diff two dumps to confirm a run reproduced exactly. |
+
+The classic verification loops: run twice + diff (proves deterministic math); record once + play back + diff (proves replay); corrupt on a client (proves detection + recovery).
+
+---
+
+## File map
+
+**Lockstep & determinism**
+`Lockstep.cs` (clock, checksum, history) · `LockstepNet.cs` (turn relay + snapshot sync) · `LockstepBootstrap.cs` (fixed-rate manager) · `StableId.cs` · `SimSnapshot.cs` · `SimResultDumper.cs` · `SnapshotDebug.cs`
+
+**Sim pipeline**
+`CommandSystem.cs` (ingest + apply) · `SpatialHashSystem.cs` · `InformationGatherSystem.cs` · `FormationSystem.cs` / `FormationGeometry.cs` · `BehaviorSystem.cs` · `SlopeSystem.cs` · `SteeringSystem.cs` · `AttackTimerSystem.cs` · `ContactCombatSystem.cs` · `Projectiles.cs` · `AnimationStateSystem.cs` · `DeathSystem.cs` · `ManaRegenSystem.cs`
+
+**Abilities & stats**
+`AbilityDefinition.cs` · `AbilityComponents.cs` · `AbilityManager.cs` · `AbilityCastSystem.cs` · `AbilityFieldSystem.cs` · `ModifierTickSystem.cs` · `StatResolveSystem.cs`
+
+**Navigation**
+`Navigation.cs` (obstacle grid + hierarchical Eikonal flow fields) · `NavCell.cs`
+
+**Data / definitions**
+`Components.cs` · `SliceComponents.cs` · `UnitDataComponents.cs` · `UnitDefinition.cs` · `BuildingComponents.cs` · `BuildingDefinition.cs` · `WallDefinition.cs` · `ProjectileDefinition.cs` · `ResourceComponents.cs` · `CombatMath.cs`
+
+**Intent (commanders)**
+`Commander.cs` · `PlayerCommander.cs` · `AICommander.cs`
+
+**View & runtime**
+`UnitManager.cs` · `UnitView.cs` · `ProjectileViewManager.cs` · `TeamColorTarget.cs` · `TerrainFieldBootstrap.cs`
+
+**Debug**
+`DebugComponents.cs` · `DebugOverlay.cs` · `Editor/*`
+
+---
+
+## Extending the sim
+
+A few rules keep contributions from breaking determinism:
+
+- **New reactive behavior is a sim system, not a command.** If it's a pure function of sim state (targeting, an aura, auto-cast), add an `ISystem` and slot it by dependency — no networking needed; it'll be identical on every peer for free. Only genuine outside *intent* goes through `Commander`.
+- **Read neighbors from the ContactList / spatial hash, not a fresh scan.** One scan, one truth. Extend `InformationGatherSystem`'s single sweep instead of adding a second one.
+- **Only mutate a unit's own components in parallel jobs.** Cross-entity writes are the receiver-side pattern (see `ContactCombatSystem`) or go through an ECB.
+- **Structural changes (spawn/die/add tag) must be driven by sim state**, applied identically on all peers, and confined to deterministic points (e.g. an ECB at end of frame).
+- **Never put wall-clock time, `UnityEngine.Random`, or managed calls in a Burst job.** Use `SystemAPI.Time.DeltaTime` (the fixed sim step) and blittable data.
+- **New state that affects gameplay must be added to `SimSnapshot` and, if it's *source* state, folded into the checksum.** Derived state stays out of both.
+- **Author content as `ScriptableObject` definitions**; let `UnitManager` back it. Avoid per-unit code paths.
+
+When in doubt: if two runs from the same inputs could disagree, it's a determinism bug — the `F6`/dump-and-diff harness will find it.

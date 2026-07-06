@@ -816,3 +816,140 @@ built model.
 - **Building accepts commands while busy:** `EconomyQuery.BuildingBusy` is not
   being called in the command handler. Every handler for Produce/Upgrade/Research
   must call `BuildingBusy` and return early if not `None`.
+
+---
+
+## Design notes (answers to authoring questions)
+
+### Resource type: why it's on the node, not the depot
+
+A **depot accepts every resource type** — a harvester arrives with whatever
+cargo it's carrying and the depot deposits it as-is (`DepotJob` requests the full
+cargo `ResourceAmount`, no type filter). So a per-depot "resource type" would be
+meaningless and was removed from `BuildingDefinition`. **`resourceType` now lives
+only on `ResourceNodeDefinition`**, where it means the single type that node
+*yields*. Units also carry any type (cargo is a full `ResourceAmount`; a
+harvester's `HarvestTask.Carrying` is just a selector for which node it's
+currently working). There is no "this building only handles Gold" concept — and
+you don't need one.
+
+### Producer flag vs research/upgrade lists (the inconsistency, resolved)
+
+The clean rule is **capability = its list is non-empty**. Research and building
+upgrades already follow it: a building can research iff `researches` is non-empty,
+and can upgrade iff `buildingUpgrades` is non-empty — no `isResearcher` bool
+needed. Production is the odd one out only because the runtime query needs a cheap
+tag (`ProducerTag`) to iterate producers each tick, so `isProducer` gates that.
+The inspector now treats them uniformly: role sections appear based on their flag
+(`isProducer` → produces list; `isRelay` → relay fields) and the list-only
+capabilities (research, upgrades) are always available to author. There is no
+`isResearcher` because none is needed.
+
+### Colony vs Relay — they solve the SAME problem two ways
+
+Both move a colony's harvested resources back to a capital. The difference is the
+transport mechanism:
+
+- **Colony** is a depot with **no intake** (it doesn't feed the player bank
+  directly). It accumulates, and when its holdings reach `haulThreshold` it
+  **builds a `haulerUnit` cart** that physically drives the resources to the
+  nearest capital and despawns. Transport = **moving units**. Costs unit supply,
+  can be intercepted, needs pathable terrain.
+
+- **Relay** replaces the carts with a **stationary graph**. Relay towers are
+  wires: a colony connected (through a chain of towers within `relayRange`) to a
+  capital **streams `relayRate`/tick** straight into that capital's bank — no unit
+  moves. Transport = **network of buildings**. Can't be intercepted, ignores
+  terrain, but costs the towers and only works while the chain is intact.
+
+You pick per faction: give the colony a `haulerUnit` for the cart model, or leave
+it blank and place relay towers for the streaming model. A capital itself is the
+third role: a depot **with** intake (`isIntake`), which is the only thing that
+actually deposits into the player bank. So:
+
+| Building | isDepot | isIntake | feeds bank | transport out |
+|---|---|---|---|---|
+| Capital  | yes | yes | directly | — (it's the sink) |
+| Colony (cart) | yes | no | via haulers | builds `haulerUnit` carts |
+| Colony (relay) | yes | no | via relay chain | streamed by relay towers |
+| Relay tower | no | no | no | is the wire |
+
+So your mental model was right: a colony *is* "a depot with no intake." The relay
+is just an alternative to carts for getting a colony's holdings to the capital.
+
+---
+
+## Combat: buildings and structures (answers + behavior)
+
+### Most buildings don't attack — canAttack is opt-in
+
+`BuildingDefinition.canAttack` defaults to **false**. A house, farm, barracks,
+depot, or wall never attacks and is never treated as a threat. The attack fields
+(damage, range, melee/ranged, projectile) are **hidden in the inspector** until
+you tick `canAttack`, and the attack is **zeroed at spawn** when it's off — so a
+non-combat building can't fire even if damage values were left over from a
+duplicated asset. Only a deliberate defensive structure (tower, gate-gun, keep
+with arrow slits) opts in.
+
+### A defensive building CAN melee or ranged attack (ranged = KNOWN ISSUE)
+
+When `canAttack` is on, a building is meant to fight via `TowerTargetingSystem`
+(it's Immobile, so the normal mobile `BehaviorSystem` targeting skips it): pick
+the nearest in-range enemy, commit, and let `AttackTimerSystem` run the charge/
+fire cycle — projectile if `isRanged`, melee strike if not. Towers can't rotate,
+so the facing gate mobile units obey is bypassed for them.
+
+Ranged towers fire via true 2.5D height-occlusion line of sight (NavTerrain.
+SightLine), NOT the walkability probe. Each cell has an OccluderHeight (terrain
+surface + a building's occluderHeight or a wall's parapet), and sight from an eye
+at (viewer surface + eyeOffset) to a target is open iff no intervening column
+rises above the straight eye→target line. Set a tower's eyeOffset ABOVE its own
+building occluderHeight and it sees and shoots over lower walls; a ground unit
+behind the same wall is blocked. Perception range and the sight-ray cap grow with
+a ranged unit's attackRange so a long-range tower actually perceives what it can
+hit. This replaced the earlier walkability LoS, which broke at sheer roof edges
+and blinded a tower to its own surroundings.
+
+### Spikes and palisades — buildings deal contact damage, never take it
+
+A building takes damage ONLY from real attacks (melee strikes and projectiles) —
+never from ramming or bodies brushing past. A ram is not a unit driving at speed
+into a wall; units milling next to a structure must not chip it, so ramming
+(mass × closing speed) is mobile-vs-mobile only and buildings are exempt as both
+rammer and victim.
+
+A building can DEAL contact damage: set `BuildingDefinition.contactDamage`
+(per second) to make it a spike wall or palisade. Any enemy unit touching it
+takes that damage per second, applied receiver-side (the unit reads the building
+in its ContactList exactly as it reads a neighbor's melee strike — no new
+system, no ECB). Independent of `canAttack`: a palisade bites without attacking.
+
+Buildings also take damage FLAT — armor only. A building has no facing (it
+doesn't rotate), so shield-arc mitigation and backstab bonuses are meaningless
+for it; `shield` is hidden in the building inspector and zeroed at spawn. Units
+still get full directional shield/backstab.
+
+
+### Buildings are rectangles — range is measured to the footprint edge
+
+A building's nav footprint is an axis-aligned RECTANGLE (extents × cell size),
+not a circle. All range checks against a building — perception distance, melee
+engage range, the contact-strike test, and the contact-add gate — measure the
+true distance to the footprint EDGE (CombatMath.DistanceToFootprint), carried as
+UnitInfo.HalfExtents. This fixes melee on non-square buildings: a unit at the
+middle of a 4×8 keep's long wall is AT the edge (distance ~0) and strikes it,
+instead of being told it's "inscribed-radius" units short and walking into the
+wall. It's symmetric — a building attacker (palisade/tower) reaches from its
+own footprint edge too. The box distance is the single primitive to extend when
+footprints become non-rectangular (planned).
+
+### Units attacking buildings — melee and ranged
+
+Ordering a unit to attack a building now works for both. The building is resolved
+through the unit's ContactList (structures are never auto-picked by instinct —
+you must give the order — but once ordered, the unit advances onto the building,
+and a ranged unit fires while a melee unit strikes on contact). A unit ordered
+onto a **distant** building walks to it until it's close enough to engage, rather
+than standing still. Passive body-ramming does not apply against buildings (a
+unit doesn't take chip damage for standing against a wall); damage to a structure
+comes only from deliberate attacks.

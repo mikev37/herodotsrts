@@ -22,10 +22,18 @@ using Unity.Transforms;
 // treats Immobile attackers as always-facing (see the Immobile bypass there).
 // Runs before AttackTimerSystem, after InformationGatherSystem (needs Perception).
 // ===========================================================================
+// Runs after InformationGatherSystem (needs Perception), mirroring BehaviorSystem
+// (which does the same job for MOBILE units). It does NOT declare UpdateBefore(
+// AttackTimerSystem): AttackTimer runs before SpatialHash and InformationGather
+// runs after, so sitting between them is impossible without creating a cycle in
+// the system-order graph (SpatialHash → InformationGather → here → AttackTimer →
+// SpatialHash) — which hangs Unity's SimulationSystemGroup sort on entering play
+// mode. Instead we follow BehaviorSystem's proven pattern: write CombatTarget/
+// IsAttacking this frame; AttackTimerSystem consumes them at the top of the next
+// tick (one-tick latency, invisible at sim rate, and deterministic for lockstep).
 [BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 [UpdateAfter(typeof(InformationGatherSystem))]
-[UpdateBefore(typeof(AttackTimerSystem))]
 public partial struct TowerTargetingSystem : ISystem
 {
     [BurstCompile]

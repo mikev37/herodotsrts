@@ -449,7 +449,8 @@ public partial struct CommandApplySystem : ISystem
                 if (EconomyQuery.BuildingBusy(em, resb, false) != EconomyQuery.ActivityKind.None) { continue; }
                 var resBDef = UnitFactory.Instance?.Roster.GetDefinition(
                     em.GetComponentData<UnitDefId>(resb).Value) as BuildingDefinition;
-                if (resBDef == null || c.AbilitySlot >= resBDef.researches.Count) { continue; }
+                if (resBDef == null || !resBDef.isResearcher) { continue; }
+                if (c.AbilitySlot >= resBDef.researches.Count) { continue; }
                 var tech = resBDef.researches[c.AbilitySlot];
                 if (tech == null) { continue; }
                 int fromId = tech.fromUnit != null ? UnitFactory.Instance.Roster.GetId(tech.fromUnit) : -1;

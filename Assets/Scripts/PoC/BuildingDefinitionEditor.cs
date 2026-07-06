@@ -29,20 +29,34 @@ using UnityEngine;
 [CustomEditor(typeof(BuildingDefinition), editorForChildClasses: false)]
 public class BuildingDefinitionEditor : Editor
 {
-    // Always-shown building fields (identity → survivability → attack → abilities).
+    // Always-shown building fields (identity → footprint → survivability).
     // Referenced by ResourceNodeDefinitionEditor / WallDefinitionEditor so the
-    // three inspectors can't drift.
+    // three inspectors can't drift. Attack fields are NOT here — they're gated
+    // behind canAttack (see AttackFields + OnInspectorGUI). Shield is NOT here —
+    // a building has no facing, so shield-arc mitigation is meaningless for it
+    // (see MitigateFlat in CombatMath; building damage is armor-only).
     public static readonly string[] BuildingFields =
     {
         "displayName", "viewPrefab", "icon",
         "footprintX", "footprintZ", "maxHeightDelta",
-        "maxHealth", "deathAnimSeconds", "armor", "shield", "receivesAbilities",
+        "maxHealth", "deathAnimSeconds", "armor", "receivesAbilities",
         "mass",
-        // attack (towers): all inert at 0/false
+        // abilities (caster buildings) — harmless when unused
+        "maxMana", "manaRegen", "abilities",
+    };
+
+    // Vision (2.5D line of sight) — every building blocks/participates in sight.
+    private static readonly string[] VisionFields =
+    {
+        "occluderHeight",   // how tall this building blocks sight
+        "eyeOffset",        // shooter eye height (set ABOVE occluderHeight so a tower sees over its own walls)
+    };
+
+    // Attack fields — shown ONLY when canAttack is on (a defensive structure).
+    private static readonly string[] AttackFields =
+    {
         "attackInterval", "attackCooldown", "attackDamage", "meleeCleave",
         "meleeStrikeArc", "meleeRange", "isRanged", "projectile", "attackRange",
-        // abilities (caster buildings)
-        "maxMana", "manaRegen", "abilities",
     };
 
     private static void Field(SerializedObject so, string name)
@@ -65,6 +79,37 @@ public class BuildingDefinitionEditor : Editor
         // ---- always-shown building fields ----
         foreach (var name in BuildingFields) Field(so, name);
 
+        // ---- vision (2.5D line of sight) ----
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Vision (2.5D line of sight)", EditorStyles.boldLabel);
+        foreach (var name in VisionFields) Field(so, name);
+        EditorGUILayout.HelpBox("occluderHeight = how tall this building blocks sight. eyeOffset = the " +
+                                "shooter's eye height. For a working tower, set eyeOffset ABOVE occluderHeight " +
+                                "so it sees and fires over its own walls (otherwise it's blind to everything).",
+                                MessageType.None);
+
+        // ---- combat: opt-in. Most buildings never attack. ----
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Combat", EditorStyles.boldLabel);
+
+        Field(so, "canAttack");
+        if (Flag(so, "canAttack"))
+        {
+            using (new EditorGUI.IndentLevelScope())
+                foreach (var name in AttackFields) Field(so, name);
+        }
+        else
+        {
+            EditorGUILayout.HelpBox("This building does not actively attack. Enable 'Can Attack' to make it a " +
+                                    "defensive structure (tower / gate-gun).", MessageType.None);
+        }
+
+        // Passive contact damage (spikes / palisade) — independent of canAttack.
+        Field(so, "contactDamage");
+        EditorGUILayout.HelpBox("contactDamage > 0 makes this a spike/palisade: enemy units touching it take " +
+                                "that damage per second. The building itself never takes contact or ram damage " +
+                                "— only real attacks (strikes, projectiles) hurt it.", MessageType.None);
+
         EditorGUILayout.Space();
         EditorGUILayout.LabelField("Economy", EditorStyles.boldLabel);
 
@@ -82,11 +127,13 @@ public class BuildingDefinitionEditor : Editor
             }
         }
         Field(so, "isProducer");
+        Field(so, "isResearcher");
         Field(so, "isRelay");
 
         bool intake  = depot && Flag(so, "isIntake");
         bool colony  = depot && Flag(so, "isColony");
         bool producer = Flag(so, "isProducer");
+        bool researcher = Flag(so, "isResearcher");
         bool relay   = Flag(so, "isRelay");
 
         // ---- construction cost & time (every building is built) ----
@@ -130,10 +177,13 @@ public class BuildingDefinitionEditor : Editor
             Field(so, "produces");
         }
 
-        // ---- research: capability-by-list (always available to author) ----
-        EditorGUILayout.Space();
-        EditorGUILayout.LabelField("Research", EditorStyles.miniBoldLabel);
-        Field(so, "researches");
+        // ---- research: gated by isResearcher (parallels isProducer) ----
+        if (researcher)
+        {
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Research", EditorStyles.miniBoldLabel);
+            Field(so, "researches");
+        }
 
         // ---- building upgrades: capability-by-list (always available) ----
         EditorGUILayout.Space();

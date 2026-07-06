@@ -119,6 +119,16 @@ public struct CombatStatus : IComponentData
 // DeathTimer expires and the entity is destroyed.
 public struct Dead : IComponentData { }
 
+// Spikes / palisade: passive per-second damage this building deals to any enemy
+// unit touching it. No order, no facing, no attack cycle — you press against it,
+// you bleed. Present only on buildings authored with contactDamage > 0; read
+// receiver-side by the touching unit (surfaced via UnitInfo.ContactDamage).
+// Independent of canAttack: a plain palisade bites without "attacking".
+public struct ContactDamage : IComponentData
+{
+    public float DamagePerSecond;
+}
+
 public struct DeathTimer : IComponentData
 {
     public float Seconds;        // counts down once Dead is added
@@ -155,6 +165,7 @@ public struct UnitInfo : IBufferElementData
     public int    Player;         // owning player id
     public float2 Position;
     public float  Height;         // terrain height under the unit
+    public float  EyeOffset;      // sight/shoot eye height above Height (raised shooters see over walls)
     public float2 Velocity;
     public float2 Facing;         // normalized XZ forward
     public float  Radius;         // body radius (physical contact)
@@ -167,10 +178,17 @@ public struct UnitInfo : IBufferElementData
     public bool   IsAttacking;    // behavior committed to an attack this tick
     public Entity AttackTarget;   // who it is attacking (single-target strikes)
     public float  StrikeDamage;   // melee pulse this tick (0 except on the strike tick)
+    public float  ContactDamage;  // building only: per-second bite dealt to any unit touching it
+                                  // (spikes/palisade). 0 for units and plain buildings. Read
+                                  // receiver-side by the touching unit, like StrikeDamage.
     public float  AttackRange;    // weapon reach (melee) / fire range (ranged)
     public float  StrikeArcDot;   // cos(arc/2) for cleave strikes
     public bool   Cleave;         // strike hits everyone in the arc, not just the target
     public bool   IsBuilding;     // entity carries BuildingTag; Radius is then the
+    public float2 HalfExtents;    // building only: half the axis-aligned footprint size in WORLD units
+                                  // (0 for mobile units). Range is measured to this rectangle's edge, not
+                                  // the inscribed-circle Radius — a melee unit engages the long side of a
+                                  // rectangular keep correctly instead of walking into it.
     public bool   IsNonCombatant; // entity carries NonCombatant; ignored by targeting and combat
                                   // footprint's inscribed radius and consumers
                                   // measure range to the surface, not the center

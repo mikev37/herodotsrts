@@ -53,6 +53,8 @@ public partial struct SpatialHashSystem : ISystem
             Writer         = map.AsParallelWriter(),
             BuildingLk     = SystemAPI.GetComponentLookup<BuildingTag>(true),
             NonCombatantLk = SystemAPI.GetComponentLookup<NonCombatant>(true),
+            ObstacleLk     = SystemAPI.GetComponentLookup<Obstacle>(true),
+            ContactDamageLk = SystemAPI.GetComponentLookup<ContactDamage>(true),
         };
         // DETERMINISM: Schedule (single-thread), NOT ScheduleParallel.
         // With a parallel fill, bucket insertion order depends on OS thread
@@ -74,13 +76,15 @@ public partial struct SpatialHashSystem : ISystem
         public NativeParallelMultiHashMap<int, UnitInfo>.ParallelWriter Writer;
         [ReadOnly] public ComponentLookup<BuildingTag>   BuildingLk;
         [ReadOnly] public ComponentLookup<NonCombatant>  NonCombatantLk;
+        [ReadOnly] public ComponentLookup<Obstacle>      ObstacleLk;
+        [ReadOnly] public ComponentLookup<ContactDamage> ContactDamageLk;
 
         private void Execute(Entity entity, in LocalTransform xform, in Player player,
                              in Velocity velocity, in Mass mass, in Health health,
                              in Attack attack, in StableId stableId,
                              in UnitRadius radius, in GroundSpeedMultiplier slope,
                              in CombatStatus status, in CombatTarget target,
-                             in Defense defense, in UnitDefId defId)
+                             in Defense defense, in UnitDefId defId, in UnitTuning tuning)
         {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 forward3 = math.forward(xform.Rotation);
@@ -94,6 +98,7 @@ public partial struct SpatialHashSystem : ISystem
                 Player          = player.Value,
                 Position        = position,
                 Height          = slope.Height,
+                EyeOffset       = tuning.EyeOffset,
                 Velocity        = velocity.Value,
                 Facing          = facing,
                 Radius          = radius.Value,
@@ -105,10 +110,14 @@ public partial struct SpatialHashSystem : ISystem
                 IsAttacking     = status.IsAttacking,
                 AttackTarget    = target.Has ? target.Info.Entity : Entity.Null,
                 StrikeDamage    = attack.Pulse,
+                ContactDamage   = ContactDamageLk.HasComponent(entity) ? ContactDamageLk[entity].DamagePerSecond : 0f,
                 AttackRange     = attack.Range,
                 StrikeArcDot    = attack.ArcDot,
                 Cleave          = attack.Cleave,
                 IsBuilding      = BuildingLk.HasComponent(entity),
+                HalfExtents     = ObstacleLk.HasComponent(entity)
+                                    ? (float2)ObstacleLk[entity].Extents * (NavGrid.CellSize * 0.5f)
+                                    : float2.zero,
                 IsNonCombatant  = NonCombatantLk.HasComponent(entity),
             });
         }

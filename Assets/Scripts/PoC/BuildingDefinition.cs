@@ -33,6 +33,30 @@ public class BuildingDefinition : UnitDefinition
              "above this. The model should carry a basement skirt to cover the allowed delta.")]
     public float maxHeightDelta = 1.0f;
 
+    [Tooltip("Sight-blocking height above the ground for line-of-sight (2.5D vision). A tall keep " +
+             "(large value) blocks sight; a low wall (small value) can be seen over by a raised shooter. " +
+             "Independent of pathing — a building always blocks movement, but only blocks SIGHT up to this " +
+             "height. 0 = blocks pathing but never sight (you see right over it).")]
+    public float occluderHeight = 6f;
+
+    // -------------------------------------------------------------------------
+    // Combat — OFF by default. Most buildings do not fight; only a defensive
+    // structure (tower, gate-gun, keep with arrow slits) opts in. When off, the
+    // attack fields are hidden in the inspector and the attack is zeroed at spawn
+    // so the building is never considered a threat and never fires.
+    // -------------------------------------------------------------------------
+    [Header("Combat")]
+    [Tooltip("Off = this building never attacks (the default — a house, a farm, a barracks). " +
+             "On = a defensive structure: reveals the attack fields (melee or ranged, damage, range, " +
+             "projectile) and the building will engage enemies in range via TowerTargetingSystem.")]
+    public bool canAttack = false;
+
+    [Tooltip("Spikes / palisade: passive damage PER SECOND dealt to any enemy unit touching this " +
+             "building. No target or order needed — press against it, take damage. Independent of " +
+             "canAttack (a palisade bites without 'attacking'). 0 = no contact damage. The building " +
+             "itself never TAKES contact/ram damage — only real attacks (strikes, projectiles) hurt it.")]
+    public float contactDamage = 0f;
+
     // -------------------------------------------------------------------------
     // Economy — role (what this building does in the resource loop)
     // -------------------------------------------------------------------------
@@ -51,6 +75,10 @@ public class BuildingDefinition : UnitDefinition
 
     [Tooltip("Can queue units for production (Barracks, Stable, etc.).")]
     public bool isProducer = false;
+
+    [Tooltip("Can research tech upgrades (e.g. Knight → Paladin). Parallels isProducer — " +
+             "reveals the researches list. A building can be both a producer and a researcher.")]
+    public bool isResearcher = false;
 
     [Tooltip("RELAY TOWER: passes resources along a chain of towers toward the nearest connected " +
              "capital. The colony's haulerUnit should be null when using relays.")]

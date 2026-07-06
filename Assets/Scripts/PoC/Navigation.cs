@@ -92,6 +92,14 @@ public static class NavTerrain
         // pass the whole ray and flip the unit into a direct march back over the
         // wall. Connectivity breaks the ray at the sheer roof<->ground face, so
         // the unit keeps following the flow field down the ramp and around.
+        // ORIGIN cell: do NOT treat the starting cell's own impassability as a
+        // sight blocker. A stationary attacker (a tower) sits ON its own footprint,
+        // which is stamped Impassable — checking the origin as an occluder made a
+        // tower fail LoS to everything and never fire. You can always see OUT of
+        // the cell you occupy; occlusion is about cells BETWEEN you and the target,
+        // which the per-step Connected() test below still enforces from step 1.
+        // (Pathing callers pass unit centers, which are never impassable, so this
+        // is a no-op for them — it only unblocks the on-footprint case.)
         if (!NavGrid.InBounds(x, y) || cellType[NavGrid.Index(x, y)] == NavCell.Impassable) return false;
         if (useW && clearance[NavGrid.Index(x, y)] < halfW) return false;
         byte prevType = cellType[NavGrid.Index(x, y)];
@@ -121,6 +129,74 @@ public static class NavTerrain
             prevType = t;
         }
         return true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // SIGHT LINE — true 2.5D height occlusion, for VISION and RANGED TARGETING.
+    // Fundamentally different from LineOfSight above (which is a walkability probe
+    // that breaks at sheer Roof↔Ground edges — correct for pathing, wrong for
+    // sight, since it would blind a tower to the ground below it).
+    //
+    // Given an eye at world (a, eyeHeight) and a target at (b, targetHeight), walk
+    // the ray cell by cell and track the maximum ELEVATION ANGLE any intervening
+    // column's occluder top subtends from the eye. Sight is open iff no
+    // intervening column rises above the straight eye→target line — i.e. the
+    // angle to the target is >= every occluder angle along the way. Because the
+    // test is by angle from a specific eye height, a RAISED shooter (a tall tower,
+    // a unit on a parapet, a flyer) sees and shoots OVER a lower wall, while a
+    // ground unit behind the same wall is blocked. Height blocks sight; pathing
+    // impassability is irrelevant to it (a lake blocks movement but not vision).
+    //
+    // occluderHeight = ObstacleField.OccluderHeight (terrain surface + any building
+    // occluder / wall parapet, baked at grid rebuild). eyeHeight/targetHeight are
+    // absolute world Y (surface height + eye offset). innerRadiusCells cells around
+    // the eye are always visible (you always see your immediate surroundings; a
+    // corner can't hide an adjacent enemy). maxCells caps the ray length.
+    // ---------------------------------------------------------------------------
+    public static bool SightLine(float2 a, float2 b, float eyeHeight, float targetHeight,
+                                 in NativeArray<float> occluderHeight, int maxCells,
+                                 int innerRadiusCells = 2)
+    {
+        int2 c0 = NavGrid.Cell(a), c1 = NavGrid.Cell(b);
+        int dx = math.abs(c1.x - c0.x), dy = math.abs(c1.y - c0.y);
+        if (dx + dy > maxCells) return false;
+        if (dx == 0 && dy == 0) return true;
+
+        int sx = c1.x >= c0.x ? 1 : -1;
+        int sy = c1.y >= c0.y ? 1 : -1;
+        int x = c0.x, y = c0.y, err = dx - dy;
+
+        // Ground distance eye→target, for converting occluder heights to angles.
+        float totalGround = math.max(1e-3f, math.distance(a, b));
+        // Slope (rise per unit ground) of the straight eye→target sightline.
+        float targetSlope = (targetHeight - eyeHeight) / totalGround;
+
+        int steps = 0;
+        int guard = maxCells + 2;
+        while (guard-- > 0)
+        {
+            if (x == c1.x && y == c1.y) return true;   // reached target column: open
+
+            int e2 = 2 * err;
+            if (e2 > -dy) { err -= dy; x += sx; }
+            if (e2 <  dx) { err += dx; y += sy; }
+            steps++;
+
+            if (x == c1.x && y == c1.y) return true;
+            if (!NavGrid.InBounds(x, y)) return false;
+            if (steps <= innerRadiusCells) continue;   // always-visible inner radius
+
+            // Elevation angle (as slope) of THIS column's occluder top from the eye.
+            float2 cellC = NavGrid.CellCenter(x, y);
+            float ground = math.max(1e-3f, math.distance(a, cellC));
+            float occl = occluderHeight[NavGrid.Index(x, y)];
+            float occlSlope = (occl - eyeHeight) / ground;
+
+            // Blocked if this occluder rises above the eye→target line at this point.
+            // Small epsilon so a wall exactly at sightline height doesn't false-block.
+            if (occlSlope > targetSlope + 1e-3f) return false;
+        }
+        return false;
     }
 }
 
@@ -214,6 +290,11 @@ public struct ObstacleField : IComponentData
     public NativeArray<byte> Passable;   // UNION view: 0 = Impassable, 1 = walkable by someone (Ground/Roof/Transition)
     public NativeArray<byte> CellType;   // NavCell.* per cell — the typed surface (read by LoS + steering repulsion)
     public NativeArray<float> NavHeight; // walk-surface Y for Roof/Transition cells (Ground cells use terrain)
+    public NativeArray<float> OccluderHeight; // per-cell SIGHT-blocking top height: terrain surface, plus a
+                                         // building's occluderHeight on its footprint, or a wall's RoofHeight
+                                         // on Roof cells. Read by NavTerrain.SightLine (2.5D height occlusion).
+                                         // Distinct from NavHeight (walk surface) — a tall keep blocks sight
+                                         // from its full height while its walk surface is irrelevant to vision.
     public NativeArray<float> Clearance; // CELL distance from each cell centre to the nearest BROKEN edge
                                          // (impassable neighbour, sheer ground<->roof face, or map border).
                                          // Context-free; thresholded by HalfWidth(W) to test fit for any
@@ -262,6 +343,7 @@ public partial struct ObstacleGridSystem : ISystem
     private NativeArray<byte> _passable;
     private NativeArray<byte> _cellType;
     private NativeArray<float> _navHeight;
+    private NativeArray<float> _occluderHeight;
     private NativeArray<float> _clearance;
     private NativeArray<byte> _cellComp;
     private NativeArray<byte> _compCount;
@@ -286,6 +368,7 @@ public partial struct ObstacleGridSystem : ISystem
         _passable    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _cellType    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _navHeight   = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
+        _occluderHeight = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
         _clearance   = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
         _cellComp    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _compCount   = new NativeArray<byte>(NavGrid.BigCount, Allocator.Persistent);
@@ -298,7 +381,7 @@ public partial struct ObstacleGridSystem : ISystem
         state.EntityManager.AddComponentData(state.EntityManager.CreateEntity(),
             new ObstacleField
             {
-                Passable = _passable, CellType = _cellType, NavHeight = _navHeight,
+                Passable = _passable, CellType = _cellType, NavHeight = _navHeight, OccluderHeight = _occluderHeight,
                 Clearance = _clearance,
                 CellComp = _cellComp, CompCount = _compCount,
                 BigVersion = _bigVersion, Version = 0, CoarseVersion = 0,
@@ -310,6 +393,7 @@ public partial struct ObstacleGridSystem : ISystem
         if (_passable.IsCreated)    _passable.Dispose();
         if (_cellType.IsCreated)    _cellType.Dispose();
         if (_navHeight.IsCreated)   _navHeight.Dispose();
+        if (_occluderHeight.IsCreated) _occluderHeight.Dispose();
         if (_clearance.IsCreated)   _clearance.Dispose();
         if (_cellComp.IsCreated)    _cellComp.Dispose();
         if (_compCount.IsCreated)   _compCount.Dispose();
@@ -345,6 +429,7 @@ public partial struct ObstacleGridSystem : ISystem
             sig = Fnv(sig, (uint)c.x); sig = Fnv(sig, (uint)c.y);
             sig = Fnv(sig, (uint)obs.ValueRO.Extents.x); sig = Fnv(sig, (uint)obs.ValueRO.Extents.y);
             sig = Fnv(sig, math.asuint(obs.ValueRO.Radius));
+            sig = Fnv(sig, math.asuint(obs.ValueRO.OccluderHeight));
         }
         foreach (var (xform, wall) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Wall>>().WithNone<Dead>())
         {
@@ -366,8 +451,17 @@ public partial struct ObstacleGridSystem : ISystem
         _forceRebuild = false;
 
         // ---- full rebuild (only reached on a structural change) ----------------
-        // Reset: every cell is plain Ground with no nav-height override.
+        // Reset: every cell is plain Ground with no nav-height override. Occluder
+        // height starts at the terrain surface — the natural ground blocks sight
+        // from below it (hills occlude); structures add to it below.
+        var occl = fieldRef.ValueRO.OccluderHeight;
         for (int i = 0; i < cellType.Length; i++) { cellType[i] = NavCell.Ground; navHeight[i] = 0f; }
+        for (int y = 0; y < NavGrid.Res; y++)
+            for (int x = 0; x < NavGrid.Res; x++)
+            {
+                int i = NavGrid.Index(x, y);
+                occl[i] = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
+            }
 
         // Dead buildings stop blocking immediately (the corpse lingers for the
         // death anim, but pathing opens up the tick health hits zero).
@@ -379,13 +473,18 @@ public partial struct ObstacleGridSystem : ISystem
             if (e.x > 0 && e.y > 0)
             {
                 int2 min = BuildingFootprint.MinCell(p, e);
+                float obsOccl = obs.ValueRO.OccluderHeight;
                 for (int ly = 0; ly < e.y; ly++)
                 for (int lx = 0; lx < e.x; lx++)
                 {
                     if (BuildingFootprint.CornerCut(lx, ly, e)) continue;
                     int x = min.x + lx, y = min.y + ly;
                     if (!NavGrid.InBounds(x, y)) continue;
-                    cellType[NavGrid.Index(x, y)] = NavCell.Impassable;
+                    int idx = NavGrid.Index(x, y);
+                    cellType[idx] = NavCell.Impassable;
+                    // Sight-block up to occluderHeight above this cell's ground. A tall
+                    // keep occludes; a 0-height footprint blocks pathing but not sight.
+                    occl[idx] = occl[idx] + obsOccl;
                 }
                 continue;
             }
@@ -421,6 +520,7 @@ public partial struct ObstacleGridSystem : ISystem
                 int idx = NavGrid.Index(x, y);
                 cellType[idx] = NavCell.Roof;
                 navHeight[idx] = topY;
+                occl[idx] = math.max(occl[idx], topY);   // parapet blocks sight up to its top
             }
 
             // Transition skirt: rampCells concentric cardinal rings stepping out

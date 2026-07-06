@@ -66,6 +66,10 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Projectile this unit fires (defines speed, arc, view). Required if isRanged.")]
     public ProjectileDefinition projectile;
     public float attackRange = 10f;
+    [Tooltip("Sight/shoot eye height above this unit's own surface. A tower with a tall eyeOffset " +
+             "(set it above the building's own occluderHeight) sees and fires OVER lower walls; a ground " +
+             "soldier uses a small offset. This is what lets a raised shooter clear a nearby parapet.")]
+    public float eyeOffset = 1.5f;
 
     [Header("Hero")]
     [Tooltip("If set, this unit is spawned as a hero (gets HeroTag). It's a normal unit " +

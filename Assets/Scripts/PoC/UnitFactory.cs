@@ -177,10 +177,15 @@ public class UnitFactory : MonoBehaviour
             RetreatHealthPct = def.retreatHealthFraction,
             CohesionRadius = def.cohesionRadius,
             ReEngageHealthPct = .75f,
-            RetreatTime = 3
+            RetreatTime = 3,
+            EyeOffset = def.eyeOffset
         });
         _em.SetComponentData(e, BuildAttack(def));
-        _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = def.shield });
+        // Non-combatant buildings: force the attack inert regardless of leftover
+        // damage/range values, so canAttack is the single source of truth.
+        if (bdef != null && !bdef.canAttack)
+            _em.SetComponentData(e, new Attack { Phase = AttackPhase.Ready, ProjectileId = -1 });
+        _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = bdef != null ? 0f : def.shield });
         _em.SetComponentData(e, new Speed { Value = def.speed });
         // Buildings carry their footprint's INSCRIBED radius — consumers that
         // know about buildings (gather, behavior, projectiles) measure range to
@@ -243,8 +248,14 @@ public class UnitFactory : MonoBehaviour
             }
             else
             {
-                _em.AddComponentData(e, new Obstacle { Extents = extents });  // nav-grid footprint
+                _em.AddComponentData(e, new Obstacle { Extents = extents, OccluderHeight = bdef.occluderHeight });  // nav-grid footprint + sight-block height
             }
+
+            // Spikes / palisade: passive bite dealt to units that touch it. Only
+            // added when authored (contactDamage > 0), so it costs nothing for the
+            // vast majority of buildings.
+            if (bdef.contactDamage > 0f)
+                _em.AddComponentData(e, new ContactDamage { DamagePerSecond = bdef.contactDamage });
         }
 
         if (!def.receivesAbilities)
@@ -335,9 +346,11 @@ public class UnitFactory : MonoBehaviour
             CombatSpacing = def.combatSpacing, IdleSpacing = def.idleSpacing, AttackNearbyRange = def.attackNearbyRange,
             PursueDistance = def.pursueDistance, AvoidMeleeRange = def.avoidMeleeRange,
             RetreatHealthPct = def.retreatHealthFraction, CohesionRadius = def.cohesionRadius,
-            ReEngageHealthPct = .75f, RetreatTime = 3 });   // constants, matching SpawnUnit
+            ReEngageHealthPct = .75f, RetreatTime = 3, EyeOffset = def.eyeOffset });   // constants, matching SpawnUnit
         _em.SetComponentData(e, BuildAttack(def));
-        _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = def.shield });
+        if (bdef != null && !bdef.canAttack)
+            _em.SetComponentData(e, new Attack { Phase = AttackPhase.Ready, ProjectileId = -1 });
+        _em.SetComponentData(e, new Defense { Armor = def.armor, Shield = bdef != null ? 0f : def.shield });
         _em.SetComponentData(e, new Speed { Value = def.speed });
         _em.SetComponentData(e, new UnitRadius {
             Value = bdef != null ? math.min(extents.x, extents.y) * NavGrid.CellSize * 0.5f : def.radius });

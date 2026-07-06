@@ -111,14 +111,16 @@ public partial struct BehaviorSystem : ISystem
 
             // ---- target resolution -----------------------------------------
             target.Has = false;
-            if (attackOrder.Has && TryPerceived(in perception, attackOrder.Target, out UnitInfo ordered))
+            if (attackOrder.Has && TryPerceived(in perception, in contacts, attackOrder.Target, out UnitInfo ordered))
             { target.Info = ordered; target.Has = true; }
             if (!target.Has && perception.HasClosestEnemy)
             { target.Info = perception.ClosestEnemy; target.Has = true; }
 
             float targetDist = target.Has ? math.distance(position, target.Info.Position) : float.MaxValue;
             if (target.Has && target.Info.IsBuilding)
-                targetDist = math.max(0f, targetDist - target.Info.Radius);
+                // True distance to the rectangular footprint edge (not an inscribed
+                // circle) — a melee unit engages a keep's long side correctly.
+                targetDist = CombatMath.DistanceToFootprint(position, target.Info.Position, target.Info.HalfExtents);
 
             float2 enemyDir = target.Has
                 ? math.normalizesafe(target.Info.Position - position, myFacing)
@@ -235,6 +237,22 @@ public partial struct BehaviorSystem : ISystem
                     DriveOrHold(ref dest, position, slotWorld + sep);
                     return;
                 }
+            }
+
+            // ================================================================
+            // 4b) ATTACK ORDER, TARGET NOT YET PERCEIVED — advance to it.
+            //     A target ordered from far away (typically a BUILDING, which is
+            //     only resolvable once it enters the ContactList) isn't in range
+            //     to perceive yet, so branch 4 above can't fire. Walk toward the
+            //     stored ordered position until the target comes into perception,
+            //     at which point 4 takes over and engages. Without this a unit
+            //     ordered onto a distant structure would simply stand still.
+            // ================================================================
+            if (attackOrder.Has && !target.Has)
+            {
+                Act(ref dest, position, order.Value);   // order.Value = the ordered target's position (stamped at command time)
+                BreakFormation(ref order, ref member);
+                return;
             }
            
             // ================================================================
@@ -419,11 +437,24 @@ public partial struct BehaviorSystem : ISystem
             else Act(ref d, position, destPt);
         }
 
-        private static bool TryPerceived(in Perception perception, Entity wanted, out UnitInfo info)
+        // Resolve an ordered target's live snapshot. Checks the three scored
+        // perception slots first, then falls back to scanning the ContactList —
+        // which is essential for BUILDINGS: InformationGatherSystem deliberately
+        // never promotes a building into ClosestEnemy/MostDangerous/MostExposed
+        // (instinct must never auto-pick a structure), so without the contacts
+        // fallback an ordered attack on a building would find target.Has = false
+        // and the unit would never engage it. Buildings ARE in contacts (added to
+        // the buffer during the perception sweep), so this makes ordered attacks
+        // on structures work for both melee and ranged units.
+        private static bool TryPerceived(in Perception perception,
+                                         in DynamicBuffer<UnitInfo> contacts,
+                                         Entity wanted, out UnitInfo info)
         {
             if (perception.HasClosestEnemy   && perception.ClosestEnemy.Entity    == wanted) { info = perception.ClosestEnemy;       return true; }
             if (perception.HasMostDangerous  && perception.MostDangerousEnemy.Entity == wanted) { info = perception.MostDangerousEnemy; return true; }
             if (perception.HasMostExposed    && perception.MostExposedEnemy.Entity   == wanted) { info = perception.MostExposedEnemy;   return true; }
+            for (int i = 0; i < contacts.Length; i++)
+                if (contacts[i].Entity == wanted) { info = contacts[i]; return true; }
             info = default; return false;
         }
 

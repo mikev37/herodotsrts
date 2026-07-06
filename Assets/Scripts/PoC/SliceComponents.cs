@@ -58,6 +58,9 @@ public struct Obstacle : IComponentData
 {
     public float Radius;     // circle path (used only when Extents is zero)
     public int2  Extents;    // rect footprint in cells; zero = circle
+    public float OccluderHeight; // sight-blocking height ABOVE the footprint's terrain (0 = see over it freely).
+                                 // A tall keep uses a large value; a low wall a small one, so a raised shooter
+                                 // can see over it. Fed into ObstacleField.OccluderHeight at grid rebuild.
 }
 
 // ---------------------------------------------------------------------------

@@ -334,8 +334,8 @@ public class PlayerCommander : Commander
                         int uid = roster.GetId(bdef.buildingUpgrades[i]);
                         if (uid >= 0) { IssueUpgrade(sid, uid); sel.Dispose(); return; }
                     }
-                    // Research tech
-                    if (bdef.researches != null && i < bdef.researches.Count &&
+                    // Research tech (requires isResearcher, parallel to isProducer)
+                    if (bdef.isResearcher && bdef.researches != null && i < bdef.researches.Count &&
                         busy == EconomyQuery.ActivityKind.None)
                     { IssueResearch(sid, i); sel.Dispose(); return; }
                 }
