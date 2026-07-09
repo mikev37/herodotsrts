@@ -82,7 +82,13 @@ public class AbilityDefinition : ScriptableObject
 // Authoring-side enums: same members, same order as the corresponding ModTarget
 // ranges, so the bake is a plain offset cast. Splitting them is what keeps each
 // inspector row free of fields that don't apply to it.
-public enum NumericTarget : byte { Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield }
+public enum NumericTarget : byte
+{
+    Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield,
+    Aggression, Looseness, Separation,
+    CombatSpacing, AttackNearbyRange, AvoidMeleeRange, PursueDistance,
+    CohesionRadius, RetreatHealthPct, ReEngageHealthPct,
+}
 public enum FlagTarget : byte { FormWall, StandBehindFriend, AvoidMelee, AdvanceIndividual, AdvanceOnEnemy, SeparateIdle }
 
 // One numeric effect within an ability.

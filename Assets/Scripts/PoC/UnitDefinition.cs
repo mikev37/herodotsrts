@@ -101,11 +101,23 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Buildings this unit (as a builder) can place. Drives the in-game build menu keys.")]
     public System.Collections.Generic.List<BuildingDefinition> builds = new();
 
-    [Header("Economy — harvester")]
-    [Tooltip("Resources pulled per tick from a node. >0 = this unit can harvest.")]
-    public int harvestRate = 0;
-    [Tooltip("Cargo capacity. Triggers return-to-depot when full.")]
+    [Header("Economy — harvester / hauler")]
+    [Tooltip("Resources gathered PER SECOND while in contact with a node (fractional ok — 0.5 = one " +
+             "resource every 2s). Accrued per lockstep tick; whole units transfer when the accumulator " +
+             "reaches 1. 0 = cannot harvest.")]
+    public float harvestRate = 0f;
+    [Tooltip("Cargo capacity — used by BOTH a harvester (return-to-depot when full) and a hauler/ox " +
+             "cart (how much of the colony's holdings one trip carries).")]
     public int carryCapacity = 0;
+
+    [Tooltip("When this harvester's node runs dry, it auto-targets the nearest node of the SAME type " +
+             "within this range (world units, measured from where it stands — i.e. at the drained node). " +
+             "Nothing in range = it idles and waits for orders. 0 = unlimited search.")]
+    public float reacquireRange = 40f;
+
+    [Tooltip("How close to a depot's footprint EDGE (world units) this harvester must be to unload. " +
+             "Unloading then takes time at harvestRate, symmetric with gathering.")]
+    public float depositRange = 2.5f;
 
     [Header("Economy — hauler")]
     [Tooltip("A hauler carries a colony's holdings to the nearest capital then is destroyed. Free to sustain (foodCost should be 0).")]

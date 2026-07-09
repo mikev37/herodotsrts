@@ -354,6 +354,22 @@ public partial struct BehaviorSystem : ISystem
             }
 
             // ================================================================
+            // 9b) SOFT MOVE, NO FORMATION SLOT — a unit ordered individually
+            //     (FormationId == 0), e.g. a lone harvester heading to a node
+            //     or a single unit attack-moving. Drive STRAIGHT to the
+            //     objective. Without this the unit fell through to the idle
+            //     tier and just milled in place / drifted away from its target
+            //     (the "peasant approaches the tree then walks off and orbits"
+            //     bug). Harvesters in particular should never travel in
+            //     formation — they path directly to the resource.
+            // ================================================================
+            if (order.HasTarget && order.AttackMove && !hasSlot)
+            {
+                Act(ref dest, position, order.Value + sep);
+                return;
+            }
+
+            // ================================================================
             // 10) PATROL — objective reached (no active underway order) but
             //     enemies are in pursue range. Hunt the closest; once inside
             //     charge range tiers 7/8 take over next tick.

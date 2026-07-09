@@ -55,6 +55,7 @@ public abstract class Commander : MonoBehaviour
 
     protected EntityManager Em;
     protected EntityQuery AllUnitsQuery;     // UnitTag + Player + LocalTransform
+    protected EntityQuery StructuresQuery;   // Immobile targets: nodes, buildings, walls (for right-click targeting)
     private EntityQuery _clockQuery;
     private bool _ready;
 
@@ -78,6 +79,14 @@ public abstract class Commander : MonoBehaviour
             ComponentType.ReadOnly<Player>(),
             ComponentType.ReadOnly<LocalTransform>(),
             ComponentType.Exclude<Immobile>());   // buildings/walls aren't selectable/orderable units
+        // Immobile targets (resource nodes, buildings, walls) for right-click
+        // TARGETING — harvest a node, attack an enemy structure. Separate from
+        // AllUnitsQuery because that one excludes Immobile on purpose.
+        StructuresQuery = Em.CreateEntityQuery(
+            ComponentType.ReadOnly<Immobile>(),
+            ComponentType.ReadOnly<Player>(),
+            ComponentType.ReadOnly<LocalTransform>(),
+            ComponentType.ReadOnly<StableId>());
         _clockQuery = Em.CreateEntityQuery(ComponentType.ReadOnly<SimClock>());
         worldReady = _ready = true;
 
@@ -184,10 +193,22 @@ public abstract class Commander : MonoBehaviour
             TargetStableId = targetId,
             AbilitySlot    = abilitySlot,
             FormationWidth = formationWidth,
+            Queued         = QueueModifier ? (byte)1 : (byte)0,
             Units          = ToFixed(_selection),
         };
         Outbox.Enqueue(cmd);
         if (Mode == LockstepMode.Record) RecordedList.Add(cmd);
+    }
+
+    // Set each frame by the input layer (shift held): Move/AttackMove commands
+    // append as waypoints instead of replacing the current order.
+    protected bool QueueModifier;
+
+    protected void IssueLaunchCart(int colonyStableId)
+    {
+        _selection.Clear();
+        Issue(CommandKind.LaunchCart, default, colonyStableId, 0);
+        lastOrder = $"Launch cart from colony {colonyStableId}";
     }
 
     // Overload for commands that carry a secondary id (production unit defId, upgrade target defId).
@@ -219,6 +240,16 @@ public abstract class Commander : MonoBehaviour
             if (Em.HasComponent<StableId>(e)) _selection.Add(Em.GetComponentData<StableId>(e).Value);
         Issue(CommandKind.Harvest, default, nodeStableId, 0);
         lastOrder = $"Harvest node {nodeStableId}";
+    }
+
+    protected void IssueDeliver(List<Entity> unitList, int depotStableId)
+    {
+        if (unitList.Count == 0) return;
+        _selection.Clear();
+        foreach (var e in unitList)
+            if (Em.HasComponent<StableId>(e)) _selection.Add(Em.GetComponentData<StableId>(e).Value);
+        Issue(CommandKind.Deliver, default, depotStableId, 0);
+        lastOrder = $"Deliver to depot {depotStableId}";
     }
 
     protected void IssueSetRally(int buildingStableId, float2 pos)

@@ -24,7 +24,10 @@ public struct HarvestTask : IComponentData
     public int          NodeStableId;    // -1 = none
     public int          DepotStableId;   // cached nearest own depot; -1 = recompute
     public HarvestPhase Phase;
-    public int          Rate;            // resources/tick this harvester pulls (gather speed)
+    public float        Rate;            // resources per SECOND (authored); accrued per tick below
+    public float        Accrued;         // fractional gather progress; whole units transfer at >= 1
+    public float        ReacquireRange;  // auto-retarget radius when a node dies (0 = unlimited)
+    public float        DropRange;       // unload distance from the depot's footprint edge
     public ResourceType Carrying;        // the ONE type currently in cargo (a selector, not an amount)
 }
 
@@ -59,11 +62,12 @@ public struct Colony : IComponentData
     public int   HaulerDefId;   // roster id of the hauler unit to auto-build
     public int   Threshold;     // total stored amount that keeps haulers dispatching
     public float BuildTimer;    // counts down the hauler's productionTime between dispatches
+    public byte  ForceLaunch;   // 1 = player-armed emergency dispatch: build+launch even below Threshold (needs >0 stored)
 }
 
 // A hauler: spawned by a colony, loads the colony's holdings, delivers them to a
 // pre-assigned capital, then DESPAWNS (success anim, NOT death) on delivery.
-public enum HaulPhase : byte { ToSource, Loading, ToSink, Unloading, Done }
+public enum HaulPhase : byte { ToSource, Loading, ToSink, Unloading, Done, Manual }
 public struct HaulTask : IComponentData
 {
     public int       SourceStableId;   // the colony to load from

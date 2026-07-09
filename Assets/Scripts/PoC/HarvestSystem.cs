@@ -64,7 +64,7 @@ public partial struct HarvestSystem : ISystem
                 case HarvestPhase.Gathering:                 // building flips us off Gathering; keep aiming at the node
                     if (!Resolve(task.NodeStableId, out float2 np))
                     {
-                        if (!Reacquire(task.Carrying, pos, out int nid)) { task.Phase = HarvestPhase.Idle; return; }
+                        if (!Reacquire(task.Carrying, pos, task.ReacquireRange, out int nid)) { task.Phase = HarvestPhase.Idle; return; }
                         task.NodeStableId = nid; Resolve(nid, out np);
                     }
                     SoftMove(ref move, np);
@@ -79,11 +79,13 @@ public partial struct HarvestSystem : ISystem
             }
         }
 
-        private bool Reacquire(ResourceType type, float2 from, out int best)
+        private bool Reacquire(ResourceType type, float2 from, float range, out int best)
         {
             best = -1; float bestD = float.MaxValue;
+            float maxSq = range > 0f ? range * range : float.MaxValue;   // 0 = unlimited
             if (Nodes.TryGetFirstValue((int)type, out NodeInfo ni, out var it))
                 do { float d = math.distancesq(from, ni.Pos);
+                     if (d > maxSq) continue;
                      if (d < bestD || (d == bestD && (best < 0 || ni.StableId < best))) { bestD = d; best = ni.StableId; }
                 } while (Nodes.TryGetNextValue(out ni, ref it));
             return best >= 0;

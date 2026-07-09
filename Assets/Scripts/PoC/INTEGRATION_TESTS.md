@@ -164,33 +164,52 @@ Add to a unit's `abilities[0]` in its `UnitDefinition`. Ensure
 
 ---
 
-## 4. Obstacles (neutral buildings)
+## 4. Obstacles (rocks, trees — terrain, not buildings)
 
-**What is tested:** a building with `ownerPlayer = -1` in `MapBootstrap` that
-blocks movement but isn't owned or attackable.
+**What is tested:** a dumb terrain obstacle that blocks movement and sight but is
+never owned, never attacked, and never damaged — with no combat/economy/ability
+baggage in its inspector.
+
+**Use `ObstacleDefinition`, NOT `BuildingDefinition`.** An obstacle is its own
+lean asset type (`Create → MarbleCombat → Obstacle Definition`). It derives from
+BuildingDefinition only for spawn/roster plumbing; its custom editor hides all the
+combat/economy/mana/upgrade fields, so authoring a rock shows only footprint,
+vision, invulnerability, and view variants.
+
+**Invulnerability is NonCombatant — never a giant maxHealth.** With
+`invulnerable = true` (the default), the spawn tags the entity `NonCombatant`;
+targeting and combat skip NonCombatant entirely, so the rock literally cannot be
+selected as a target or take damage. There is no health hack. (Untick
+`invulnerable` only for a destructible obstacle, which then reveals a real
+maxHealth.)
 
 **Setup:**
 
-Create `RockDef` (`BuildingDefinition`):
+Create `RockDef` (`Obstacle Definition`):
 
 ```
-displayName:      Rock
-footprintX/Z:     3
-receivesAbilities: false
-maxHealth:        9999
-attackDamage:     0
+displayName:        Rock
+footprintX/Z:       3
+invulnerable:       true          (→ NonCombatant at spawn; this is the invuln mechanism)
+occluderHeight:     4             (blocks sight up to 4 units)
+viewPrefabVariants: [rock1..rock6] (optional — deterministic per-entity mesh pick)
 ```
 
-Add `NonCombatant` role (tick in def or left as default — `NonCombatant` is
-added by `AddEconomyRoles` if flagged). Add to roster. MapBootstrap placement
-`ownerPlayer: -1`.
+Add to roster (auto-appended — `t:UnitDefinition` matches the subclass).
+MapBootstrap placement `ownerPlayer: -1`.
 
 **Verify:**
 
 - Units path around the rock; no unit ever walks through it.
-- Neither player can issue an attack order on it (targeting guard rejects
-  `NonCombatant`).
-- Rock survives a snapshot round-trip at the same grid cell.
+- Neither player can select or issue an attack order on it (targeting skips
+  `NonCombatant`), and it takes zero damage from anything.
+- If `viewPrefabVariants` is set, each rock instance shows one of the meshes,
+  and the SAME entity shows the SAME mesh on every client (deterministic from
+  StableId — lockstep-safe).
+- Sightlines are blocked by the rock up to `occluderHeight` (a low `occluderHeight`
+  or 0 lets raised shooters see over it).
+- Rock survives a snapshot round-trip at the same grid cell (all state is
+  def-derived, regenerated via `UnitFactory.Create`).
 
 ---
 
@@ -833,17 +852,16 @@ harvester's `HarvestTask.Carrying` is just a selector for which node it's
 currently working). There is no "this building only handles Gold" concept — and
 you don't need one.
 
-### Producer flag vs research/upgrade lists (the inconsistency, resolved)
+### Producer / Researcher role flags (consistency, resolved)
 
-The clean rule is **capability = its list is non-empty**. Research and building
-upgrades already follow it: a building can research iff `researches` is non-empty,
-and can upgrade iff `buildingUpgrades` is non-empty — no `isResearcher` bool
-needed. Production is the odd one out only because the runtime query needs a cheap
-tag (`ProducerTag`) to iterate producers each tick, so `isProducer` gates that.
-The inspector now treats them uniformly: role sections appear based on their flag
-(`isProducer` → produces list; `isRelay` → relay fields) and the list-only
-capabilities (research, upgrades) are always available to author. There is no
-`isResearcher` because none is needed.
+`isProducer` and `isResearcher` are parallel role flags. Each reveals and gates
+its list in the inspector: `isProducer` → the produces list (and stamps the
+`ProducerTag` the runtime query iterates each tick); `isResearcher` → the
+`researches` list (gated at the research command and the build-menu). A building
+can be both. Building upgrades remain capability-by-list (`buildingUpgrades`
+non-empty). This replaced the earlier "no isResearcher, capability = list
+non-empty" rule — the explicit flag is what you asked for and what ships, so the
+two economy roles now read uniformly in the inspector.
 
 ### Colony vs Relay — they solve the SAME problem two ways
 
@@ -953,3 +971,33 @@ onto a **distant** building walks to it until it's close enough to engage, rathe
 than standing still. Passive body-ramming does not apply against buildings (a
 unit doesn't take chip damage for standing against a wall); damage to a structure
 comes only from deliberate attacks.
+
+---
+
+## Steering: units no longer bounce off buildings/obstacles
+
+Symptom: a unit walking *near* a tower (not attacking, not pressed against the
+red footprint cells) was flung away as if struck, and the shove *persisted after
+the unit had left contact* — reading exactly like a melee knockback.
+
+Cause: the obstacle-avoidance push in SteeringSystem scaled with mere *proximity*
+to blocked cells (a quadratic of the summed cell normals × a large constant),
+applied as a raw velocity injection every frame. A unit passing tangentially near
+a big flat wall got a full outward shove, and because that velocity fed the
+seek-momentum integrator, the unit kept coasting outward for several frames after
+clearing the wall.
+
+Fix (all obstacles, not just buildings):
+- Penetration is now TRUE overlap depth in world units (`touchDist - dist`, where
+  `touchDist = cellHalfWidth + bodyRadius`), so a unit merely *passing near* a
+  wall has zero penetration and skips the push entirely — no shove.
+- SLIDE (cancel the into-wall motion component) is the primary response; a
+  tangentially-moving unit slides freely.
+- PUSH corrects only genuine overlap, clamped to exactly clear it that frame
+  (`min(depth/Dt, locomotion)`), so it can't fling a unit past the wall.
+- MOMENTUM DAMP zeroes wall-directed seek momentum, so the response dies the
+  instant the body is clear — no post-contact coasting.
+
+Walls still stop units (overlap is caught a full body-radius out, before any
+tunneling); they simply no longer bounce. No new constants — the depth-based push
+is self-scaling, so the old ObstacleStrength/SurfaceBand tunables were removed.

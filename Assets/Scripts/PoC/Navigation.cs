@@ -308,7 +308,9 @@ public struct ObstacleField : IComponentData
 
 public struct PathSlot
 {
-    public int2 GoalCell;
+    public int2 GoalCell;               // IDENTITY / cache key = the destination cell everyone queries
+    public int2 SeedCell;               // where the field actually flows TO — snapped to a standable cell
+                                        // when GoalCell is impassable at this width (else == GoalCell)
     public int2 GoalBig;
     public int  Width;                  // path width in cells this slot's field was solved for
     public int  BuiltCoarseVersion;
@@ -922,15 +924,31 @@ public partial struct FlowFieldSystem : ISystem
             var wComp      = _wComp.GetSubArray(ci * NavGrid.CellCount, NavGrid.CellCount);
             var wCompCount = _wCompCount.GetSubArray(ci * NavGrid.BigCount, NavGrid.BigCount);
 
-            int slot = FindSlot(slots, gc, w);
+            // Preserve the ORIGINAL goal cell as the cache key: steering and the
+            // fine-field pass below both look the field up by Cell(dest.Value), the
+            // unsnapped destination. If the goal is impassable at this width, we
+            // still BUILD the field toward the nearest standable cell (so it routes
+            // to the obstacle's edge and idles), but it must be KEYED on the
+            // original cell or the unit would never find it (the "no fine field
+            // created" bug — the field existed under a key nobody queried).
+            int2 origGc = gc;
+            if (!StandsAtWidth(obs.CellType, obs.Clearance, gc, w))
+            {
+                int2 snapped = NearestStandable(obs.CellType, obs.Clearance, gc, w, 12);
+                if (math.any(snapped != gc)) gc = snapped;   // gc = build/seed goal; origGc = cache key
+            }
+
+            int slot = FindSlot(slots, origGc, w);
             bool fresh = slot >= 0;
             if (slot < 0) slot = AllocSlot(slots, tick);
             var sl = slots[slot];
-            sl.GoalCell = gc; sl.GoalBig = NavGrid.BigOf(gc); sl.Width = w; sl.UsedTick = tick; sl.Valid = 1;
+            // Identity = original cell; the field flows to the (possibly snapped) seed.
+            sl.GoalCell = origGc; sl.SeedCell = gc; sl.GoalBig = NavGrid.BigOf(gc);
+            sl.Width = w; sl.UsedTick = tick; sl.Valid = 1;
 
             if (!fresh || sl.BuiltCoarseVersion != obs.CoarseVersion)
             {
-                BuildCoarse(coarse, slot, gc, wComp, wCompCount);
+                BuildCoarse(coarse, slot, gc, wComp, wCompCount);   // seed at the standable cell
                 sl.BuiltCoarseVersion = obs.CoarseVersion;
                 int baseK = slot * NavGrid.BigCount;
                 for (int b = 0; b < NavGrid.BigCount; b++)
@@ -940,7 +958,8 @@ public partial struct FlowFieldSystem : ISystem
                 }
             }
             slots[slot] = sl;
-            map.TryAdd(NavGrid.PathKey(NavGrid.Index(gc), w), slot);
+            // Key by the ORIGINAL cell (what everyone queries), not the snapped one.
+            map.TryAdd(NavGrid.PathKey(NavGrid.Index(origGc), w), slot);
         }
 
         var seenNodes = new NativeHashSet<int>(256, Allocator.Temp);
@@ -1078,6 +1097,43 @@ public partial struct FlowFieldSystem : ISystem
     {
         for (int s = 0; s < NavGrid.MaxWidthSlots; s++) if (_wWidth[s] == w) return s;
         return -1;
+    }
+
+    // Can a width-`w` body stand on this cell? (in bounds, not Impassable, enough
+    // clearance). Same test as the flow-field's own passability. The arrays come
+    // from the ObstacleField singleton — FlowFieldSystem owns no grid arrays.
+    private static bool StandsAtWidth(in NativeArray<byte> cellType, in NativeArray<float> clearance,
+                                      int2 c, int w)
+    {
+        if (!NavGrid.InBounds(c.x, c.y)) return false;
+        int i = NavGrid.Index(c.x, c.y);
+        return cellType[i] != NavCell.Impassable && NavGrid.Fits(clearance, i, w);
+    }
+
+    // Nearest cell a width-`w` body can stand on, searched outward from `c` in
+    // growing rings (deterministic: scans each ring in fixed x-then-y order and
+    // returns the first standable cell, so every peer resolves the identical
+    // snap). `maxRing` bounds the cost — units approach obstacles from outside,
+    // so a reachable cell is always within a couple of rings. Returns `c`
+    // unchanged if nothing is found (caller then keeps the original goal).
+    private static int2 NearestStandable(in NativeArray<byte> cellType, in NativeArray<float> clearance,
+                                         int2 c, int w, int maxRing)
+    {
+        for (int r = 1; r <= maxRing; r++)
+        {
+            int2 best = c; float bestD = float.MaxValue; bool found = false;
+            for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                if (math.max(math.abs(dx), math.abs(dy)) != r) continue;   // ring perimeter only
+                int2 n = new int2(c.x + dx, c.y + dy);
+                if (!StandsAtWidth(cellType, clearance, n, w)) continue;
+                float d = dx * dx + dy * dy;   // prefer the geometrically closest cell in this ring
+                if (d < bestD) { bestD = d; best = n; found = true; }
+            }
+            if (found) return best;
+        }
+        return c;
     }
 
     // Label 4-connected components of the WIDTH-ERODED graph within one big tile:
@@ -1381,10 +1437,16 @@ public partial struct FlowFieldSystem : ISystem
             for (int i = 0; i < NavGrid.SubCells; i++) FineCost[baseCost + i] = INF;
 
             // --- seeds (frozen boundary conditions) ---
+            // Seed at SeedCell (always standable) rather than GoalCell: when the
+            // destination is impassable at this width, GoalCell fails StandW and the
+            // zero-cost source would never be placed — the fine field would stay all
+            // INF with no gradient (the "no fine field created" symptom). SeedCell is
+            // the snapped standable cell, so the field always gets a real source and
+            // the body routes to the obstacle's reachable edge.
             PathSlot sl = Slots[slot];
-            if (math.all(sl.GoalBig == bcoord) && StandW(sl.GoalCell))
+            if (math.all(NavGrid.BigOf(sl.SeedCell) == bcoord) && StandW(sl.SeedCell))
             {
-                int2 gl = sl.GoalCell - cellOrigin;
+                int2 gl = sl.SeedCell - cellOrigin;
                 int gi = gl.y * sub + gl.x;
                 FineCost[baseCost + gi] = 0f;
                 stateArr[gi] = 2;

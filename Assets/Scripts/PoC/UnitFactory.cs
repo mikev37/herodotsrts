@@ -146,6 +146,42 @@ public class UnitFactory : MonoBehaviour
     // footprint cell. Only ever called from MapBootstrap, CommandApplySystem (at
     // a command's execution tick), ProductionSystem, or SimSnapshot.Restore — all
     // deterministic points — so the structural adds are safe everywhere.
+    // Nearest standable cell for a mobile spawn that landed on an impassable one.
+    // Deterministic (fixed ring/scan order); returns the input unchanged when the
+    // nav grid doesn't exist yet or nothing standable is found within the ring.
+    private float3 SnapOffImpassable(float3 pos)
+    {
+        var q = _em.CreateEntityQuery(ComponentType.ReadOnly<ObstacleField>());
+        if (q.IsEmptyIgnoreFilter) return pos;
+        var obs = q.GetSingleton<ObstacleField>();
+        if (!obs.CellType.IsCreated) return pos;
+
+        int2 c = NavGrid.Cell(new float2(pos.x, pos.z));
+        if (!NavGrid.InBounds(c.x, c.y) || obs.CellType[NavGrid.Index(c.x, c.y)] != NavCell.Impassable)
+            return pos;
+
+        for (int r = 1; r <= 12; r++)
+        {
+            int2 best = c; float bestD = float.MaxValue; bool found = false;
+            for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                if (math.max(math.abs(dx), math.abs(dy)) != r) continue;
+                int2 n = new int2(c.x + dx, c.y + dy);
+                if (!NavGrid.InBounds(n.x, n.y)) continue;
+                if (obs.CellType[NavGrid.Index(n.x, n.y)] == NavCell.Impassable) continue;
+                float d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = n; found = true; }
+            }
+            if (found)
+            {
+                float2 cc = NavGrid.CellCenter(best.x, best.y);
+                return new float3(cc.x, pos.y, cc.y);
+            }
+        }
+        return pos;
+    }
+
     public Entity Create(UnitDefinition def, int defId, int player, float3 pos)
     {
         var bdef = def as BuildingDefinition;
@@ -157,9 +193,28 @@ public class UnitFactory : MonoBehaviour
             float2 snapped = BuildingFootprint.SnappedCenter(min, extents);
             pos = new float3(snapped.x, FootprintMaxHeight(min, extents, pos.y), snapped.y);
         }
+        else
+        {
+            // A MOBILE unit must never spawn inside an impassable footprint (a
+            // colony's cart, a barracks' recruit — both were placed at the
+            // building's center and jammed until steering spat them out). Snap to
+            // the nearest standable cell: deterministic outward ring scan, same on
+            // every peer. No-op when the grid isn't built yet or the cell is fine.
+            pos = SnapOffImpassable(pos);
+        }
 
         var e = _em.CreateEntity(_archetype);
-        _em.SetComponentData(e, new StableId { Value = _nextStableId++ });   // deterministic identity
+        int stableId = _nextStableId++;
+        _em.SetComponentData(e, new StableId { Value = stableId });            // deterministic identity
+#if UNITY_EDITOR
+        // Human-readable name in the Entities Hierarchy window: e.g. "Peasant#3 P0"
+        // or "Rock#7 P-1". Makes it possible to tell a harvester from a node from
+        // the specific unit you selected. Compiled out of player builds.
+        string role = def is ResourceNodeDefinition ? "Node"
+                    : def is ObstacleDefinition ? "Obstacle"
+                    : bdef != null ? "Bldg" : "Unit";
+        _em.SetName(e, $"{def.displayName}#{stableId} P{player} [{role}]");
+#endif
         _em.SetComponentEnabled<Selected>(e, false);                          // archetype components start enabled
         _em.SetComponentData(e, LocalTransform.FromPosition(pos));
         _em.SetComponentData(e, new Player { Value = player });
@@ -216,6 +271,15 @@ public class UnitFactory : MonoBehaviour
             AttackDamage = def.attackDamage,
             Armor = def.armor,
             Shield = def.shield,
+            AttackNearbyRange = def.attackNearbyRange,
+            IdleSpacing = def.idleSpacing,
+            SeparationStrength = def.separationStrength,
+            CombatSpacing = def.combatSpacing,
+            AvoidMeleeRange = def.avoidMeleeRange,
+            PursueDistance = def.pursueDistance,
+            CohesionRadius = def.cohesionRadius,
+            RetreatHealthPct = def.retreatHealthFraction,
+            ReEngageHealthPct = .75f,
         });
         // BehaviorOverride / MoveTarget / AttackOrder / CombatTarget /
         // DesiredDestination default to zero (Has=false) — fine.
@@ -279,6 +343,17 @@ public class UnitFactory : MonoBehaviour
     {
         if (bdef != null)
         {
+            // Invulnerability = NonCombatant (targeting/combat skip it). Driven by the
+            // definition, in one place: a resource node (harvested, never attacked),
+            // an obstacle authored invulnerable (a rock), or any building explicitly
+            // flagged nonCombatant. This is the ONLY invulnerability mechanism — no
+            // giant-maxHealth hack.
+            bool noncombat = bdef.nonCombatant
+                          || bdef is ResourceNodeDefinition
+                          || (bdef is ObstacleDefinition obs && obs.invulnerable);
+            if (noncombat && !_em.HasComponent<NonCombatant>(e))
+                _em.AddComponent<NonCombatant>(e);
+
             if (bdef is ResourceNodeDefinition node)
             {
                 var amt = new ResourceAmount(); var cap = new ResourceAmount();
@@ -286,7 +361,6 @@ public class UnitFactory : MonoBehaviour
                 _em.AddComponentData(e, new NodeTag { Yield = node.resourceType, DespawnWhenEmpty = (byte)(node.despawnWhenDepleted ? 1 : 0), HuskLinger = node.huskLingerSeconds });
                 if (!_em.HasComponent<ResourceBank>(e)) _em.AddComponentData(e, new ResourceBank { Amounts = amt, Capacity = cap });
                 EnsureBankBuffers(e);
-                _em.AddComponent<NonCombatant>(e);   // a node is harvested, never attacked
             }
             else if (bdef.isDepot || bdef.isColony)
             {
@@ -317,7 +391,8 @@ public class UnitFactory : MonoBehaviour
         if (def.carryCapacity > 0)
         {
             var cap = new ResourceAmount { Gold = def.carryCapacity, Wood = def.carryCapacity, Food = def.carryCapacity };
-            _em.AddComponentData(e, new HarvestTask { NodeStableId = -1, DepotStableId = -1, Phase = HarvestPhase.Idle, Rate = math.max(1, def.harvestRate) });
+            _em.AddComponentData(e, new HarvestTask { NodeStableId = -1, DepotStableId = -1, Phase = HarvestPhase.Idle,
+                Rate = math.max(0f, def.harvestRate), ReacquireRange = math.max(0f, def.reacquireRange), DropRange = math.max(0.5f, def.depositRange) });
             if (!_em.HasComponent<ResourceBank>(e)) _em.AddComponentData(e, new ResourceBank { Amounts = default, Capacity = cap });
             EnsureBankBuffers(e);
         }
@@ -359,7 +434,12 @@ public class UnitFactory : MonoBehaviour
         _em.SetComponentData(e, new DeathTimer { Seconds = def.deathAnimSeconds });
         _em.SetComponentData(e, new BaseStats {
             Speed = def.speed, TurnSpeed = def.turnSpeed, MeleeRange = def.meleeRange,
-            AttackDamage = def.attackDamage, Armor = def.armor, Shield = def.shield });
+            AttackDamage = def.attackDamage, Armor = def.armor, Shield = def.shield,
+            AttackNearbyRange = def.attackNearbyRange, IdleSpacing = def.idleSpacing,
+            SeparationStrength = def.separationStrength, CombatSpacing = def.combatSpacing,
+            AvoidMeleeRange = def.avoidMeleeRange, PursueDistance = def.pursueDistance,
+            CohesionRadius = def.cohesionRadius, RetreatHealthPct = def.retreatHealthFraction,
+            ReEngageHealthPct = .75f });
         _em.SetComponentData(e, new FormationMember {
             FrontPriority = def.frontPriority, Looseness = def.looseness,
             Aggression = def.aggression, Separation = def.formationSpacing });

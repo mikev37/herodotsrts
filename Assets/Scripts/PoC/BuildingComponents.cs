@@ -18,7 +18,7 @@ using Unity.Mathematics;
 //   AbilityImmune — ability fields never stamp modifiers onto this entity.
 //                   Data-driven from UnitDefinition.receivesAbilities.
 //
-// All three are added at spawn (UnitManager.SpawnUnit), which only ever runs
+// All three are added at spawn (UnitFactory.Create), which only ever runs
 // from Start or from CommandApplySystem at a command's execution tick — both
 // deterministic points, so the structural changes are lockstep-safe.
 // ===========================================================================
@@ -50,7 +50,7 @@ public struct NavContext : IComponentData
     public byte Value;   // NavCell.ContextGround or NavCell.ContextRoof
 }
 
-// Footprint geometry shared by UnitManager (snap at spawn), CommandApplySystem
+// Footprint geometry shared by UnitFactory (snap at spawn), CommandApplySystem
 // (placement validation), and ObstacleGridSystem (rasterization). One source of
 // truth so the stamped cells, the snapped position, and the validated cells can
 // never disagree. Burst-callable (pure static math).

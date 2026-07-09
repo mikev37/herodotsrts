@@ -2,13 +2,20 @@ using UnityEngine;
 
 /// <summary>
 /// RTS Camera Controller
-/// - Scroll wheel             : Zoom (FOV), anchored on the point under the cursor
+/// - Scroll wheel             : Zoom (FOV), pinned on the point under the cursor
 /// - Mouse near edge          : Pan along XZ plane
 /// - Middle mouse drag        : Pan along XZ plane
 /// - Left + Right mouse drag  : Orbit (yaw + pitch)
 ///
-/// Orbit now requires BOTH mouse buttons so that a plain right-drag is free for
-/// unit orders (formation width in PlayerCommander).
+/// Orbit requires BOTH mouse buttons so a plain right-drag is free for unit
+/// orders (formation width in PlayerCommander).
+///
+/// Every mouse-to-world raycast goes through TryScreenPointToGroundPoint, which
+/// rejects non-finite / off-viewport cursor positions BEFORE handing them to the
+/// camera. Unity's Camera.ScreenPointToRay logs "Screen position out of view
+/// frustum" for such input (Input.mousePosition returns (inf,-inf) when the
+/// cursor is outside the Game view or focus was just lost); the guard keeps the
+/// log clean and the camera stable.
 /// </summary>
 [RequireComponent(typeof(Camera))]
 public class RTSCameraController : MonoBehaviour
@@ -18,7 +25,10 @@ public class RTSCameraController : MonoBehaviour
     // -------------------------------------------------------------------------
     [Header("Zoom (FOV)")]
     public float zoomSpeed       = 5f;
+    [Tooltip("Zoom easing responsiveness. Higher = snappier. Used as 1/smoothTime for a critically-damped SmoothDamp (eases in and out, no overshoot).")]
     public float zoomSmoothing   = 8f;
+    [Tooltip("Maximum FOV change rate (degrees/second). Caps how fast a large zoom traverses, so no single frame gets a big FOV step (hence no big cursor-pin pan).")]
+    public float maxZoomSpeed    = 90f;
     public float fovMin          = 20f;
     public float fovMax          = 80f;
 
@@ -58,19 +68,20 @@ public class RTSCameraController : MonoBehaviour
     // =========================================================================
     private Camera   _cam;
     private float    _targetFov;
+    private float    _zoomVel;            // SmoothDamp velocity for the FOV ease
     private Vector3  _targetPosition;
     private float    _targetYaw;
     private float    _targetPitch;
 
     // middle-mouse drag
     private bool     _dragging;
-    private Vector3  _dragGroundOrigin;  // world point on ground under cursor at drag start
+    private Vector3  _dragGroundOrigin;   // world point on ground under cursor at drag start
 
     // orbit (left + right mouse)
     private bool     _orbiting;
-    private Vector3  _orbitFocusPoint;   // world point we orbit around
+    private Vector3  _orbitFocusPoint;    // world point we orbit around
     private float    _orbitRadius;
-    private Vector3  _lastMousePos;      // for frame-to-frame orbit deltas
+    private Vector3  _lastMousePos;       // for frame-to-frame orbit deltas
 
     // =========================================================================
     void Awake()
@@ -95,26 +106,53 @@ public class RTSCameraController : MonoBehaviour
     }
 
     // =========================================================================
-    // Zoom (anchored on the cursor)
+    // Zoom (SmoothDamp FOV, pinned on the cursor)
     // =========================================================================
-    void HandleZoom() {
+    void HandleZoom()
+    {
+        // Accumulate scroll into the target FOV (ignored while a drag/orbit owns the mouse).
         float scroll = Input.GetAxis("Mouse ScrollWheel");
         if (Mathf.Abs(scroll) > 0.001f && !_dragging && !_orbiting)
             _targetFov = Mathf.Clamp(_targetFov - scroll * zoomSpeed * _targetFov, fovMin, fovMax);
 
-        if (_orbiting || _dragging) return;   // those own the position this frame
+        // Settled: snap exactly and skip the per-frame raycasts (also avoids feeding
+        // an off-view cursor to the camera while idle).
+        if (Mathf.Abs(_cam.fieldOfView - _targetFov) < 0.001f && Mathf.Abs(_zoomVel) < 0.001f)
+        {
+            _cam.fieldOfView = _targetFov;
+            _zoomVel = 0f;
+            return;
+        }
 
-        // Sample under the cursor, ease the FOV, sample again — the shift pins the
-        // cursor's ground point against THIS frame's real FOV change, not the whole
-        // pending jump. Applied to the live position so there's no second smoothing lag.
-        Vector3 before = ScreenPointToGroundPoint(Input.mousePosition);
-        _cam.fieldOfView = Mathf.Lerp(_cam.fieldOfView, _targetFov, Time.deltaTime * zoomSmoothing);
-        Vector3 after = ScreenPointToGroundPoint(Input.mousePosition);
+        // Derive smoothTime from the inspector's zoomSmoothing (rate -> seconds) so the
+        // existing value keeps its meaning. SmoothDamp eases in AND out and is velocity-
+        // capped (maxZoomSpeed), so no single frame gets a large FOV step — which is what
+        // keeps the cursor-pin pan below from ever lurching.
+        float smoothTime = 1f / Mathf.Max(0.01f, zoomSmoothing);
 
-        Vector3 shift = before - after;
-        transform.position += shift;   // pin under cursor immediately
-        _targetPosition += shift;   // keep the pan target in sync so it doesn't drift back
-        ClampPosition();
+        // Zoom toward the cursor: sample the ground point under the cursor, ease the FOV
+        // one frame, sample again, then shift the camera by the difference so that point
+        // stays pinned. The shift is derived from THIS frame's ACTUAL FOV change (not the
+        // whole pending jump), so the pan tracks the zoom exactly with no swim/overshoot,
+        // and it's applied to the live position (with the target kept in sync) so it isn't
+        // double-smoothed. If the cursor is off-view / unusable, the pin is skipped and we
+        // simply zoom about the screen centre.
+        bool    canPin = !_orbiting && !_dragging;
+        Vector3 before = default;
+        bool    pin    = canPin && TryScreenPointToGroundPoint(Input.mousePosition, out before);
+
+        _cam.fieldOfView = Mathf.SmoothDamp(_cam.fieldOfView, _targetFov, ref _zoomVel,
+                                            smoothTime, maxZoomSpeed, Time.deltaTime);
+
+        if (pin && TryScreenPointToGroundPoint(Input.mousePosition, out Vector3 after))
+        {
+            Vector3 shift = before - after;
+            if (IsFinite(shift))
+            {
+                transform.position = ClampXZ(transform.position + shift);
+                _targetPosition    = ClampXZ(_targetPosition + shift);
+            }
+        }
     }
 
     // =========================================================================
@@ -167,11 +205,7 @@ public class RTSCameraController : MonoBehaviour
         // Reconstruct the camera position from yaw/pitch/radius around the focus.
         Quaternion rot    = Quaternion.Euler(_targetPitch, _targetYaw, 0f);
         Vector3    offset = rot * new Vector3(0f, 0f, -_orbitRadius);
-        _targetPosition   = _orbitFocusPoint + offset;
-
-        // Keep focus within bounds
-        _targetPosition.x = Mathf.Clamp(_targetPosition.x, panBoundsMin.x, panBoundsMax.x);
-        _targetPosition.z = Mathf.Clamp(_targetPosition.z, panBoundsMin.y, panBoundsMax.y);
+        _targetPosition   = ClampXZ(_orbitFocusPoint + offset);
     }
 
     // =========================================================================
@@ -181,31 +215,26 @@ public class RTSCameraController : MonoBehaviour
     {
         if (Input.GetMouseButtonDown(2))
         {
-            _dragging = true;
-            // Record the world point on the ground that is currently under the cursor.
-            // Every subsequent frame we translate the camera so that same ground point
-            // stays under the cursor — no speed tuning required, no Time.deltaTime.
-            _dragGroundOrigin = ScreenPointToGroundPoint(Input.mousePosition);
+            // Only begin the drag if we got a valid world point under the cursor.
+            if (TryScreenPointToGroundPoint(Input.mousePosition, out Vector3 origin))
+            {
+                _dragging = true;
+                _dragGroundOrigin = origin;   // the world point we keep under the cursor
+            }
         }
 
         if (Input.GetMouseButtonUp(2))
-        {
             _dragging = false;
-        }
 
         if (!_dragging) return;
 
-        // Where would the ground point be under the cursor right now,
-        // if the camera had NOT moved yet this frame?
-        // We raycast from the camera's current (not target) position so the
-        // ground point is computed in the same space as _dragGroundOrigin.
-        Vector3 currentGroundPoint = ScreenPointToGroundPoint(Input.mousePosition);
-
-        // Shift the target so the origin ground point returns under the cursor.
-        Vector3 delta = _dragGroundOrigin - currentGroundPoint;
-        _targetPosition += delta;
-
-        ClampPosition();
+        // Where is the ground under the cursor now? If the cursor left the view this
+        // frame, skip cleanly (no garbage move, no warning) and resume when it returns.
+        if (TryScreenPointToGroundPoint(Input.mousePosition, out Vector3 current))
+        {
+            Vector3 delta = _dragGroundOrigin - current;
+            _targetPosition = ClampXZ(_targetPosition + delta);
+        }
     }
 
     // =========================================================================
@@ -218,6 +247,7 @@ public class RTSCameraController : MonoBehaviour
         if (_dragging)         return;
 
         Vector3 mousePos = Input.mousePosition;
+        if (!IsFinite(mousePos)) return;   // cursor off-view: nothing to pan toward
         float   w        = Screen.width;
         float   h        = Screen.height;
 
@@ -237,8 +267,7 @@ public class RTSCameraController : MonoBehaviour
         // Scale by FOV so panning feels consistent when zoomed
         float speed = edgePanSpeed * (_cam.fieldOfView / fovMax);
 
-        _targetPosition += panDir * speed * Time.deltaTime;
-        ClampPosition();
+        _targetPosition = ClampXZ(_targetPosition + panDir * speed * Time.deltaTime);
     }
 
     // =========================================================================
@@ -246,63 +275,74 @@ public class RTSCameraController : MonoBehaviour
     // =========================================================================
     void ApplyTransform()
     {
-        if (!_orbiting)
-        {
-            transform.position = Vector3.Lerp(
-                transform.position, _targetPosition, Time.deltaTime * panSmoothing);
+        float posLerp = (_orbiting ? orbitSmoothing : panSmoothing) * Time.deltaTime;
 
-            Quaternion targetRot = Quaternion.Euler(_targetPitch, _targetYaw, 0f);
-            transform.rotation   = Quaternion.Slerp(
-                transform.rotation, targetRot, Time.deltaTime * orbitSmoothing);
-        }
-        else
-        {
-            // During orbit snap position tightly; smoothing applied via target update
-            transform.position = Vector3.Lerp(
-                transform.position, _targetPosition, Time.deltaTime * orbitSmoothing);
+        transform.position = Vector3.Lerp(transform.position, _targetPosition, posLerp);
 
-            Quaternion targetRot = Quaternion.Euler(_targetPitch, _targetYaw, 0f);
-            transform.rotation   = Quaternion.Slerp(
-                transform.rotation, targetRot, Time.deltaTime * orbitSmoothing);
-        }
+        Quaternion targetRot = Quaternion.Euler(_targetPitch, _targetYaw, 0f);
+        transform.rotation   = Quaternion.Slerp(
+            transform.rotation, targetRot, Time.deltaTime * orbitSmoothing);
     }
 
     // =========================================================================
     // Helpers
     // =========================================================================
-    void ClampPosition()
+    private static bool IsFinite(float v) => !(float.IsNaN(v) || float.IsInfinity(v));
+
+    private static bool IsFinite(Vector3 v) => IsFinite(v.x) && IsFinite(v.y) && IsFinite(v.z);
+
+    /// <summary>Clamp only the X/Z of a position into the pan bounds (leaves Y alone).</summary>
+    private Vector3 ClampXZ(Vector3 p)
     {
-        _targetPosition.x = Mathf.Clamp(_targetPosition.x, panBoundsMin.x, panBoundsMax.x);
-        _targetPosition.z = Mathf.Clamp(_targetPosition.z, panBoundsMin.y, panBoundsMax.y);
+        p.x = Mathf.Clamp(p.x, panBoundsMin.x, panBoundsMax.x);
+        p.z = Mathf.Clamp(p.z, panBoundsMin.y, panBoundsMax.y);
+        return p;
     }
 
-    /// <summary>Casts a ray from the camera to the Y=0 plane and returns the hit point.</summary>
+    private void ClampPosition() => _targetPosition = ClampXZ(_targetPosition);
+
+    /// <summary>Casts a ray from the camera along its forward to the Y=0 plane.</summary>
     Vector3 GetGroundPoint()
     {
         Ray   ray   = new Ray(transform.position, transform.forward);
         Plane plane = new Plane(Vector3.up, Vector3.zero);
 
         if (plane.Raycast(ray, out float dist))
-            return ray.GetPoint(dist);
+        {
+            Vector3 p = ray.GetPoint(dist);
+            if (IsFinite(p)) return p;
+        }
 
         // Fallback: project straight down from current position
         return new Vector3(transform.position.x, 0f, transform.position.z);
     }
 
     /// <summary>
-    /// Casts a ray from the camera through a screen-space pixel to the Y=0 ground plane.
-    /// Uses the camera's actual current transform (not the smoothed target) so drag
-    /// calculations are always in a consistent space.
+    /// Casts a ray from the camera through a screen-space pixel to the Y=0 ground
+    /// plane. Returns false (without touching the camera) when the screen point is
+    /// non-finite or outside the camera's pixel rect — Camera.ScreenPointToRay logs
+    /// "Screen position out of view frustum" for such input, which is exactly the
+    /// (inf,-inf) Input.mousePosition produced when the cursor is off the Game view.
+    /// Uses the camera's ACTUAL current transform so drag/zoom math is consistent.
     /// </summary>
-    Vector3 ScreenPointToGroundPoint(Vector3 screenPos)
+    bool TryScreenPointToGroundPoint(Vector3 screenPos, out Vector3 point)
     {
+        point = default;
+
+        if (!IsFinite(screenPos)) return false;
+
+        Rect r = _cam.pixelRect;
+        if (screenPos.x < r.xMin || screenPos.x > r.xMax ||
+            screenPos.y < r.yMin || screenPos.y > r.yMax) return false;
+
         Ray   ray   = _cam.ScreenPointToRay(screenPos);
         Plane plane = new Plane(Vector3.up, Vector3.zero);
 
         if (plane.Raycast(ray, out float dist))
-            return ray.GetPoint(dist);
-
-        // Fallback: same height-0 position as the camera's XZ
-        return new Vector3(transform.position.x, 0f, transform.position.z);
+        {
+            Vector3 p = ray.GetPoint(dist);
+            if (IsFinite(p)) { point = p; return true; }
+        }
+        return false;
     }
 }

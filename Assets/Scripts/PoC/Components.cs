@@ -119,6 +119,15 @@ public struct CombatStatus : IComponentData
 // DeathTimer expires and the entity is destroyed.
 public struct Dead : IComponentData { }
 
+// A shift-queued destination. WaypointSystem pops the front into MoveTarget
+// whenever the unit has no active order, so chains run in click order. Added
+// lazily on the first queued order; a fresh (unqueued) order clears it.
+public struct Waypoint : IBufferElementData
+{
+    public float2 Pos;
+    public byte   AttackMove;   // 1 = attack-move leg
+}
+
 // Spikes / palisade: passive per-second damage this building deals to any enemy
 // unit touching it. No order, no facing, no attack cycle — you press against it,
 // you bleed. Present only on buildings authored with contactDamage > 0; read

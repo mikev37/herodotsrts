@@ -46,7 +46,9 @@ public class BuildingDefinitionEditor : Editor
     };
 
     // Vision (2.5D line of sight) — every building blocks/participates in sight.
-    private static readonly string[] VisionFields =
+    // Vision (2.5D sight) fields — reused by node/obstacle editors so every
+    // structure can set its occluder height.
+    public static readonly string[] VisionFields =
     {
         "occluderHeight",   // how tall this building blocks sight
         "eyeOffset",        // shooter eye height (set ABOVE occluderHeight so a tower sees over its own walls)

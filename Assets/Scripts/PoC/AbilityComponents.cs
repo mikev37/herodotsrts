@@ -16,8 +16,19 @@ using Unity.Mathematics;
 // assets that toggle behavior flags; the semantics shifted with the rename.
 public enum ModTarget : byte
 {
-    Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield,   // numeric
-    Aggression, Looseness, Separation,
+    Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield,   // numeric stats
+    // Behavior tuning (UnitTuning params). Aggression/Looseness/Separation kept
+    // at their original indices so already-baked ability assets don't shift.
+    Aggression,        // -> AttackNearbyRange  (how far it leaves formation to engage)
+    Looseness,         // -> IdleSpacing        (formation spread at rest)
+    Separation,        // -> SeparationStrength (how hard it pushes off neighbors)
+    CombatSpacing,     // formation spread with enemies near
+    AttackNearbyRange, // explicit alias of Aggression for clarity in authoring
+    AvoidMeleeRange,   // kite back-off radius
+    PursueDistance,    // how far it will chase from an objective
+    CohesionRadius,    // distance from friendly center before it regroups
+    RetreatHealthPct,  // retreats below this Current/Max (0 = never retreat)
+    ReEngageHealthPct, // stops retreating above this Current/Max
 }
 
 public enum ModMode : byte { Instant, PerSecond }
@@ -34,6 +45,11 @@ public enum AffectFilter : byte { Enemies, Allies, All }
 public struct BaseStats : IComponentData
 {
     public float Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield;
+    // Behavior tuning bases — so ability offsets to these revert cleanly to the
+    // unit's authored values (StatResolveSystem recomputes live UnitTuning each frame).
+    public float AttackNearbyRange, IdleSpacing, SeparationStrength, CombatSpacing,
+                 AvoidMeleeRange, PursueDistance, CohesionRadius,
+                 RetreatHealthPct, ReEngageHealthPct;
 }
 
 // One active effect on a unit (stacking buffer). Identity (Source, Slot) lets a

@@ -47,6 +47,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   animator: {fileID: 0}
   playerColor: {fileID: 0}
+  autoTintAllRenderers: 0
   HP: 0
 --- !u!1001 &805583869838492159
 PrefabInstance:

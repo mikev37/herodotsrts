@@ -269,6 +269,7 @@ GameObject:
   - component: {fileID: 4967691736124107324}
   - component: {fileID: 6952790459548412725}
   - component: {fileID: 2405841735622363541}
+  - component: {fileID: 6675730526476798380}
   m_Layer: 0
   m_Name: Fort
   m_TagString: Untagged
@@ -348,6 +349,22 @@ MeshRenderer:
   m_SortingLayer: 0
   m_SortingOrder: 0
   m_AdditionalVertexStreams: {fileID: 0}
+--- !u!114 &6675730526476798380
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4735678258241096891}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 29d961802bfc5364ca1263a7294fa43c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  animator: {fileID: 0}
+  playerColor: {fileID: 0}
+  autoTintAllRenderers: 0
+  HP: 0
 --- !u!1 &8647000965107062816
 GameObject:
   m_ObjectHideFlags: 0

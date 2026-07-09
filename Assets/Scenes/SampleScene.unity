@@ -4705,7 +4705,7 @@ MonoBehaviour:
   definition: {fileID: 11400000, guid: 809f2080150d37f4cbd7c55dd4dc49c3, type: 2}
   ownerPlayer: 0
   shape: 3
-  count: 5
+  count: 3
   spacing: 3
   gridColumns: 0
   lineAngle: 0

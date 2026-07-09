@@ -63,8 +63,11 @@ public class UnitView : MonoBehaviour
     //   2. otherwise, if autoTintAllRenderers, a MaterialPropertyBlock tint on
     //      every renderer — so units are colored with zero prefab setup.
     // Uses a property block (never instantiates materials, no per-unit leak).
-    public void SetPlayerColor(Color color)
+    // A neutral owner (isNeutral) leaves the prefab's own materials untouched —
+    // resource nodes / obstacles keep their authored look, not a gray wash.
+    public void SetPlayerColor(Color color, bool isNeutral = false)
     {
+        if (isNeutral) return;                       // neutral: keep authored materials
         if (playerColor != null) { playerColor.Apply(color); return; }
         if (!autoTintAllRenderers) return;
 

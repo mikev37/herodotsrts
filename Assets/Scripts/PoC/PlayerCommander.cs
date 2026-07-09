@@ -53,6 +53,8 @@ public class PlayerCommander : Commander
     private float2  _rmbStart;       // terrain point under the press = move destination
     private Entity  _rmbEnemy;       // enemy under the press point, if any
     private float2  _rmbEnemyPos;
+    private int     _rmbNode = -1;   // resource-node StableId under the press point, if any
+    private int     _rmbDepot = -1;  // OWN depot StableId under the press point, if any
 
     // Latched while the orbit chord (both buttons) is engaged, so the button-ups
     // that end an orbit don't also fire a box-select or a move order. Cleared
@@ -129,20 +131,14 @@ public class PlayerCommander : Commander
         if (Input.GetKeyDown(KeyCode.P))
             TryBuildingAction(e => IssueToggleBankPause(Em.GetComponentData<StableId>(e).Value));
 
-        // H = harvest: send selected harvesters to node under cursor
-        if (Input.GetKeyDown(KeyCode.H) && GroundPoint(out float2 harvestPos))
-        {
-            // Find nearest NodeTag entity to the ground point
-            int nodeSid = FindNearestNodeStableId(harvestPos);
-            if (nodeSid >= 0)
-            {
-                var harvesters = GetPlayerUnits().FindAll(e =>
-                    Em.IsComponentEnabled<Selected>(e) && Em.HasComponent<HarvestTask>(e));
-                if (harvesters.Count == 0)  // fall back to any selected unit with carryCapacity
-                    harvesters = GetPlayerUnits().FindAll(e => Em.IsComponentEnabled<Selected>(e));
-                IssueHarvest(harvesters, nodeSid);
-            }
-        }
+        // L = emergency cart launch: the selected colony builds and dispatches a
+        // hauler now (normal build time) even below its threshold — the raid-
+        // survivor case where a half-full colony has no more peasants coming.
+        if (Input.GetKeyDown(KeyCode.L))
+            TryBuildingAction(e => { if (Em.HasComponent<Colony>(e)) IssueLaunchCart(Em.GetComponentData<StableId>(e).Value); });
+
+        // Shift = queue modifier: Move/AttackMove append as waypoints.
+        QueueModifier = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
 
         // ---- context-sensitive build/produce/upgrade/research menus ----------
         // When a single building is selected, the asdf row (and qwer for
@@ -267,24 +263,6 @@ public class PlayerCommander : Commander
     }
 
     // Find the nearest NodeTag entity to a world point; returns its StableId or -1.
-    private int FindNearestNodeStableId(float2 pos)
-    {
-        using var q = Em.CreateEntityQuery(
-            ComponentType.ReadOnly<NodeTag>(),
-            ComponentType.ReadOnly<StableId>(),
-            ComponentType.ReadOnly<LocalTransform>());
-        var ents  = q.ToEntityArray(Allocator.Temp);
-        var sids  = q.ToComponentDataArray<StableId>(Allocator.Temp);
-        var xfs   = q.ToComponentDataArray<LocalTransform>(Allocator.Temp);
-        int best  = -1; float bestD = float.MaxValue;
-        for (int i = 0; i < ents.Length; i++)
-        {
-            float d = math.distancesq(pos, new float2(xfs[i].Position.x, xfs[i].Position.z));
-            if (d < bestD) { bestD = d; best = sids[i].Value; }
-        }
-        ents.Dispose(); sids.Dispose(); xfs.Dispose();
-        return best;
-    }
 
     // Context-sensitive building economy menu.
     // With a single own building selected, the number row 1-4 drives produce/
@@ -392,6 +370,11 @@ public class PlayerCommander : Commander
         var players = AllUnitsQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var xforms = AllUnitsQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
 
+        // A bare click has a ~zero-area rect that contains nothing — grow it to a
+        // small pick box so single-click selection works (units AND buildings).
+        if (rect.width < 8f && rect.height < 8f)
+            rect = new Rect(rect.center.x - 14f, rect.center.y - 14f, 28f, 28f);
+
         for (int i = 0; i < entities.Length; i++)
         {
             bool sel = false;
@@ -404,6 +387,26 @@ public class PlayerCommander : Commander
                 Em.SetComponentEnabled<Selected>(entities[i], sel);
         }
         entities.Dispose(); players.Dispose(); xforms.Dispose();
+
+        // Structures too: colonies, barracks, castles are selectable so their
+        // banks/production can be inspected and building actions (P pause,
+        // L launch, produce/research menus) have a target. Same rect test.
+        var sEnts = StructuresQuery.ToEntityArray(Allocator.Temp);
+        var sPlayers = StructuresQuery.ToComponentDataArray<Player>(Allocator.Temp);
+        var sXforms = StructuresQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
+        for (int i = 0; i < sEnts.Length; i++)
+        {
+            bool sel = false;
+            if (sPlayers[i].Value == player)
+            {
+                Vector3 sp = cam.WorldToScreenPoint(sXforms[i].Position);
+                sel = sp.z > 0 && rect.Contains(new Vector2(sp.x, sp.y));
+            }
+            if (Em.HasComponent<Selected>(sEnts[i]) &&
+                Em.IsComponentEnabled<Selected>(sEnts[i]) != sel)
+                Em.SetComponentEnabled<Selected>(sEnts[i], sel);
+        }
+        sEnts.Dispose(); sPlayers.Dispose(); sXforms.Dispose();
         armedIndex = -1;   // selection changed; disarm
     }
 
@@ -414,6 +417,8 @@ public class PlayerCommander : Commander
     {
         _rmbDragging = true;
         _rmbEnemy    = Entity.Null;
+        _rmbNode     = -1;
+        _rmbDepot    = -1;
 
         // Destination = the terrain point under the press. GroundPoint raycasts
         // the real terrain (see its note), so the drag measures true world
@@ -421,12 +426,13 @@ public class PlayerCommander : Commander
         if (!GroundPoint(out _rmbStart)) { _rmbDragging = false; return; }
 
         var cam = Camera.main; if (cam == null) return;
+        Vector2 mouse = Input.mousePosition;
+
+        // --- Pass 1: mobile enemy units (attack) ---
         var entities = AllUnitsQuery.ToEntityArray(Allocator.Temp);
         var players = AllUnitsQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var xforms = AllUnitsQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
-
         float best = 30f; // px
-        Vector2 mouse = Input.mousePosition;
         for (int i = 0; i < entities.Length; i++)
         {
             if (players[i].Value == player) continue;
@@ -436,6 +442,36 @@ public class PlayerCommander : Commander
             if (d < best) { best = d; _rmbEnemy = entities[i]; _rmbEnemyPos = new float2(xforms[i].Position.x, xforms[i].Position.z); }
         }
         entities.Dispose(); players.Dispose(); xforms.Dispose();
+
+        // --- Pass 2: structures (resource node -> harvest; enemy building ->
+        //     attack; a NEUTRAL obstacle (player -1, no NodeTag) is IGNORED so a
+        //     right-click near a rock is a plain move, never an attack-the-rock). ---
+        var sEnts = StructuresQuery.ToEntityArray(Allocator.Temp);
+        var sPlayers = StructuresQuery.ToComponentDataArray<Player>(Allocator.Temp);
+        var sXforms = StructuresQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
+        float bestNode = 30f, bestBldg = 30f;
+        for (int i = 0; i < sEnts.Length; i++)
+        {
+            Vector3 sp = cam.WorldToScreenPoint(sXforms[i].Position);
+            if (sp.z <= 0) continue;
+            float d = Vector2.Distance(mouse, new Vector2(sp.x, sp.y));
+
+            if (Em.HasComponent<NodeTag>(sEnts[i]))                       // resource node -> harvest
+            {
+                if (d < bestNode) { bestNode = d; _rmbNode = Em.GetComponentData<StableId>(sEnts[i]).Value; }
+            }
+            else if (sPlayers[i].Value == player && Em.HasComponent<DepotTag>(sEnts[i]))   // OWN depot -> deliver
+            {
+                if (d < bestBldg) { bestBldg = d; _rmbDepot = Em.GetComponentData<StableId>(sEnts[i]).Value; }
+            }
+            else if (sPlayers[i].Value != player && sPlayers[i].Value >= 0 // ENEMY building -> attack
+                     && !Em.HasComponent<NonCombatant>(sEnts[i]))          // (a neutral/invulnerable structure is never attacked)
+            {
+                if (d < bestBldg) { bestBldg = d; _rmbEnemy = sEnts[i]; _rmbEnemyPos = new float2(sXforms[i].Position.x, sXforms[i].Position.z); }
+            }
+            // else: neutral obstacle (rock) -> ignore, so EndRightDrag falls through to a move.
+        }
+        sEnts.Dispose(); sPlayers.Dispose(); sXforms.Dispose();
     }
 
     // Release: commit the order. Drag length across the terrain (press point ->
@@ -448,6 +484,34 @@ public class PlayerCommander : Commander
 
         var selected = GetSelected();
         if (selected.Count == 0) { lastOrder = "(right-click ignored: nothing selected)"; return; }
+
+        // A resource node under the press → harvest with any selected harvesters.
+        // Takes priority over attack: clicking a tree should harvest it, not pick
+        // a fight with something behind it.
+        if (_rmbNode >= 0)
+        {
+            var harvesters = selected.FindAll(e => Em.HasComponent<HarvestTask>(e));
+            if (harvesters.Count > 0)
+            {
+                IssueHarvest(harvesters, _rmbNode);
+                lastOrder = $"harvest node {_rmbNode} ({harvesters.Count})";
+                return;
+            }
+            // No harvesters selected → fall through (attack if enemy, else move).
+        }
+
+        // An OWN depot under the press → send selected harvesters to drop their
+        // cargo there (explicit drop-off, overriding the auto-nearest depot).
+        if (_rmbDepot >= 0)
+        {
+            var carriers = selected.FindAll(e => Em.HasComponent<HarvestTask>(e) || Em.HasComponent<HaulTask>(e));
+            if (carriers.Count > 0)
+            {
+                IssueDeliver(carriers, _rmbDepot);
+                lastOrder = $"deliver to depot {_rmbDepot} ({carriers.Count})";
+                return;
+            }
+        }
 
         if (_rmbEnemy != Entity.Null) { IssueAttack(selected, _rmbEnemy, _rmbEnemyPos); return; }
 

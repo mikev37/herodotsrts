@@ -35,8 +35,9 @@ public class UnitViewManager : MonoBehaviour
     private EntityManager _em;
     private EntityQuery _viewQuery;
     private readonly Dictionary<Entity, UnitView> _views = new();
-    private readonly Dictionary<int, Stack<UnitView>> _pool = new();
-    private readonly Dictionary<UnitView, int> _typeOf = new();
+    private readonly Dictionary<long, Stack<UnitView>> _pool = new();
+    private readonly Dictionary<UnitView, int>  _typeOf = new();   // defId, for morph detection
+    private readonly Dictionary<UnitView, long> _poolKeyOf = new(); // composite pool key, for release
     private readonly List<Entity> _toRemove = new();
 
     private void Awake() { Instance = this; }
@@ -58,7 +59,8 @@ public class UnitViewManager : MonoBehaviour
         _viewQuery = _em.CreateEntityQuery(
             ComponentType.ReadOnly<UnitTag>(), ComponentType.ReadOnly<LocalTransform>(),
             ComponentType.ReadOnly<UnitAnim>(), ComponentType.ReadOnly<Health>(),
-            ComponentType.ReadOnly<UnitDefId>(), ComponentType.ReadOnly<Player>());
+            ComponentType.ReadOnly<UnitDefId>(), ComponentType.ReadOnly<Player>(),
+            ComponentType.ReadOnly<StableId>());
     }
 
     private Color PlayerColor(int p) => (p >= 0 && p < playerColors.Length) ? playerColors[p] : Color.gray;
@@ -73,6 +75,7 @@ public class UnitViewManager : MonoBehaviour
         var hps      = _viewQuery.ToComponentDataArray<Health>(Allocator.Temp);
         var ids      = _viewQuery.ToComponentDataArray<UnitDefId>(Allocator.Temp);
         var players  = _viewQuery.ToComponentDataArray<Player>(Allocator.Temp);
+        var sids     = _viewQuery.ToComponentDataArray<StableId>(Allocator.Temp);
 
         var alive = new HashSet<Entity>();
         for (int i = 0; i < entities.Length; i++)
@@ -93,9 +96,9 @@ public class UnitViewManager : MonoBehaviour
 
             if (view == null && !_views.TryGetValue(e, out view))
             {
-                view = Acquire(ids[i].Value);
+                view = Acquire(ids[i].Value, sids[i].Value);
                 if (view == null) continue;
-                view.SetPlayerColor(PlayerColor(players[i].Value));
+                view.SetPlayerColor(PlayerColor(players[i].Value), isNeutral: players[i].Value < 0);
                 _views[e] = view;
             }
             var t = view.transform;
@@ -139,20 +142,36 @@ public class UnitViewManager : MonoBehaviour
 
         trackedEntities = entities.Length; activeViews = _views.Count;
         pooledViews = 0; foreach (var s in _pool.Values) pooledViews += s.Count;
-        entities.Dispose(); xforms.Dispose(); anims.Dispose(); hps.Dispose(); ids.Dispose(); players.Dispose();
+        entities.Dispose(); xforms.Dispose(); anims.Dispose(); hps.Dispose(); ids.Dispose(); players.Dispose(); sids.Dispose();
     }
 
-    private UnitView Acquire(int defId)
+    private UnitView Acquire(int defId, int stableId)
     {
         var def = roster != null ? roster.GetDefinition(defId) : null;
-        var prefab = def != null ? def.viewPrefab : null;
+        if (def == null) return null;
+
+        // Obstacles may present one of several meshes, chosen deterministically
+        // from the entity's StableId (same entity → same mesh on every client).
+        // variant indexes into the pool key so reused views never swap meshes.
+        GameObject prefab = def.viewPrefab;
+        int variant = 0;
+        if (def is ObstacleDefinition obs)
+        {
+            prefab = obs.ResolveView(stableId);
+            if (obs.viewPrefabVariants != null && obs.viewPrefabVariants.Length > 0)
+                variant = (int)((uint)stableId % (uint)obs.viewPrefabVariants.Length);
+        }
         if (prefab == null) return null;
 
-        if (_pool.TryGetValue(defId, out var stack) && stack.Count > 0)
+        // Pool key: distinct meshes of the same def pool separately.
+        long key = ((long)defId << 20) ^ (uint)variant;
+        if (_pool.TryGetValue(key, out var stack) && stack.Count > 0)
         {
             var reused = stack.Pop();
             reused.gameObject.SetActive(true);
             reused.Bind();
+            _typeOf[reused] = defId;
+            _poolKeyOf[reused] = key;
             return reused;
         }
         var go = Instantiate(prefab);
@@ -160,6 +179,7 @@ public class UnitViewManager : MonoBehaviour
         v.Bind();
         go.name = $"UnitView_{def.displayName}";
         _typeOf[v] = defId;
+        _poolKeyOf[v] = key;
         return v;
     }
 
@@ -167,8 +187,8 @@ public class UnitViewManager : MonoBehaviour
     {
         if (v == null) return;
         v.gameObject.SetActive(false);
-        int defId = _typeOf.TryGetValue(v, out var id) ? id : 0;
-        if (!_pool.TryGetValue(defId, out var stack)) _pool[defId] = stack = new Stack<UnitView>();
+        long key = _poolKeyOf.TryGetValue(v, out var k) ? k : 0;
+        if (!_pool.TryGetValue(key, out var stack)) _pool[key] = stack = new Stack<UnitView>();
         stack.Push(v);
     }
 }

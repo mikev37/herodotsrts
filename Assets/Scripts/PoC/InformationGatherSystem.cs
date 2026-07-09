@@ -90,6 +90,7 @@ public partial struct InformationGatherSystem : ISystem {
             in UnitTuning meUnit,
             in Attack myAttack,
             in Defense myDefense,
+            in UnitRadius myRadius,
             in GroundSpeedMultiplier slope,
             in MoveTarget myMove,                       // self FormationId (0 = ungrouped)
             ref Perception perception,
@@ -98,6 +99,11 @@ public partial struct InformationGatherSystem : ISystem {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float myHeight = slope.Height;
             float myEyeOffset = meUnit.EyeOffset;
+            // A shooter must never be occluded by its OWN footprint: skip sight
+            // cells within its inscribed radius (+1 cell margin). For a tower this
+            // covers its whole body so it sees enemies just past its own walls; for
+            // a unit (radius ~0.5) it's the default ~2-cell inner radius.
+            int selfSightSkip = math.max(2, (int)math.ceil(myRadius.Value / NavGrid.CellSize) + 1);
             float3 forward3 = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
 
@@ -162,34 +168,39 @@ public partial struct InformationGatherSystem : ISystem {
                                    NavTerrain.SightLine(position, neighbor.Position,
                                                         myHeight + myEyeOffset,
                                                         neighbor.Height + neighbor.EyeOffset,
-                                                        OccluderHeight, sightCap);
+                                                        OccluderHeight, sightCap, selfSightSkip);
                         float effectiveDist = los ? distance : distance + NoLosMultiplier;
-                        // Units within contact range go into the ContactList for
-                        // melee/separation. BUILDINGS are also added (up to the same
-                        // range grown by their footprint radius) so an ordered
-                        // attacker can RESOLVE the structure as its target (behavior
-                        // reads the ContactList to find an ordered building — it is
-                        // never promoted to a scored perception slot) and so a
-                        // ranged unit can aim at it. Height-blocked pairs are still
-                        // excluded. Buildings are flagged IsBuilding so the strike/
-                        // separation code treats them appropriately.
+                        // Add to the ContactList (used for melee, separation, and
+                        // resolving an ordered building target). `distance` is already
+                        // the footprint-edge distance for a building, so both branches
+                        // use the same ContactRadius gate.
                         if (!heightBlocked)
                         {
                             if (!neighbor.IsBuilding)
                             {
-                                if (effectiveDist <= ContactRadius) contacts.Add(neighbor);
+                                // Measure from MY edge (inscribed radius), not my
+                                // center: a large depot's center is farther from a
+                                // peasant than ContactRadius, so center-to-center a
+                                // castle could NEVER see adjacent harvesters and
+                                // never pulled their cargo. Edge-based, a unit at
+                                // any wall registers. (For a unit perceiver the
+                                // inset is its tiny body radius — same semantics.)
+                                if (effectiveDist - myRadius.Value <= ContactRadius) contacts.Add(neighbor);
                             }
-                            // `distance` is already the footprint-EDGE distance for a
-                            // building (computed above), so the same ContactRadius gate
-                            // applies directly — a unit near any wall gets the building
-                            // in its ContactList and can strike it.
                             else if (distance <= ContactRadius)
                             {
                                 contacts.Add(neighbor);
                             }
                         }
 
-                        if (neighbor.Player != player.Value && !neighbor.IsNonCombatant) {
+                        // Neutral (player -1) entities — rocks, trees, unowned
+                        // structures — are NOBODY's enemy: they must never enter the
+                        // enemies buffer, or every downstream consumer (threat
+                        // centroid, attack-nearby, kiting) treats terrain as a
+                        // hostile and units march into rocks. They stay in contacts
+                        // (separation / ordered resolution) above.
+                        if (neighbor.Player >= 0 &&
+                            neighbor.Player != player.Value && !neighbor.IsNonCombatant) {
                             if (effectiveDist > meUnit.PursueDistance && !myAttack.isRange)
                                 continue;
                             if (heightBlocked)

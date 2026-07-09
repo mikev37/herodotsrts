@@ -32,6 +32,8 @@ public enum CommandKind : byte
     Morph = 17,             // Units[]: unit(s) to morph via morphTarget
     Upgrade = 18,           // TargetStableId = building StableId; TargetStableId2 = target upgrade defId
     Research = 19,          // TargetStableId = building StableId; AbilitySlot = index into building.researches
+    Deliver = 20,           // Units[]: harvesters; TargetStableId = depot StableId (drop cargo there)
+    LaunchCart = 21,        // TargetStableId = colony StableId; force-dispatch a hauler now (normal build time)
 }
 
 // One order. The struct is fully unmanaged/blittable (FixedList included), so it
@@ -49,6 +51,7 @@ public struct SimCommand : IBufferElementData, INetworkSerializeByMemcpy {
     public int TargetStableId2; // secondary id (unit defId for production/upgrade, etc.)
     public byte AbilitySlot;     // Ability: which slot (0..3); caster = Units[0]
     public int FormationWidth;  // Move/AttackMove grid columns; 0 = auto-fit
+    public byte Queued;          // 1 = shift-queued: append as a waypoint instead of replacing the order
     public FixedList512Bytes<int> Units;          // affected units (StableIds); up to ~125
 }
 
@@ -239,19 +242,71 @@ public partial struct CommandApplySystem : ISystem
             // commands, they are rejected here identically on every peer.
             // ================================================================
 
-            if (c.Kind == CommandKind.Harvest)
+            if (c.Kind == CommandKind.Harvest || c.Kind == CommandKind.Deliver)
             {
-                // Assign a harvest task to every unit in the selection.
+                // The intended resource type comes from the CLICKED node — stamping
+                // it now means Reacquire targets the right node type even when the
+                // ordered tree dies before this peasant ever reaches it.
+                ResourceType orderedYield = 0; bool hasYield = false;
+                if (c.Kind == CommandKind.Harvest &&
+                    map.TryGetValue(c.TargetStableId, out Entity nodeEnt) && em.HasComponent<NodeTag>(nodeEnt))
+                { orderedYield = em.GetComponentData<NodeTag>(nodeEnt).Yield; hasYield = true; }
+
                 for (int u = 0; u < c.Units.Length; u++)
                 {
                     if (!map.TryGetValue(c.Units[u], out Entity harv)) continue;
-                    if (!em.HasComponent<HarvestTask>(harv)) em.AddComponent<HarvestTask>(harv);
-                    em.SetComponentData(harv, new HarvestTask
+
+                    // Deliver applies to HAULERS with the same semantics as
+                    // harvesters: the clicked depot becomes the sink and the cart
+                    // resumes (this is also how a Manual cart goes back to work).
+                    if (c.Kind == CommandKind.Deliver && em.HasComponent<HaulTask>(harv))
                     {
-                        NodeStableId  = c.TargetStableId,
-                        DepotStableId = -1,
-                        Phase         = HarvestPhase.ToNode,
-                    });
+                        var hl = em.GetComponentData<HaulTask>(harv);
+                        if (hl.Phase != HaulPhase.Done)
+                        {
+                            hl.SinkStableId = c.TargetStableId;
+                            hl.Phase = HaulPhase.ToSink;
+                            em.SetComponentData(harv, hl);
+                        }
+                        continue;
+                    }
+
+                    if (!em.HasComponent<HarvestTask>(harv)) continue;   // only harvesters (Rate is baked at spawn)
+
+                    // MUTATE the existing task — never construct a fresh one, which
+                    // wipes the baked Rate to 0 (the old grant read Rate<=0 as
+                    // UNLIMITED, draining a whole node in one tick).
+                    var t = em.GetComponentData<HarvestTask>(harv);
+                    if (c.Kind == CommandKind.Harvest)
+                    {
+                        t.NodeStableId = c.TargetStableId; t.DepotStableId = -1;
+                        t.Phase = HarvestPhase.ToNode; t.Accrued = 0f;
+                        if (hasYield) t.Carrying = orderedYield;
+                    }
+                    else // Deliver: drop cargo at the CLICKED depot
+                    {
+                        t.DepotStableId = c.TargetStableId;
+                        t.Phase = HarvestPhase.ToDepot;
+                    }
+                    em.SetComponentData(harv, t);
+
+                    // Break formation: clear the move order + formation id so the
+                    // harvester travels INDIVIDUALLY (HarvestSystem writes its own
+                    // slotless soft-move each tick, which BehaviorSystem drives
+                    // directly). Without this a prior formation MoveTarget keeps the
+                    // unit in a formation slot and it moves in ranks to the tree.
+                    if (em.HasComponent<MoveTarget>(harv))
+                    {
+                        var mv = em.GetComponentData<MoveTarget>(harv);
+                        mv.HasTarget = false; mv.AttackMove = false; mv.FormationId = 0;
+                        em.SetComponentData(harv, mv);
+                    }
+                    // Clear any pending formation-rejoin so it stays individual.
+                    if (em.HasComponent<FormationMember>(harv))
+                    {
+                        var fm = em.GetComponentData<FormationMember>(harv);
+                        fm.ResumptionFormationId = 0; em.SetComponentData(harv, fm);
+                    }
                 }
                 continue;
             }
@@ -469,8 +524,45 @@ public partial struct CommandApplySystem : ISystem
                 });
                 continue;
             }
+            if (c.Kind == CommandKind.LaunchCart)
+            {
+                // Manual colony launch: arm the force flag; ProductionSystem runs
+                // the normal build time then dispatches even below the threshold
+                // (as long as the colony holds anything at all).
+                if (map.TryGetValue(c.TargetStableId, out Entity ce) && em.HasComponent<Colony>(ce))
+                {
+                    var col = em.GetComponentData<Colony>(ce);
+                    col.ForceLaunch = 1;
+                    em.SetComponentData(ce, col);
+                }
+                continue;
+            }
+
+            // Shift-queued Move/AttackMove: APPEND a waypoint instead of replacing
+            // the current order. WaypointSystem pops the queue whenever the unit
+            // has no active MoveTarget, so chains run in click order.
+            if (c.Queued != 0 && (c.Kind == CommandKind.Move || c.Kind == CommandKind.AttackMove))
+            {
+                for (int u = 0; u < c.Units.Length; u++)
+                {
+                    if (!map.TryGetValue(c.Units[u], out Entity we)) continue;
+                    if (em.HasComponent<Immobile>(we)) continue;
+                    if (!em.HasBuffer<Waypoint>(we)) em.AddBuffer<Waypoint>(we);
+                    em.GetBuffer<Waypoint>(we).Add(new Waypoint
+                    { Pos = c.TargetPos, AttackMove = c.Kind == CommandKind.AttackMove ? (byte)1 : (byte)0 });
+                }
+                continue;
+            }
+
             if (c.Kind == CommandKind.AttackTarget && map.TryGetValue(c.TargetStableId, out var atk))
-                if (!em.HasComponent<NonCombatant>(atk)) atkTarget = atk;   // §24: cannot order attack on non-combatant
+                // §24: cannot order an attack on a non-combatant, nor on any neutral
+                // (player -1) entity — a rock/tree is never a valid attack target
+                // even if it's an old BuildingDefinition that was never tagged
+                // NonCombatant. Both guards, so misconfiguration can't route a unit
+                // into a neutral obstacle.
+                if (!em.HasComponent<NonCombatant>(atk) &&
+                    !(em.HasComponent<Player>(atk) && em.GetComponentData<Player>(atk).Value < 0))
+                    atkTarget = atk;
 
             // ---- collect the formation members + the group frame --------------
             int cap = c.Units.Length;
@@ -541,6 +633,30 @@ public partial struct CommandApplySystem : ISystem
                 mv.Shape       = (byte)shape;
                 em.SetComponentData(e, mv);
                 em.SetComponentData(e, ao);
+
+                // A direct player order overrides economy work: CANCEL the task in
+                // place (never RemoveComponent — the component carries the baked
+                // Rate and marks the unit as a harvester; removing it made peasants
+                // permanently unable to harvest again). Haulers are deliberately
+                // NOT cancelled: a cart is an autonomous courier — it keeps its
+                // route and still delivers (HaulSystem re-targets the nearest
+                // capital if its sink ever dies).
+                if (em.HasComponent<HarvestTask>(e))
+                {
+                    var ht = em.GetComponentData<HarvestTask>(e);
+                    ht.Phase = HarvestPhase.Idle; ht.NodeStableId = -1; ht.Accrued = 0f;
+                    em.SetComponentData(e, ht);
+                }
+                // A hauler under a direct order goes MANUAL: it stops auto-driving
+                // (HaulSystem yields the MoveTarget) but keeps its cargo and route.
+                // Right-clicking a depot (Deliver) puts it back to work.
+                if (em.HasComponent<HaulTask>(e))
+                {
+                    var hl = em.GetComponentData<HaulTask>(e);
+                    if (hl.Phase != HaulPhase.Done) { hl.Phase = HaulPhase.Manual; em.SetComponentData(e, hl); }
+                }
+                // A fresh (unqueued) order cancels any pending waypoint chain.
+                if (em.HasBuffer<Waypoint>(e)) em.GetBuffer<Waypoint>(e).Clear();
             }
 
             ents.Dispose();

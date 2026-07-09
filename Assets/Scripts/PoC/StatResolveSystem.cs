@@ -35,7 +35,10 @@ public partial struct StatResolveSystem : ISystem
             ref Attack atk,
             ref Defense def)
         {
-            float dSpeed = 0, dTurn = 0, dRange = 0, dDmg = 0, dArmor = 0, dShield = 0, agg = 0, loose = 0, sep = 0;
+            float dSpeed = 0, dTurn = 0, dRange = 0, dDmg = 0, dArmor = 0, dShield = 0;
+            // Behavior-tuning deltas (UnitTuning).
+            float dAtkNear = 0, dIdleSpace = 0, dSep = 0, dCombatSpace = 0,
+                  dAvoid = 0, dPursue = 0, dCohesion = 0, dRetreat = 0, dReEngage = 0;
 
             for (int i = 0; i < mods.Length; i++)
             {
@@ -48,9 +51,18 @@ public partial struct StatResolveSystem : ISystem
                     case ModTarget.AttackDamage: dDmg += m.Offset; break;
                     case ModTarget.Armor:        dArmor += m.Offset; break;
                     case ModTarget.Shield:       dShield += m.Offset; break;
-                    case ModTarget.Aggression:   agg += m.Offset; break;
-                    case ModTarget.Looseness:    loose += m.Offset; break;
-                    case ModTarget.Separation:   sep += m.Offset; break;
+
+                    // Aggression and AttackNearbyRange both drive the same param.
+                    case ModTarget.Aggression:
+                    case ModTarget.AttackNearbyRange: dAtkNear += m.Offset; break;
+                    case ModTarget.Looseness:         dIdleSpace += m.Offset; break;
+                    case ModTarget.Separation:        dSep += m.Offset; break;
+                    case ModTarget.CombatSpacing:     dCombatSpace += m.Offset; break;
+                    case ModTarget.AvoidMeleeRange:   dAvoid += m.Offset; break;
+                    case ModTarget.PursueDistance:    dPursue += m.Offset; break;
+                    case ModTarget.CohesionRadius:    dCohesion += m.Offset; break;
+                    case ModTarget.RetreatHealthPct:  dRetreat += m.Offset; break;
+                    case ModTarget.ReEngageHealthPct: dReEngage += m.Offset; break;
                 }
             }
 
@@ -60,11 +72,23 @@ public partial struct StatResolveSystem : ISystem
             atk.Damage        = math.max(0f, baseS.AttackDamage + dDmg);
             def.Armor         = math.max(0f, baseS.Armor + dArmor);
             def.Shield        = math.max(0f, baseS.Shield + dShield);
-            /*//TODO
-            member.Aggression = agg; 
-            member.Looseness = math.saturate(loose); 
-            member.Separation = math.max(0f, sep);
-            em.SetComponentData(e, member);   // FormationSystem + BehaviorSystem read this same tick*/
+
+            // Live behavior tuning = base + active offsets. FormationSystem and
+            // BehaviorSystem read these same components the same frame, so an
+            // ability that (e.g.) raises aggression or forbids retreat takes hold
+            // immediately and reverts cleanly when it ends.
+            tuning.AttackNearbyRange  = math.max(0f, baseS.AttackNearbyRange  + dAtkNear);
+            tuning.IdleSpacing        = math.max(0f, baseS.IdleSpacing        + dIdleSpace);
+            tuning.SeparationStrength = math.max(0f, baseS.SeparationStrength + dSep);
+            tuning.CombatSpacing      = math.max(0f, baseS.CombatSpacing      + dCombatSpace);
+            tuning.AvoidMeleeRange    = math.max(0f, baseS.AvoidMeleeRange    + dAvoid);
+            tuning.PursueDistance     = math.max(0f, baseS.PursueDistance     + dPursue);
+            tuning.CohesionRadius     = math.max(0f, baseS.CohesionRadius     + dCohesion);
+            // Retreat thresholds are fractions [0,1]. "Retreat at full health" =
+            // set RetreatHealthPct to 1; "never retreat" = 0 (or below-25% guard =
+            // set it to 0.25 and ReEngage above it). Clamped so offsets stay sane.
+            tuning.RetreatHealthPct   = math.saturate(baseS.RetreatHealthPct  + dRetreat);
+            tuning.ReEngageHealthPct  = math.saturate(baseS.ReEngageHealthPct + dReEngage);
         }
     }
 }

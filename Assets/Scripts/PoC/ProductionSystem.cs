@@ -84,7 +84,9 @@ public partial struct ProductionSystem : ISystem
             {
                 queue[0] = head;
                 float2 rp = rally.Has != 0 ? rally.Value : new float2(xf.Position.x, xf.Position.z);
-                toSpawn.Add(new SpawnReq { Player = p, DefId = head.UnitDefId, Pos = xf.Position, Rally = rp, Loop = head.Loop, Producer = e, IsHauler = false });
+                toSpawn.Add(new SpawnReq { Player = p, DefId = head.UnitDefId,
+                                           Pos = Entrance(xf, SystemAPI.GetComponent<Obstacle>(e)),
+                                           Rally = rp, Loop = head.Loop, Producer = e, IsHauler = false });
                 queue.RemoveAt(0);
                 continue;
             }
@@ -118,8 +120,8 @@ public partial struct ProductionSystem : ISystem
                  SystemAPI.Query<RefRO<Player>, RefRO<StableId>, RefRO<LocalTransform>>().WithAll<IntakeTag>())
         { capPlayer.Add(player.ValueRO.Value); capSid.Add(sidRef.ValueRO.Value); capPos.Add(new float2(xf.ValueRO.Position.x, xf.ValueRO.Position.z)); }
 
-        foreach (var (colony, bank, player, sidRef, xf) in
-                 SystemAPI.Query<RefRW<Colony>, RefRO<ResourceBank>, RefRO<Player>, RefRO<StableId>, RefRO<LocalTransform>>())
+        foreach (var (colony, bank, player, sidRef, xf, obstacle) in
+                 SystemAPI.Query<RefRW<Colony>, RefRO<ResourceBank>, RefRO<Player>, RefRO<StableId>, RefRO<LocalTransform>, RefRO<Obstacle>>())
         {
             ref var col = ref colony.ValueRW;
             var a = bank.ValueRO.Amounts;
@@ -127,21 +129,40 @@ public partial struct ProductionSystem : ISystem
             var hdef = roster.GetDefinition(col.HaulerDefId);
             float prod = hdef != null ? hdef.productionTime : 5f;   // hauler dispatch interval
 
-            if (total >= col.Threshold && hdef != null)
+            bool wants = total >= col.Threshold                       // normal: full enough
+                      || (col.ForceLaunch != 0 && total > 0);         // emergency: player-armed, anything stored
+            if (wants && hdef != null)
             {
                 col.BuildTimer -= dt;
-                if (col.BuildTimer <= 0f)   // dispatch a cart; keep dispatching while full
+                if (col.BuildTimer <= 0f)   // dispatch a cart; keeps dispatching at PROD intervals while full
                 {
                     float2 cpos = new float2(xf.ValueRO.Position.x, xf.ValueRO.Position.z);
                     int capital = NearestCapital(player.ValueRO.Value, cpos, capPlayer, capSid, capPos);
                     if (capital >= 0)
-                        toSpawn.Add(new SpawnReq { Player = player.ValueRO.Value, DefId = col.HaulerDefId, Pos = xf.ValueRO.Position,
+                    {
+                        toSpawn.Add(new SpawnReq { Player = player.ValueRO.Value, DefId = col.HaulerDefId,
+                                                   Pos = Entrance(xf.ValueRO, obstacle.ValueRO),
                                                    Rally = cpos, Loop = 0, Producer = Entity.Null, IsHauler = true,
                                                    SourceSid = sidRef.ValueRO.Value, SinkSid = capital });
+                        col.ForceLaunch = 0;   // consumed
+                    }
                     col.BuildTimer = prod;
                 }
             }
-            else col.BuildTimer = prod;
+            else if (col.ForceLaunch == 0) col.BuildTimer = prod;      // armed colonies keep their countdown
+        }
+
+        // The building's entrance: one cell out from the middle of its FRONT face
+        // (its facing direction), so fresh units appear at the doorway instead of
+        // inside the impassable footprint. If that spot happens to be blocked,
+        // UnitFactory's spawn snap finds the nearest standable cell from there.
+        static float3 Entrance(in LocalTransform xf, in Obstacle obs)
+        {
+            float3 f3 = math.forward(xf.Rotation);
+            float2 fw = math.normalizesafe(new float2(f3.x, f3.z), new float2(0f, 1f));
+            float2 half = (float2)obs.Extents * (NavGrid.CellSize * 0.5f);
+            float dist = math.abs(fw.x) * half.x + math.abs(fw.y) * half.y + NavGrid.CellSize * 0.75f;
+            return xf.Position + new float3(fw.x, 0f, fw.y) * dist;
         }
 
         // -------- apply spawns --------

@@ -39,6 +39,12 @@ public class BuildingDefinition : UnitDefinition
              "height. 0 = blocks pathing but never sight (you see right over it).")]
     public float occluderHeight = 6f;
 
+    [Tooltip("Non-combatant: this structure can never be attacked or damaged — targeting and combat " +
+             "skip it entirely (it's tagged NonCombatant at spawn). THIS is the invulnerability mechanism " +
+             "(not a huge maxHealth). Resource nodes and obstacles set this automatically. Tick it for any " +
+             "decorative/indestructible structure.")]
+    public bool nonCombatant = false;
+
     // -------------------------------------------------------------------------
     // Combat — OFF by default. Most buildings do not fight; only a defensive
     // structure (tower, gate-gun, keep with arrow slits) opts in. When off, the
@@ -171,4 +177,36 @@ public class BuildingDefinition : UnitDefinition
         productionTime  = 0f;
         foodCost        = 0;
     }
+
+#if UNITY_EDITOR
+    // Immediate authoring feedback: a "canAttack" building that can't actually
+    // attack is the #1 reason a tower silently does nothing. Catch it the moment
+    // it's misconfigured in the inspector, naming the exact missing field.
+    private void OnValidate()
+    {
+        if (!canAttack) return;
+
+        if (attackDamage <= 0f)
+            Debug.LogWarning($"[{name}] canAttack is ON but attackDamage is {attackDamage}. " +
+                             "The tower will NOT fire — set attackDamage > 0 (the projectile's damage " +
+                             "comes from the firing building).", this);
+
+        if (attackRange <= 0f)
+            Debug.LogWarning($"[{name}] canAttack is ON but attackRange is {attackRange}. " +
+                             "The tower can't reach anything — set attackRange > 0.", this);
+
+        if (isRanged && projectile == null)
+            Debug.LogWarning($"[{name}] canAttack + isRanged are ON but no projectile is assigned. " +
+                             "A ranged tower needs a ProjectileDefinition to fire — assign one.", this);
+
+        if (isRanged && projectile != null && projectile.speed <= 0f)
+            Debug.LogWarning($"[{name}] the assigned projectile '{projectile.name}' has speed {projectile.speed}. " +
+                             "It will never travel — set the projectile's speed > 0.", this);
+
+        if (eyeOffset <= occluderHeight)
+            Debug.LogWarning($"[{name}] eyeOffset ({eyeOffset}) is not above occluderHeight ({occluderHeight}). " +
+                             "The tower's line of sight is blocked by its own footprint and it will see nothing " +
+                             "to shoot. Set eyeOffset > occluderHeight.", this);
+    }
+#endif
 }
