@@ -140,11 +140,15 @@ public class PlayerCommander : Commander
         // Shift = queue modifier: Move/AttackMove append as waypoints.
         QueueModifier = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
 
+        // Control groups: Ctrl+0-9 assigns the current selection, 0-9 recalls it.
+        // Digits do NOTHING else — they are reserved for groups, as an RTS demands.
+        HandleControlGroups();
+
         // ---- context-sensitive build/produce/upgrade/research menus ----------
         // When a single building is selected, the asdf row (and qwer for
         // buildings with no ability slots) drives the building's economy menus.
         // Priority: produce > build(for builders) > upgrade > research.
-        // Keys 1-4 map to slots 0-3 via MenuKeys below.
+        // Q/W/E/R drive the building menus (digits are control groups).
         TryBuildingMenuKeys();
 
         // ---- right mouse: armed cast on press, else a formation drag ----
@@ -267,7 +271,51 @@ public class PlayerCommander : Commander
     // Context-sensitive building economy menu.
     // With a single own building selected, the number row 1-4 drives produce/
     // build/upgrade/research slots in that priority order.
-    private static readonly KeyCode[] MenuKeys = { KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4 };
+    // ---- control groups (0-9). Pure client-side selection state: groups store
+    // StableIds (dead members simply stop matching), assignment replaces the
+    // group, recall reproduces the selection exactly. No lockstep impact.
+    private readonly Dictionary<int, List<int>> _ctrlGroups = new();
+
+    private void HandleControlGroups()
+    {
+        bool ctrl = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+        for (int g = 0; g <= 9; g++)
+        {
+            if (!Input.GetKeyDown(KeyCode.Alpha0 + g)) continue;
+            if (ctrl)
+            {
+                var sids = new List<int>();
+                var sel = _selectedQuery.ToEntityArray(Allocator.Temp);
+                for (int i = 0; i < sel.Length; i++)
+                    if (Em.IsComponentEnabled<Selected>(sel[i]) && Em.HasComponent<StableId>(sel[i]))
+                        sids.Add(Em.GetComponentData<StableId>(sel[i]).Value);
+                sel.Dispose();
+                _ctrlGroups[g] = sids;                    // empty selection clears the group
+                lastOrder = $"group {g} = {sids.Count} units";
+            }
+            else if (_ctrlGroups.TryGetValue(g, out var group) && group.Count > 0)
+            {
+                var want = new HashSet<int>(group);
+                RecallOver(AllUnitsQuery, want);
+                RecallOver(StructuresQuery, want);
+                lastOrder = $"recall group {g}";
+            }
+        }
+    }
+
+    private void RecallOver(EntityQuery q, HashSet<int> want)
+    {
+        var ents = q.ToEntityArray(Allocator.Temp);
+        var players = q.ToComponentDataArray<Player>(Allocator.Temp);
+        for (int i = 0; i < ents.Length; i++)
+        {
+            if (!Em.HasComponent<Selected>(ents[i]) || !Em.HasComponent<StableId>(ents[i])) continue;
+            bool sel = players[i].Value == player && want.Contains(Em.GetComponentData<StableId>(ents[i]).Value);
+            if (Em.IsComponentEnabled<Selected>(ents[i]) != sel)
+                Em.SetComponentEnabled<Selected>(ents[i], sel);
+        }
+        ents.Dispose(); players.Dispose();
+    }
 
     private void TryBuildingMenuKeys()
     {
@@ -294,9 +342,11 @@ public class PlayerCommander : Commander
             {
                 var busy = EconomyQuery.BuildingBusy(Em, bld, queueingProduction: true);
 
-                for (int i = 0; i < MenuKeys.Length; i++)
+                for (int i = 0; i < SlotKeys.Length; i++)
                 {
-                    if (!Input.GetKeyDown(MenuKeys[i])) continue;
+                    // Q/W/E/R drive the building menu. The number row is NEVER used
+                    // here — digits are reserved for control groups.
+                    if (!Input.GetKeyDown(SlotKeys[i])) continue;
 
                     // Produce
                     if (bdef.isProducer && bdef.produces != null && i < bdef.produces.Count &&
@@ -343,9 +393,9 @@ public class PlayerCommander : Commander
 
         if (buildsMenu != null && buildsMenu.Length > 0 && GroundPoint(out float2 blueprintPos))
         {
-            for (int i = 0; i < MenuKeys.Length && i < buildsMenu.Length; i++)
+            for (int i = 0; i < SlotKeys.Length && i < buildsMenu.Length; i++)
             {
-                if (!Input.GetKeyDown(MenuKeys[i])) continue;
+                if (!Input.GetKeyDown(SlotKeys[i])) continue;
                 var bdef2 = buildsMenu[i];
                 if (bdef2 == null) continue;
                 int uid = roster.GetId(bdef2);
@@ -482,8 +532,31 @@ public class PlayerCommander : Commander
     {
         _rmbDragging = false;
 
-        var selected = GetSelected();
-        if (selected.Count == 0) { lastOrder = "(right-click ignored: nothing selected)"; return; }
+        var all = GetSelected();
+        // Split: buildings never take unit orders, and rally fires whenever the
+        // selection has NO mobile units (GetSelected includes buildings, so the
+        // old "Count == 0" gate could never pass with a barracks selected).
+        var selected = all.FindAll(e => !Em.HasComponent<Immobile>(e));
+
+        if (selected.Count == 0)
+        {
+            bool ralled = false;
+            var roster = UnitFactory.Instance?.Roster;
+            foreach (var b in all)
+            {
+                if (!Em.HasComponent<BuildingTag>(b)) continue;
+                if (Em.GetComponentData<Player>(b).Value != player) continue;
+                var bdef = roster?.GetDefinition(Em.GetComponentData<UnitDefId>(b).Value) as BuildingDefinition;
+                if (bdef == null || !bdef.isProducer) continue;
+                if (GroundPoint(out float2 rp))
+                {
+                    IssueSetRally(Em.GetComponentData<StableId>(b).Value, rp);
+                    ralled = true;
+                }
+            }
+            lastOrder = ralled ? "set rally" : "(right-click ignored: nothing selected)";
+            return;
+        }
 
         // A resource node under the press → harvest with any selected harvesters.
         // Takes priority over attack: clicking a tree should harvest it, not pick

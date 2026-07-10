@@ -94,10 +94,16 @@ public partial struct ProductionSystem : ISystem
             if (banks.TryGetValue(p, out Entity bank))
             {
                 float frac = math.min(1f, (head.Progress + 1f) / head.BuildTime);
+                // CEIL, never round: the first installment is Cost/BuildTime per
+                // tick (e.g. 50g over 150 ticks = 0.33), and round() truncated it
+                // to ZERO — so no request was ever sent, nothing was ever paid,
+                // progress never moved, and production deadlocked at tick one.
+                // ceil asks for at least 1 of each still-unpaid type; min clamps
+                // the total to exactly Cost.
                 var required = new ResourceAmount {
-                    Gold = (int)math.round(head.Cost.Gold * frac),
-                    Wood = (int)math.round(head.Cost.Wood * frac),
-                    Food = (int)math.round(head.Cost.Food * frac) };
+                    Gold = math.min(head.Cost.Gold, (int)math.ceil(head.Cost.Gold * frac)),
+                    Wood = math.min(head.Cost.Wood, (int)math.ceil(head.Cost.Wood * frac)),
+                    Food = math.min(head.Cost.Food, (int)math.ceil(head.Cost.Food * frac)) };
                 var deficit = ResourceAmount.Max0(required - head.Paid);
                 if (deficit.Any)
                 {

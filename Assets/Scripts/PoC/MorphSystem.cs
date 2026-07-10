@@ -100,6 +100,20 @@ public partial class MorphSystem : SystemBase
             {
                 Remove<BuildingTag>(em, e); Remove<Immobile>(em, e); Remove<Obstacle>(em, e);
                 if (!em.HasComponent<MoveTarget>(e)) em.AddComponent<MoveTarget>(e);
+
+                // The building's rally point becomes the new unit's first waypoint:
+                // a barracks morphing into a trebuchet walks to where it was told
+                // to send its recruits. Rally cleared — units don't rally.
+                if (em.HasComponent<RallyPoint>(e))
+                {
+                    var rp = em.GetComponentData<RallyPoint>(e);
+                    if (rp.Has != 0)
+                    {
+                        if (!em.HasBuffer<Waypoint>(e)) em.AddBuffer<Waypoint>(e);
+                        em.GetBuffer<Waypoint>(e).Add(new Waypoint { Pos = rp.Value, AttackMove = 0 });
+                        em.SetComponentData(e, new RallyPoint { Has = 0 });
+                    }
+                }
             }
 
             // 3) economy roles: clear, then reapply the new form's (idempotent buffers)

@@ -28,6 +28,7 @@ public struct HarvestTask : IComponentData
     public float        Accrued;         // fractional gather progress; whole units transfer at >= 1
     public float        ReacquireRange;  // auto-retarget radius when a node dies (0 = unlimited)
     public float        DropRange;       // unload distance from the depot's footprint edge
+    public float        DepositRate;     // unload speed per second (0 = use Rate)
     public ResourceType Carrying;        // the ONE type currently in cargo (a selector, not an amount)
 }
 

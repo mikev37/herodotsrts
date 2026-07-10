@@ -35,6 +35,7 @@ MonoBehaviour:
   isRanged: 0
   projectile: {fileID: 0}
   attackRange: 10
+  eyeOffset: 1.5
   isHero: 0
   maxMana: 100
   manaRegen: 2
@@ -43,6 +44,23 @@ MonoBehaviour:
   - {fileID: 0}
   - {fileID: 0}
   - {fileID: 0}
+  prodCostGold: 0
+  prodCostWood: 0
+  prodCostFood: 50
+  productionTime: 5
+  foodCost: 0
+  buildPower: 0
+  builds: []
+  harvestRate: 0
+  carryCapacity: 0
+  reacquireRange: 40
+  depositRange: 2.5
+  isHauler: 0
+  icon: {fileID: 0}
+  morphEffectPrefab: {fileID: 0}
+  morphTarget: {fileID: 0}
+  morphTicks: 30
+  upgrades: []
   attackNearbyRange: 6
   avoidMeleeRange: 0
   retreatHealthFraction: 0.25

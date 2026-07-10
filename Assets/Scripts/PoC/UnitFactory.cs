@@ -379,6 +379,11 @@ public class UnitFactory : MonoBehaviour
                 _em.AddComponent<ProducerTag>(e);
                 if (!_em.HasBuffer<ProductionItem>(e)) _em.AddBuffer<ProductionItem>(e);
                 _em.AddComponentData(e, new RallyPoint { Has = 0 });
+                // Buffers ONLY — the lockstep transfer mailbox. A producer holds
+                // NO bank state: payment escrows into head.Paid on the queue item,
+                // and ProductionSystem empties the deposits mailbox directly.
+                // (Adding a ResourceBank here would make BankJob a SECOND consumer
+                // of the same mailbox and race ProductionSystem for the payments.)
                 EnsureBankBuffers(e);
             }
             if (bdef.isRelay) _em.AddComponentData(e, new Relay { Rate = bdef.relayRate, Range = bdef.relayRange });
@@ -388,11 +393,12 @@ public class UnitFactory : MonoBehaviour
             _em.AddComponentData(e, new BuildPower { Value = def.buildPower });
             _em.AddComponentData(e, new BuildSignal { LastTick = 0 });
         }
-        if (def.carryCapacity > 0)
-        {
+        if (def.harvestRate > 0f && def.carryCapacity > 0)   // a HARVESTER: can gather AND carry.
+        {                                                    // (a hauler has capacity but rate 0 — no HarvestTask)
             var cap = new ResourceAmount { Gold = def.carryCapacity, Wood = def.carryCapacity, Food = def.carryCapacity };
             _em.AddComponentData(e, new HarvestTask { NodeStableId = -1, DepotStableId = -1, Phase = HarvestPhase.Idle,
-                Rate = math.max(0f, def.harvestRate), ReacquireRange = math.max(0f, def.reacquireRange), DropRange = math.max(0.5f, def.depositRange) });
+                Rate = math.max(0f, def.harvestRate), ReacquireRange = math.max(0f, def.reacquireRange),
+                DropRange = math.max(0.5f, def.depositRange), DepositRate = math.max(0f, def.depositRate) });
             if (!_em.HasComponent<ResourceBank>(e)) _em.AddComponentData(e, new ResourceBank { Amounts = default, Capacity = cap });
             EnsureBankBuffers(e);
         }

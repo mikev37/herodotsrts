@@ -435,6 +435,10 @@ Add both to roster. Place a `MapBootstrap` GameObject with the Barracks def (own
 
 **Verify:**
 
+> **Keys:** `Q/W/E/R` are the building-menu slots (produce/research/upgrade,
+> slot 0-3). The number row is **control groups only**: `Ctrl+0-9` assigns the
+> current selection, `0-9` recalls it — digits never drive menus.
+
 1. Select Barracks → press `Q` (or the first produce key). `ProductionItem` is
    appended to the building's buffer in the Entities window.
 2. `EconomyQuery.GetActivity(em, barracksEntity)` returns

@@ -177,6 +177,7 @@ public class BuildingDefinitionEditor : Editor
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Production", EditorStyles.miniBoldLabel);
             Field(so, "produces");
+            Field(so, "rallyPrefab");
         }
 
         // ---- research: gated by isResearcher (parallels isProducer) ----

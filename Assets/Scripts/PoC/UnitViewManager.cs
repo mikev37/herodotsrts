@@ -38,6 +38,8 @@ public class UnitViewManager : MonoBehaviour
     private readonly Dictionary<long, Stack<UnitView>> _pool = new();
     private readonly Dictionary<UnitView, int>  _typeOf = new();   // defId, for morph detection
     private readonly Dictionary<UnitView, long> _poolKeyOf = new(); // composite pool key, for release
+    private readonly Dictionary<Entity, GameObject> _rallyMarkers = new();   // view-only rally flags
+    private static readonly List<Entity> _rallyDead = new();
     private readonly List<Entity> _toRemove = new();
 
     private void Awake() { Instance = this; }
@@ -143,6 +145,41 @@ public class UnitViewManager : MonoBehaviour
         trackedEntities = entities.Length; activeViews = _views.Count;
         pooledViews = 0; foreach (var s in _pool.Values) pooledViews += s.Count;
         entities.Dispose(); xforms.Dispose(); anims.Dispose(); hps.Dispose(); ids.Dispose(); players.Dispose(); sids.Dispose();
+        UpdateRallyMarkers();
+    }
+
+    // View-only rally flags: while a producer building is SELECTED and has a rally
+    // point, show its def's rallyPrefab there. Markers vanish on deselect/clear.
+    private void UpdateRallyMarkers()
+    {
+        var q = _em.CreateEntityQuery(
+            ComponentType.ReadOnly<RallyPoint>(), ComponentType.ReadOnly<UnitDefId>(),
+            ComponentType.ReadOnly<Selected>());
+        var ents = q.ToEntityArray(Allocator.Temp);
+
+        // mark-and-sweep: anything not refreshed this frame is removed below
+        _rallyDead.Clear();
+        foreach (var kv in _rallyMarkers) _rallyDead.Add(kv.Key);
+
+        for (int i = 0; i < ents.Length; i++)
+        {
+            if (!_em.IsComponentEnabled<Selected>(ents[i])) continue;
+            var rp = _em.GetComponentData<RallyPoint>(ents[i]);
+            if (rp.Has == 0) continue;
+            var def = roster != null ? roster.GetDefinition(_em.GetComponentData<UnitDefId>(ents[i]).Value) as BuildingDefinition : null;
+            if (def == null || def.rallyPrefab == null) continue;
+
+            if (!_rallyMarkers.TryGetValue(ents[i], out var go) || go == null)
+                _rallyMarkers[ents[i]] = go = Instantiate(def.rallyPrefab);
+            go.transform.position = new Vector3(rp.Value.x, go.transform.position.y, rp.Value.y);
+            _rallyDead.Remove(ents[i]);
+        }
+        foreach (var e in _rallyDead)
+        {
+            if (_rallyMarkers.TryGetValue(e, out var go) && go != null) Destroy(go);
+            _rallyMarkers.Remove(e);
+        }
+        ents.Dispose();
     }
 
     private UnitView Acquire(int defId, int stableId)

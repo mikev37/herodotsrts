@@ -1437,19 +1437,78 @@ public partial struct FlowFieldSystem : ISystem
             for (int i = 0; i < NavGrid.SubCells; i++) FineCost[baseCost + i] = INF;
 
             // --- seeds (frozen boundary conditions) ---
-            // Seed at SeedCell (always standable) rather than GoalCell: when the
-            // destination is impassable at this width, GoalCell fails StandW and the
-            // zero-cost source would never be placed — the fine field would stay all
-            // INF with no gradient (the "no fine field created" symptom). SeedCell is
-            // the snapped standable cell, so the field always gets a real source and
-            // the body routes to the obstacle's reachable edge.
+            // Reachable goal: one zero-cost source at the goal cell. BLOCKED goal
+            // (a building/rock footprint): seed EVERY standable cell hugging the
+            // blocked region near the goal, all at cost 0 — the field becomes pure
+            // travel-distance to the nearest face, so each unit walks to the edge
+            // on ITS side. (Seeding only the snapped center-nearest cell made every
+            // unit converge on that single point regardless of approach side.)
             PathSlot sl = Slots[slot];
-            if (math.all(NavGrid.BigOf(sl.SeedCell) == bcoord) && StandW(sl.SeedCell))
+            if (StandW(sl.GoalCell))
             {
-                int2 gl = sl.SeedCell - cellOrigin;
-                int gi = gl.y * sub + gl.x;
-                FineCost[baseCost + gi] = 0f;
-                stateArr[gi] = 2;
+                if (math.all(sl.GoalBig == bcoord))
+                {
+                    int2 gl = sl.GoalCell - cellOrigin;
+                    int gi = gl.y * sub + gl.x;
+                    FineCost[baseCost + gi] = 0f;
+                    stateArr[gi] = 2;
+                }
+            }
+            else
+            {
+                const int HugR = 10;              // window radius: footprints up to ~20x20 cells
+                const int W = HugR * 2 + 1;       // 21x21 window around the goal
+
+                if (CellType[NavGrid.Index(sl.GoalCell)] == NavCell.Impassable)
+                {
+                    // Flood the Impassable component CONNECTED to the goal — the
+                    // ordered building's own footprint — and seed the standable
+                    // cells hugging IT. Seeding anything that hugged ANY obstacle
+                    // in the window sent units to a nearby tree instead of the
+                    // building they were ordered to.
+                    var visited = new NativeArray<bool>(W * W, Allocator.Temp);
+                    var queue   = new NativeArray<int2>(W * W, Allocator.Temp);
+                    int head = 0, tail = 0;
+                    queue[tail++] = sl.GoalCell;
+                    visited[HugR * W + HugR] = true;
+
+                    while (head < tail)
+                    {
+                        int2 cc = queue[head++];
+                        for (int d = 0; d < 4; d++)
+                        {
+                            int2 n = cc + new int2(d == 0 ? 1 : d == 1 ? -1 : 0, d == 2 ? 1 : d == 3 ? -1 : 0);
+                            int2 off = n - sl.GoalCell;
+                            if (math.max(math.abs(off.x), math.abs(off.y)) > HugR) continue;
+                            if (!NavGrid.InBounds(n.x, n.y)) continue;
+                            int vi = (off.y + HugR) * W + (off.x + HugR);
+                            if (visited[vi]) continue;
+                            visited[vi] = true;
+
+                            if (CellType[NavGrid.Index(n)] == NavCell.Impassable)
+                            {
+                                queue[tail++] = n;                 // grow the footprint component
+                            }
+                            else if (math.all(NavGrid.BigOf(n) == bcoord) && StandW(n))
+                            {
+                                int2 gl = n - cellOrigin;          // standable cell hugging the footprint
+                                int gi = gl.y * sub + gl.x;
+                                FineCost[baseCost + gi] = 0f;
+                                stateArr[gi] = 2;
+                            }
+                        }
+                    }
+                    visited.Dispose(); queue.Dispose();
+                }
+                else if (math.all(NavGrid.BigOf(sl.SeedCell) == bcoord) && StandW(sl.SeedCell))
+                {
+                    // Goal is a clearance PINCH (walkable type, too narrow for this
+                    // width) — no footprint to hug; use the snapped standable cell.
+                    int2 gl = sl.SeedCell - cellOrigin;
+                    int gi = gl.y * sub + gl.x;
+                    FineCost[baseCost + gi] = 0f;
+                    stateArr[gi] = 2;
+                }
             }
             // --- border seeds ---
             // For each border cell pair (this tile <-> cardinal neighbour),

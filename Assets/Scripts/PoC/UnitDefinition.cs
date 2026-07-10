@@ -115,9 +115,11 @@ public class UnitDefinition : ScriptableObject
              "Nothing in range = it idles and waits for orders. 0 = unlimited search.")]
     public float reacquireRange = 40f;
 
-    [Tooltip("How close to a depot's footprint EDGE (world units) this harvester must be to unload. " +
-             "Unloading then takes time at harvestRate, symmetric with gathering.")]
+    [Tooltip("How close to a depot's footprint EDGE (world units) this harvester must be to unload.")]
     public float depositRange = 2.5f;
+
+    [Tooltip("Unload speed at the depot, resources PER SECOND. 0 = use harvestRate (symmetric).")]
+    public float depositRate = 0f;
 
     [Header("Economy — hauler")]
     [Tooltip("A hauler carries a colony's holdings to the nearest capital then is destroyed. Free to sustain (foodCost should be 0).")]

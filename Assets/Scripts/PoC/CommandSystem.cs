@@ -538,6 +538,14 @@ public partial struct CommandApplySystem : ISystem
                 continue;
             }
 
+            // Clicking ON a building/rock aims the order at an impassable cell —
+            // formation slots there are unreachable, arrival never fires, and the
+            // units spin at the wall forever. Snap the target to the nearest
+            // standable cell up front so every downstream consumer (slots, arrival,
+            // waypoints, flow field) works with a reachable point.
+            if (c.Kind == CommandKind.Move || c.Kind == CommandKind.AttackMove)
+                c.TargetPos = SnapStandable(cellType, hasGrid, c.TargetPos);
+
             // Shift-queued Move/AttackMove: APPEND a waypoint instead of replacing
             // the current order. WaypointSystem pops the queue whenever the unit
             // has no active MoveTarget, so chains run in click order.
@@ -676,6 +684,32 @@ public partial struct CommandApplySystem : ISystem
     // passable (covers obstacles AND slope-blocked cells), and terrain height
     // spread <= the definition's maxHeightDelta. Y = the highest sampled cell
     // height — the model's basement skirt covers the lower side.
+    // Nearest standable cell for an ordered destination that landed on an
+    // impassable footprint. Deterministic outward ring; input unchanged if the
+    // grid is absent or nothing is found.
+    private static float2 SnapStandable(NativeArray<byte> cellType, bool hasGrid, float2 p)
+    {
+        if (!hasGrid || !cellType.IsCreated) return p;
+        int2 c = NavGrid.Cell(p);
+        if (!NavGrid.InBounds(c.x, c.y) || cellType[NavGrid.Index(c.x, c.y)] != NavCell.Impassable) return p;
+        for (int r = 1; r <= 12; r++)
+        {
+            int2 best = c; float bestD = float.MaxValue; bool found = false;
+            for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                if (math.max(math.abs(dx), math.abs(dy)) != r) continue;
+                int2 n = new int2(c.x + dx, c.y + dy);
+                if (!NavGrid.InBounds(n.x, n.y)) continue;
+                if (cellType[NavGrid.Index(n.x, n.y)] == NavCell.Impassable) continue;
+                float d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = n; found = true; }
+            }
+            if (found) return NavGrid.CellCenter(best.x, best.y);
+        }
+        return p;
+    }
+
     private void ApplyPlaceBuilding(in SimCommand c, NativeArray<byte> cellType,
                                     bool hasTerrain, in TerrainHeightField terrain)
     {

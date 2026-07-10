@@ -141,10 +141,10 @@ public partial struct HarvestTransferSystem : ISystem
                 var cargo = BankLk[h].Amounts;
                 if (!cargo.Any) { t.Phase = HarvestPhase.ToNode; t.Accrued = 0f; TaskLk[h] = t; continue; }
 
-                // Unload takes TIME, symmetric with gathering: Rate resources per
-                // second flow from the cart to the depot, whole units at a time.
+                // Unload takes TIME: DepositRate per second when authored,
+                // otherwise symmetric with the gather rate.
                 t.Phase = HarvestPhase.Depositing;
-                t.Accrued += t.Rate * Dt;
+                t.Accrued += (t.DepositRate > 0f ? t.DepositRate : t.Rate) * Dt;
                 int want = (int)t.Accrued;
                 if (want > 0)
                 {

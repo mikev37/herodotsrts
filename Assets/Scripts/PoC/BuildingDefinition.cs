@@ -82,6 +82,10 @@ public class BuildingDefinition : UnitDefinition
     [Tooltip("Can queue units for production (Barracks, Stable, etc.).")]
     public bool isProducer = false;
 
+    [Tooltip("Optional marker prefab shown at this producer's rally point while the building is " +
+             "selected (a flag, a banner). View-only — no sim impact.")]
+    public GameObject rallyPrefab;
+
     [Tooltip("Can research tech upgrades (e.g. Knight → Paladin). Parallels isProducer — " +
              "reveals the researches list. A building can be both a producer and a researcher.")]
     public bool isResearcher = false;

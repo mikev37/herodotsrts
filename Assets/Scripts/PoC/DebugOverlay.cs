@@ -77,6 +77,10 @@ public class DebugOverlay : MonoBehaviour
     // Selected-unit ECONOMY readout (harvest/haul phase, cargo, and any bank on it).
     private bool _selHasHarvest, _selHasHaul, _selHasBank;
     private string _selHarvestPhase, _selHaulPhase;
+    private float _selHaulTimer;
+    private int _selDeposits = -1, _selRequests = -1;   // bank buffer lengths (-1 = no buffer)
+    private int _selProdQueue = -1;                      // ProductionItem count (-1 = not a producer)
+    private string _selProdInfo;                          // head paid/cost/progress readout
     private int _selCargoG, _selCargoW, _selCargoF;
     private int _selBankG, _selBankW, _selBankF;
     private int _selHarvestNode = -1;
@@ -299,7 +303,28 @@ public class DebugOverlay : MonoBehaviour
             }
             _selHasHaul = _em.HasComponent<HaulTask>(entities[i]);
             if (_selHasHaul)
-                _selHaulPhase = _em.GetComponentData<HaulTask>(entities[i]).Phase.ToString();
+            {
+                var hl = _em.GetComponentData<HaulTask>(entities[i]);
+                _selHaulPhase = hl.Phase.ToString(); _selHaulTimer = hl.Timer;
+            }
+
+            // Bank-pipeline diagnostics: pending deposits/requests on THIS entity
+            // and its production queue length — pinpoints which link in a
+            // colony->cart or pay->produce chain is dead.
+            _selDeposits = _em.HasBuffer<BankDeposit>(entities[i]) ? _em.GetBuffer<BankDeposit>(entities[i]).Length : -1;
+            _selRequests = _em.HasBuffer<BankRequest>(entities[i]) ? _em.GetBuffer<BankRequest>(entities[i]).Length : -1;
+            _selProdQueue = _em.HasBuffer<ProductionItem>(entities[i]) ? _em.GetBuffer<ProductionItem>(entities[i]).Length : -1;
+
+            // Production head: what's actually paid and how far along the build is
+            // (a producer has NO bank — its escrow lives on the queue item).
+            _selProdInfo = null;
+            if (_selProdQueue > 0)
+            {
+                var h = _em.GetBuffer<ProductionItem>(entities[i])[0];
+                float pct = h.BuildTime > 0f ? 100f * h.Progress / h.BuildTime : 0f;
+                _selProdInfo = $"head paid G{h.Paid.Gold}/{h.Cost.Gold} W{h.Paid.Wood}/{h.Cost.Wood} " +
+                               $"F{h.Paid.Food}/{h.Cost.Food}  {pct:0}%";
+            }
 
             // (bank totals accumulated at the top of the loop across the whole selection)
 
@@ -427,7 +452,11 @@ public class DebugOverlay : MonoBehaviour
             if (_selHasHarvest)
                 Line($"Harvest: {_selHarvestPhase}  node:{_selHarvestNode}");
             if (_selHasHaul)
-                Line($"Haul: {_selHaulPhase}");
+                Line($"Haul: {_selHaulPhase} t:{_selHaulTimer:0.00}");
+            if (_selDeposits >= 0 || _selRequests >= 0 || _selProdQueue >= 0)
+                Line($"dep:{_selDeposits} req:{_selRequests} prodQ:{_selProdQueue}");
+            if (_selProdInfo != null)
+                Line(_selProdInfo);
             if (_selHasBank)
                 Line($"Bank Σ G:{_selBankG} W:{_selBankW} F:{_selBankF} ({_selCount} sel)");
         }

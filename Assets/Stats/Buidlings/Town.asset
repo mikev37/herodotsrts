@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: Town
   m_EditorClassIdentifier: 
   displayName: Building
-  viewPrefab: {fileID: 0}
+  viewPrefab: {fileID: 3144174478688632463, guid: 8620dbad9ed652747ab39b113153398a, type: 3}
   speed: 0
   radius: 1
   mass: 50
@@ -53,6 +53,8 @@ MonoBehaviour:
   builds: []
   harvestRate: 0
   carryCapacity: 0
+  reacquireRange: 40
+  depositRange: 2.5
   isHauler: 0
   icon: {fileID: 0}
   morphEffectPrefab: {fileID: 0}
@@ -75,10 +77,11 @@ MonoBehaviour:
   nonCombatant: 0
   canAttack: 0
   contactDamage: 0
-  isDepot: 0
+  isDepot: 1
   isIntake: 0
-  isColony: 0
+  isColony: 1
   isProducer: 0
+  rallyPrefab: {fileID: 0}
   isResearcher: 0
   isRelay: 0
   buildTime: 50
@@ -87,7 +90,7 @@ MonoBehaviour:
   costFood: 0
   selfBuildPower: 0
   sacrifice: 0
-  haulerUnit: {fileID: 0}
+  haulerUnit: {fileID: 11400000, guid: ae06da9ed28db264293c1f250ababe36, type: 2}
   haulThreshold: 200
   relayRate: 20
   relayRange: 25

@@ -85,10 +85,12 @@ public partial struct HaulSystem : ISystem
                 case HaulPhase.ToSource:
                     if (!Resolve(task.SourceStableId, out Entity src, out float2 sp))
                     {
-                        // Colony gone. Deliver whatever is already loaded; only an
-                        // EMPTY orphaned cart vanishes.
-                        if (cargo.Amounts.Any) { task.Phase = HaulPhase.ToSink; break; }
-                        Vanish(sortKey, self); break;
+                        // No source yet (manually spawned cart, Source -1) or the
+                        // colony died. Deliver whatever is loaded; otherwise go
+                        // MANUAL and await orders — a cart must never silently
+                        // disappear on the player.
+                        task.Phase = cargo.Amounts.Any ? HaulPhase.ToSink : HaulPhase.Manual;
+                        break;
                     }
                     SetMove(ref move, sp);
                     // Arrive at the building's footprint EDGE — its center is inside
@@ -122,11 +124,10 @@ public partial struct HaulSystem : ISystem
                 case HaulPhase.ToSink:
                     if (!Resolve(task.SinkStableId, out Entity cap, out float2 kp))
                     {
-                        // Sink dead or never set (e.g. a player order re-routed the
-                        // cart): re-target the NEAREST own capital so the cargo still
-                        // arrives. Vanish only when the player has no capital at all.
+                        // Sink dead or never set: re-target the NEAREST own capital.
+                        // No capital at all → MANUAL with cargo held (never vanish).
                         task.SinkStableId = NearestCapital(player.Value, pos);
-                        if (!Resolve(task.SinkStableId, out cap, out kp)) { Vanish(sortKey, self); break; }
+                        if (!Resolve(task.SinkStableId, out cap, out kp)) { task.Phase = HaulPhase.Manual; break; }
                     }
                     SetMove(ref move, kp);
                     if (EdgeDist(pos, cap, kp) <= ArriveDist) { task.Phase = HaulPhase.Unloading; task.Timer = UnloadTime; }
