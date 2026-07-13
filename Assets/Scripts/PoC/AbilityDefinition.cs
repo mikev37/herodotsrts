@@ -40,7 +40,7 @@ public class AbilityDefinition : ScriptableObject
     [Tooltip("CastOnce = stamp everyone in the shape now. PersistentArea = while inside; removed on leave.")]
     public ApplyMode applyMode = ApplyMode.CastOnce;
 
-    [Tooltip("Who it affects, relative to the caster's team.")]
+    [Tooltip("Who it affects, relative to the caster's player.")]
     public AffectFilter affects = AffectFilter.Enemies;
 
     [Tooltip("Seconds the area persists (PersistentArea only).")]
@@ -56,13 +56,13 @@ public class AbilityDefinition : ScriptableObject
     [Tooltip("Mana consumed from the caster at commit; the cast fails (nothing consumed) if the caster has less.")]
     public float manaCost = 0f;
 
-    [Header("Commander resource cost (per-team pool)")]
+    [Header("Commander resource cost (player bank)")]
     public int costGold = 0;
     public int costWood = 0;
-    public int costStone = 0;
+    public int costFood = 0;
 
     [Header("Spawn (optional)")]
-    [Tooltip("Unit or building spawned at the cast point when the ability fires. MUST be in the casting team's UnitManager roster (countPerTeam 0 is fine). Buildings validate their footprint at commit; units need a passable cell.")]
+    [Tooltip("Unit or building spawned at the cast point when the ability fires. MUST be in the RosterDefinition asset. Buildings validate their footprint at commit; units need a passable cell.")]
     public UnitDefinition spawnUnit;
     [Tooltip("PersistentArea only: the field follows the spawned unit (banner/totem). The field dies when the unit dies, and the unit dies when the field's lifetime expires.")]
     public bool anchorFieldToSpawn = false;
@@ -82,7 +82,13 @@ public class AbilityDefinition : ScriptableObject
 // Authoring-side enums: same members, same order as the corresponding ModTarget
 // ranges, so the bake is a plain offset cast. Splitting them is what keeps each
 // inspector row free of fields that don't apply to it.
-public enum NumericTarget : byte { Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield }
+public enum NumericTarget : byte
+{
+    Health, Speed, TurnSpeed, MeleeRange, AttackDamage, Armor, Shield,
+    Aggression, Looseness, Separation,
+    CombatSpacing, AttackNearbyRange, AvoidMeleeRange, PursueDistance,
+    CohesionRadius, RetreatHealthPct, ReEngageHealthPct,
+}
 public enum FlagTarget : byte { FormWall, StandBehindFriend, AvoidMelee, AdvanceIndividual, AdvanceOnEnemy, SeparateIdle }
 
 // One numeric effect within an ability.

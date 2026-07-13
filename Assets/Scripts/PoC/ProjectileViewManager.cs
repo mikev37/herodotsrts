@@ -5,17 +5,17 @@ using Unity.Transforms;
 using UnityEngine;
 
 // ===========================================================================
-// PROJECTILE VIEW MANAGER — pools a visual per flying projectile. The prefab is
-// PER-UNIT: each projectile carries the firing unit's UnitDefId, and we resolve
-// the projectile registry on the UnitManager by id,
-// pooling separately per definition. A fallback prefab covers definitions that
-// don't set one.
+// PROJECTILE VIEW MANAGER — pools a visual per flying projectile. Each projectile
+// carries a ProjectileView.Id, which is an index into the RosterDefinition's
+// deduped projectile registry (NOT a unit def id — several unit types can share
+// one projectile asset). Resolved via UnitFactory.Roster, pooling separately per
+// definition. A fallback prefab covers definitions that don't set one.
 // ===========================================================================
 public class ProjectileViewManager : MonoBehaviour
 {
     [Header("Config")]
-    [Tooltip("The UnitManager holding the roster (used to resolve per-unit projectile prefabs).")]
-    [SerializeField] private UnitManager unitManager;
+    // Roster auto-resolved (single project asset) — no hand-wiring.
+    private RosterDefinition roster;
     [Tooltip("Used when a projectile definition has no view prefab assigned.")]
     [SerializeField] private GameObject fallbackPrefab;
 
@@ -35,7 +35,7 @@ public class ProjectileViewManager : MonoBehaviour
         var world = World.DefaultGameObjectInjectionWorld;
         worldReady = world != null && world.IsCreated;
         if (!worldReady) { Debug.LogWarning("[ProjectileViewManager] No ECS world found."); return; }
-        if (unitManager == null) Debug.LogWarning("[ProjectileViewManager] No UnitManager assigned.");
+        roster = RosterDefinition.Get();
         _em = world.EntityManager;
         _query = _em.CreateEntityQuery(
             ComponentType.ReadOnly<ProjectileTag>(),
@@ -75,7 +75,7 @@ public class ProjectileViewManager : MonoBehaviour
 
     private Transform Acquire(int id)
     {
-        var prefab = unitManager != null ? unitManager.GetProjectileViewPrefab(id) : null;
+        var prefab = roster != null ? roster.GetProjectileViewPrefab(id) : null;
         if (prefab == null) prefab = fallbackPrefab;
         if (prefab == null) return null;
 

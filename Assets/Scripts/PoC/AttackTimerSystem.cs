@@ -1,4 +1,5 @@
 using Unity.Burst;
+using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
@@ -44,20 +45,23 @@ public partial struct AttackTimerSystem : ISystem
             HeightDamageBonus = 0.05f,   // global: ranged damage bonus per meter of height advantage
             HeightBonusCap = 6f,         // global: height advantage stops counting beyond this (meters)
             Ecb = ecb,
+            ImmobileLk = SystemAPI.GetComponentLookup<Immobile>(true),   // fresh each tick (matches house style)
         }.ScheduleParallel();
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(Construction), typeof(BlueprintTag))]   // under construction = unarmed
     private partial struct AttackJob : IJobEntity
     {
         public float Dt, HeightDamageBonus, HeightBonusCap;
         public EntityCommandBuffer.ParallelWriter Ecb;
+        [ReadOnly] public ComponentLookup<Immobile> ImmobileLk;
 
         private void Execute(
             [ChunkIndexInQuery] int sortKey,
+            Entity self,
             in LocalTransform xform,
-            in Team team,
+            in Player player,
             in Velocity vel,
             in CombatTarget target,
             in Ranged ranged,
@@ -66,6 +70,7 @@ public partial struct AttackTimerSystem : ISystem
             ref CombatStatus status)
         {
             attack.Pulse = 0f;
+            bool isImmobile = ImmobileLk.HasComponent(self);
 
             // Not committed (moving, no target, ordered away) -> cycle resets.
             if (!status.IsAttacking || !target.Has)
@@ -75,8 +80,14 @@ public partial struct AttackTimerSystem : ISystem
                 return;
             }
             float2 enemydir = target.Info.Position - xform.Position.xz;
-            //moving or not facing the enemy = no attack
-            if (math.length(vel.Value) > 1 || math.dot(xform.Forward().xz, enemydir) < .65f) return;
+            // Immobile attackers (towers) can't rotate or move — SteeringSystem
+            // skips them — so the "must be stationary and facing" gate would block
+            // them forever. They're always eligible to fire; mobile units must
+            // stop and face first.
+            if (!isImmobile)
+            {
+                if (math.length(vel.Value) > 1 || math.dot(xform.Forward().xz, enemydir) < .65f) return;
+            }
 
             switch (attack.Phase)
             {
@@ -89,7 +100,7 @@ public partial struct AttackTimerSystem : ISystem
                     attack.Timer -= Dt;
                     if (attack.Timer <= 0f)
                     {
-                        Fire(sortKey, xform, team, target, ranged, slope, ref attack);
+                        Fire(sortKey, xform, player, target, ranged, slope, ref attack);
                         attack.Phase = AttackPhase.Cooldown;
                         attack.Timer += attack.Cooldown;   // += carries the sub-tick remainder
                     }
@@ -106,7 +117,7 @@ public partial struct AttackTimerSystem : ISystem
             }
         }
 
-        private void Fire(int sortKey, in LocalTransform xform, in Team team,
+        private void Fire(int sortKey, in LocalTransform xform, in Player player,
                           in CombatTarget target,
                           in Ranged ranged, in GroundSpeedMultiplier slope, ref Attack attack)
         {
@@ -140,7 +151,7 @@ public partial struct AttackTimerSystem : ISystem
             {
                 Velocity = direction * attack.ProjSpeed,
                 Damage = damage,
-                Team = team.Value,
+                Player = player.Value,
                 Life = life,
                 TotalLife = life,
                 Rise = attack.ProjRise,

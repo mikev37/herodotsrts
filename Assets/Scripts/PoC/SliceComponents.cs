@@ -58,6 +58,9 @@ public struct Obstacle : IComponentData
 {
     public float Radius;     // circle path (used only when Extents is zero)
     public int2  Extents;    // rect footprint in cells; zero = circle
+    public float OccluderHeight; // sight-blocking height ABOVE the footprint's terrain (0 = see over it freely).
+                                 // A tall keep uses a large value; a low wall a small one, so a raised shooter
+                                 // can see over it. Fed into ObstacleField.OccluderHeight at grid rebuild.
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +77,7 @@ public struct Projectile : IComponentData
 {
     public float2 Velocity;       // horizontal velocity
     public float Damage;
-    public int Team;
+    public int Player;            // owning player id
     public float Life;            // seconds remaining
     public float TotalLife;       // life at launch (for arc progress)
     public float Rise;            // arc bulge height
@@ -100,7 +103,7 @@ public struct IncomingProjectile : IBufferElementData
     public float2 Direction;  // normalized travel direction (for backstab mitigation)
     public float  Damage;
     public float  HitRadius;
-    public int    Team;
+    public int    Player;         // owning player id
 }
 
 // Per-frame projectile spatial hash. Built by ProjectileSystem before

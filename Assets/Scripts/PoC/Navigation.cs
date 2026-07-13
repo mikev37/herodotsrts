@@ -92,6 +92,14 @@ public static class NavTerrain
         // pass the whole ray and flip the unit into a direct march back over the
         // wall. Connectivity breaks the ray at the sheer roof<->ground face, so
         // the unit keeps following the flow field down the ramp and around.
+        // ORIGIN cell: do NOT treat the starting cell's own impassability as a
+        // sight blocker. A stationary attacker (a tower) sits ON its own footprint,
+        // which is stamped Impassable — checking the origin as an occluder made a
+        // tower fail LoS to everything and never fire. You can always see OUT of
+        // the cell you occupy; occlusion is about cells BETWEEN you and the target,
+        // which the per-step Connected() test below still enforces from step 1.
+        // (Pathing callers pass unit centers, which are never impassable, so this
+        // is a no-op for them — it only unblocks the on-footprint case.)
         if (!NavGrid.InBounds(x, y) || cellType[NavGrid.Index(x, y)] == NavCell.Impassable) return false;
         if (useW && clearance[NavGrid.Index(x, y)] < halfW) return false;
         byte prevType = cellType[NavGrid.Index(x, y)];
@@ -121,6 +129,74 @@ public static class NavTerrain
             prevType = t;
         }
         return true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // SIGHT LINE — true 2.5D height occlusion, for VISION and RANGED TARGETING.
+    // Fundamentally different from LineOfSight above (which is a walkability probe
+    // that breaks at sheer Roof↔Ground edges — correct for pathing, wrong for
+    // sight, since it would blind a tower to the ground below it).
+    //
+    // Given an eye at world (a, eyeHeight) and a target at (b, targetHeight), walk
+    // the ray cell by cell and track the maximum ELEVATION ANGLE any intervening
+    // column's occluder top subtends from the eye. Sight is open iff no
+    // intervening column rises above the straight eye→target line — i.e. the
+    // angle to the target is >= every occluder angle along the way. Because the
+    // test is by angle from a specific eye height, a RAISED shooter (a tall tower,
+    // a unit on a parapet, a flyer) sees and shoots OVER a lower wall, while a
+    // ground unit behind the same wall is blocked. Height blocks sight; pathing
+    // impassability is irrelevant to it (a lake blocks movement but not vision).
+    //
+    // occluderHeight = ObstacleField.OccluderHeight (terrain surface + any building
+    // occluder / wall parapet, baked at grid rebuild). eyeHeight/targetHeight are
+    // absolute world Y (surface height + eye offset). innerRadiusCells cells around
+    // the eye are always visible (you always see your immediate surroundings; a
+    // corner can't hide an adjacent enemy). maxCells caps the ray length.
+    // ---------------------------------------------------------------------------
+    public static bool SightLine(float2 a, float2 b, float eyeHeight, float targetHeight,
+                                 in NativeArray<float> occluderHeight, int maxCells,
+                                 int innerRadiusCells = 2)
+    {
+        int2 c0 = NavGrid.Cell(a), c1 = NavGrid.Cell(b);
+        int dx = math.abs(c1.x - c0.x), dy = math.abs(c1.y - c0.y);
+        if (dx + dy > maxCells) return false;
+        if (dx == 0 && dy == 0) return true;
+
+        int sx = c1.x >= c0.x ? 1 : -1;
+        int sy = c1.y >= c0.y ? 1 : -1;
+        int x = c0.x, y = c0.y, err = dx - dy;
+
+        // Ground distance eye→target, for converting occluder heights to angles.
+        float totalGround = math.max(1e-3f, math.distance(a, b));
+        // Slope (rise per unit ground) of the straight eye→target sightline.
+        float targetSlope = (targetHeight - eyeHeight) / totalGround;
+
+        int steps = 0;
+        int guard = maxCells + 2;
+        while (guard-- > 0)
+        {
+            if (x == c1.x && y == c1.y) return true;   // reached target column: open
+
+            int e2 = 2 * err;
+            if (e2 > -dy) { err -= dy; x += sx; }
+            if (e2 <  dx) { err += dx; y += sy; }
+            steps++;
+
+            if (x == c1.x && y == c1.y) return true;
+            if (!NavGrid.InBounds(x, y)) return false;
+            if (steps <= innerRadiusCells) continue;   // always-visible inner radius
+
+            // Elevation angle (as slope) of THIS column's occluder top from the eye.
+            float2 cellC = NavGrid.CellCenter(x, y);
+            float ground = math.max(1e-3f, math.distance(a, cellC));
+            float occl = occluderHeight[NavGrid.Index(x, y)];
+            float occlSlope = (occl - eyeHeight) / ground;
+
+            // Blocked if this occluder rises above the eye→target line at this point.
+            // Small epsilon so a wall exactly at sightline height doesn't false-block.
+            if (occlSlope > targetSlope + 1e-3f) return false;
+        }
+        return false;
     }
 }
 
@@ -194,6 +270,68 @@ public static class NavGrid
     public static float2 CellCenter(int x, int y) =>
         Origin + new float2(x + 0.5f, y + 0.5f) * CellSize;
 
+    // Like SnapStandable, but the result must ALSO lie OUTSIDE the given
+    // footprint rect. Blueprint interiors are walkable ground (plans are
+    // non-solid), so a plain standable-snap can return a cell INSIDE the plan —
+    // an evacuation target that re-triggers evacuation every tick (the peasant
+    // bouncing at the shared border of a plan and its solid neighbor).
+    public static float2 SnapStandableOutside(NativeArray<byte> cellType, float2 p,
+                                              float2 rectCenter, float2 rectHalf, int maxRing)
+    {
+        bool BadCell(int2 cc)
+        {
+            if (!InBounds(cc.x, cc.y)) return true;
+            if (cellType.IsCreated && cellType[Index(cc.x, cc.y)] == NavCell.Impassable) return true;
+            float2 w = CellCenter(cc.x, cc.y);
+            return math.all(math.abs(w - rectCenter) < rectHalf);   // inside the footprint
+        }
+        int2 c = Cell(p);
+        if (!BadCell(c)) return p;
+        for (int r = 1; r <= maxRing; r++)
+        {
+            int2 best = c; float bestD = float.MaxValue; bool found = false;
+            for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                if (math.max(math.abs(dx), math.abs(dy)) != r) continue;
+                int2 n = new int2(c.x + dx, c.y + dy);
+                if (BadCell(n)) continue;
+                float d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = n; found = true; }
+            }
+            if (found) return CellCenter(best.x, best.y);
+        }
+        return p;
+    }
+
+    // Nearest standable point to `p` (deterministic outward ring; returns `p`
+    // unchanged when the cell is already fine or nothing is found). Used by any
+    // system emitting micro-targets — perimeter points, evacuation exits — which
+    // must land on walkable ground: adjacent solid buildings otherwise turn them
+    // into wall-ramming points.
+    public static float2 SnapStandable(NativeArray<byte> cellType, float2 p, int maxRing)
+    {
+        if (!cellType.IsCreated) return p;
+        int2 c = Cell(p);
+        if (!InBounds(c.x, c.y) || cellType[Index(c.x, c.y)] != NavCell.Impassable) return p;
+        for (int r = 1; r <= maxRing; r++)
+        {
+            int2 best = c; float bestD = float.MaxValue; bool found = false;
+            for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                if (math.max(math.abs(dx), math.abs(dy)) != r) continue;
+                int2 n = new int2(c.x + dx, c.y + dy);
+                if (!InBounds(n.x, n.y)) continue;
+                if (cellType[Index(n.x, n.y)] == NavCell.Impassable) continue;
+                float d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = n; found = true; }
+            }
+            if (found) return CellCenter(best.x, best.y);
+        }
+        return p;
+    }
+
     public static int2 BigOf(int2 cell) => cell / SubPerAxis;
     public static int  BigIndex(int bx, int by) => by * BigTilesPerAxis + bx;
     public static int  BigIndex(int2 b) => b.y * BigTilesPerAxis + b.x;
@@ -213,7 +351,13 @@ public struct ObstacleField : IComponentData
 {
     public NativeArray<byte> Passable;   // UNION view: 0 = Impassable, 1 = walkable by someone (Ground/Roof/Transition)
     public NativeArray<byte> CellType;   // NavCell.* per cell — the typed surface (read by LoS + steering repulsion)
+    public NativeArray<int>  OwnerSid;   // WHY a cell is impassable: the claiming entity's StableId (-1 = terrain/none)
     public NativeArray<float> NavHeight; // walk-surface Y for Roof/Transition cells (Ground cells use terrain)
+    public NativeArray<float> OccluderHeight; // per-cell SIGHT-blocking top height: terrain surface, plus a
+                                         // building's occluderHeight on its footprint, or a wall's RoofHeight
+                                         // on Roof cells. Read by NavTerrain.SightLine (2.5D height occlusion).
+                                         // Distinct from NavHeight (walk surface) — a tall keep blocks sight
+                                         // from its full height while its walk surface is irrelevant to vision.
     public NativeArray<float> Clearance; // CELL distance from each cell centre to the nearest BROKEN edge
                                          // (impassable neighbour, sheer ground<->roof face, or map border).
                                          // Context-free; thresholded by HalfWidth(W) to test fit for any
@@ -227,7 +371,9 @@ public struct ObstacleField : IComponentData
 
 public struct PathSlot
 {
-    public int2 GoalCell;
+    public int2 GoalCell;               // IDENTITY / cache key = the destination cell everyone queries
+    public int2 SeedCell;               // where the field actually flows TO — snapped to a standable cell
+                                        // when GoalCell is impassable at this width (else == GoalCell)
     public int2 GoalBig;
     public int  Width;                  // path width in cells this slot's field was solved for
     public int  BuiltCoarseVersion;
@@ -261,7 +407,9 @@ public partial struct ObstacleGridSystem : ISystem
 {
     private NativeArray<byte> _passable;
     private NativeArray<byte> _cellType;
+    private NativeArray<int>  _ownerSid;   // per-cell impassability provenance (-1 = terrain/none)
     private NativeArray<float> _navHeight;
+    private NativeArray<float> _occluderHeight;
     private NativeArray<float> _clearance;
     private NativeArray<byte> _cellComp;
     private NativeArray<byte> _compCount;
@@ -285,7 +433,9 @@ public partial struct ObstacleGridSystem : ISystem
     {
         _passable    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _cellType    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
+        _ownerSid    = new NativeArray<int>(NavGrid.CellCount, Allocator.Persistent);   // WHY a cell is impassable: owning entity's StableId (-1 = terrain/none)
         _navHeight   = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
+        _occluderHeight = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
         _clearance   = new NativeArray<float>(NavGrid.CellCount, Allocator.Persistent);
         _cellComp    = new NativeArray<byte>(NavGrid.CellCount, Allocator.Persistent);
         _compCount   = new NativeArray<byte>(NavGrid.BigCount, Allocator.Persistent);
@@ -298,7 +448,7 @@ public partial struct ObstacleGridSystem : ISystem
         state.EntityManager.AddComponentData(state.EntityManager.CreateEntity(),
             new ObstacleField
             {
-                Passable = _passable, CellType = _cellType, NavHeight = _navHeight,
+                Passable = _passable, CellType = _cellType, OwnerSid = _ownerSid, NavHeight = _navHeight, OccluderHeight = _occluderHeight,
                 Clearance = _clearance,
                 CellComp = _cellComp, CompCount = _compCount,
                 BigVersion = _bigVersion, Version = 0, CoarseVersion = 0,
@@ -309,7 +459,9 @@ public partial struct ObstacleGridSystem : ISystem
     {
         if (_passable.IsCreated)    _passable.Dispose();
         if (_cellType.IsCreated)    _cellType.Dispose();
+        if (_ownerSid.IsCreated)    _ownerSid.Dispose();
         if (_navHeight.IsCreated)   _navHeight.Dispose();
+        if (_occluderHeight.IsCreated) _occluderHeight.Dispose();
         if (_clearance.IsCreated)   _clearance.Dispose();
         if (_cellComp.IsCreated)    _cellComp.Dispose();
         if (_compCount.IsCreated)   _compCount.Dispose();
@@ -345,6 +497,7 @@ public partial struct ObstacleGridSystem : ISystem
             sig = Fnv(sig, (uint)c.x); sig = Fnv(sig, (uint)c.y);
             sig = Fnv(sig, (uint)obs.ValueRO.Extents.x); sig = Fnv(sig, (uint)obs.ValueRO.Extents.y);
             sig = Fnv(sig, math.asuint(obs.ValueRO.Radius));
+            sig = Fnv(sig, math.asuint(obs.ValueRO.OccluderHeight));
         }
         foreach (var (xform, wall) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Wall>>().WithNone<Dead>())
         {
@@ -366,26 +519,46 @@ public partial struct ObstacleGridSystem : ISystem
         _forceRebuild = false;
 
         // ---- full rebuild (only reached on a structural change) ----------------
-        // Reset: every cell is plain Ground with no nav-height override.
+        // Reset: every cell is plain Ground with no nav-height override. Occluder
+        // height starts at the terrain surface — the natural ground blocks sight
+        // from below it (hills occlude); structures add to it below.
+        var occl = fieldRef.ValueRO.OccluderHeight;
         for (int i = 0; i < cellType.Length; i++) { cellType[i] = NavCell.Ground; navHeight[i] = 0f; }
+        for (int y = 0; y < NavGrid.Res; y++)
+            for (int x = 0; x < NavGrid.Res; x++)
+            {
+                int i = NavGrid.Index(x, y);
+                occl[i] = hasTerrain ? NavTerrain.SampleHeight(terrain, NavGrid.CellCenter(x, y)) : 0f;
+            }
+        // Provenance reset: -1 = terrain/no entity. Every obstacle cell below
+        // records WHO claims it, so goal-seeding can hug ONLY the ordered
+        // building's footprint instead of every fused neighbor.
+        for (int oi = 0; oi < _ownerSid.Length; oi++) _ownerSid[oi] = -1;
 
         // Dead buildings stop blocking immediately (the corpse lingers for the
         // death anim, but pathing opens up the tick health hits zero).
-        foreach (var (xform, obs) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Obstacle>>().WithNone<Dead>())
+        foreach (var (xform, obs, entity) in SystemAPI.Query<RefRO<LocalTransform>, RefRO<Obstacle>>().WithNone<Dead>().WithEntityAccess())
         {
             float2 p = new float2(xform.ValueRO.Position.x, xform.ValueRO.Position.z);
             int2 e = obs.ValueRO.Extents;
+            int ownSid = SystemAPI.HasComponent<StableId>(entity) ? SystemAPI.GetComponent<StableId>(entity).Value : -1;
 
             if (e.x > 0 && e.y > 0)
             {
                 int2 min = BuildingFootprint.MinCell(p, e);
+                float obsOccl = obs.ValueRO.OccluderHeight;
                 for (int ly = 0; ly < e.y; ly++)
                 for (int lx = 0; lx < e.x; lx++)
                 {
                     if (BuildingFootprint.CornerCut(lx, ly, e)) continue;
                     int x = min.x + lx, y = min.y + ly;
                     if (!NavGrid.InBounds(x, y)) continue;
-                    cellType[NavGrid.Index(x, y)] = NavCell.Impassable;
+                    int idx = NavGrid.Index(x, y);
+                    cellType[idx] = NavCell.Impassable;
+                    _ownerSid[idx] = ownSid;
+                    // Sight-block up to occluderHeight above this cell's ground. A tall
+                    // keep occludes; a 0-height footprint blocks pathing but not sight.
+                    occl[idx] = occl[idx] + obsOccl;
                 }
                 continue;
             }
@@ -398,7 +571,12 @@ public partial struct ObstacleGridSystem : ISystem
             {
                 int x = c.x + ox, y = c.y + oy;
                 if (!NavGrid.InBounds(x, y)) continue;
-                if (ox * ox + oy * oy <= r * r) cellType[NavGrid.Index(x, y)] = NavCell.Impassable;
+                if (ox * ox + oy * oy <= r * r)
+                {
+                    int ridx = NavGrid.Index(x, y);
+                    cellType[ridx] = NavCell.Impassable;
+                    _ownerSid[ridx] = ownSid;
+                }
             }
         }
 
@@ -421,6 +599,7 @@ public partial struct ObstacleGridSystem : ISystem
                 int idx = NavGrid.Index(x, y);
                 cellType[idx] = NavCell.Roof;
                 navHeight[idx] = topY;
+                occl[idx] = math.max(occl[idx], topY);   // parapet blocks sight up to its top
             }
 
             // Transition skirt: rampCells concentric cardinal rings stepping out
@@ -822,15 +1001,31 @@ public partial struct FlowFieldSystem : ISystem
             var wComp      = _wComp.GetSubArray(ci * NavGrid.CellCount, NavGrid.CellCount);
             var wCompCount = _wCompCount.GetSubArray(ci * NavGrid.BigCount, NavGrid.BigCount);
 
-            int slot = FindSlot(slots, gc, w);
+            // Preserve the ORIGINAL goal cell as the cache key: steering and the
+            // fine-field pass below both look the field up by Cell(dest.Value), the
+            // unsnapped destination. If the goal is impassable at this width, we
+            // still BUILD the field toward the nearest standable cell (so it routes
+            // to the obstacle's edge and idles), but it must be KEYED on the
+            // original cell or the unit would never find it (the "no fine field
+            // created" bug — the field existed under a key nobody queried).
+            int2 origGc = gc;
+            if (!StandsAtWidth(obs.CellType, obs.Clearance, gc, w))
+            {
+                int2 snapped = NearestStandable(obs.CellType, obs.Clearance, gc, w, 12);
+                if (math.any(snapped != gc)) gc = snapped;   // gc = build/seed goal; origGc = cache key
+            }
+
+            int slot = FindSlot(slots, origGc, w);
             bool fresh = slot >= 0;
             if (slot < 0) slot = AllocSlot(slots, tick);
             var sl = slots[slot];
-            sl.GoalCell = gc; sl.GoalBig = NavGrid.BigOf(gc); sl.Width = w; sl.UsedTick = tick; sl.Valid = 1;
+            // Identity = original cell; the field flows to the (possibly snapped) seed.
+            sl.GoalCell = origGc; sl.SeedCell = gc; sl.GoalBig = NavGrid.BigOf(gc);
+            sl.Width = w; sl.UsedTick = tick; sl.Valid = 1;
 
             if (!fresh || sl.BuiltCoarseVersion != obs.CoarseVersion)
             {
-                BuildCoarse(coarse, slot, gc, wComp, wCompCount);
+                BuildCoarse(coarse, slot, gc, wComp, wCompCount);   // seed at the standable cell
                 sl.BuiltCoarseVersion = obs.CoarseVersion;
                 int baseK = slot * NavGrid.BigCount;
                 for (int b = 0; b < NavGrid.BigCount; b++)
@@ -840,7 +1035,8 @@ public partial struct FlowFieldSystem : ISystem
                 }
             }
             slots[slot] = sl;
-            map.TryAdd(NavGrid.PathKey(NavGrid.Index(gc), w), slot);
+            // Key by the ORIGINAL cell (what everyone queries), not the snapped one.
+            map.TryAdd(NavGrid.PathKey(NavGrid.Index(origGc), w), slot);
         }
 
         var seenNodes = new NativeHashSet<int>(256, Allocator.Temp);
@@ -916,6 +1112,7 @@ public partial struct FlowFieldSystem : ISystem
                     Slots      = slots,
                     Passable   = obs.Passable,
                     CellType   = obs.CellType,
+                    OwnerSid   = obs.OwnerSid,
                     Clearance  = obs.Clearance,
                     HalfW      = NavGrid.HalfWidth(w),
                     CellComp   = _wComp.GetSubArray(ci * NavGrid.CellCount, NavGrid.CellCount),
@@ -978,6 +1175,43 @@ public partial struct FlowFieldSystem : ISystem
     {
         for (int s = 0; s < NavGrid.MaxWidthSlots; s++) if (_wWidth[s] == w) return s;
         return -1;
+    }
+
+    // Can a width-`w` body stand on this cell? (in bounds, not Impassable, enough
+    // clearance). Same test as the flow-field's own passability. The arrays come
+    // from the ObstacleField singleton — FlowFieldSystem owns no grid arrays.
+    private static bool StandsAtWidth(in NativeArray<byte> cellType, in NativeArray<float> clearance,
+                                      int2 c, int w)
+    {
+        if (!NavGrid.InBounds(c.x, c.y)) return false;
+        int i = NavGrid.Index(c.x, c.y);
+        return cellType[i] != NavCell.Impassable && NavGrid.Fits(clearance, i, w);
+    }
+
+    // Nearest cell a width-`w` body can stand on, searched outward from `c` in
+    // growing rings (deterministic: scans each ring in fixed x-then-y order and
+    // returns the first standable cell, so every peer resolves the identical
+    // snap). `maxRing` bounds the cost — units approach obstacles from outside,
+    // so a reachable cell is always within a couple of rings. Returns `c`
+    // unchanged if nothing is found (caller then keeps the original goal).
+    private static int2 NearestStandable(in NativeArray<byte> cellType, in NativeArray<float> clearance,
+                                         int2 c, int w, int maxRing)
+    {
+        for (int r = 1; r <= maxRing; r++)
+        {
+            int2 best = c; float bestD = float.MaxValue; bool found = false;
+            for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++)
+            {
+                if (math.max(math.abs(dx), math.abs(dy)) != r) continue;   // ring perimeter only
+                int2 n = new int2(c.x + dx, c.y + dy);
+                if (!StandsAtWidth(cellType, clearance, n, w)) continue;
+                float d = dx * dx + dy * dy;   // prefer the geometrically closest cell in this ring
+                if (d < bestD) { bestD = d; best = n; found = true; }
+            }
+            if (found) return best;
+        }
+        return c;
     }
 
     // Label 4-connected components of the WIDTH-ERODED graph within one big tile:
@@ -1224,6 +1458,7 @@ public partial struct FlowFieldSystem : ISystem
         [ReadOnly] public NativeArray<PathSlot>  Slots;
         [ReadOnly] public NativeArray<byte>      Passable;
         [ReadOnly] public NativeArray<byte>      CellType;
+        [ReadOnly] public NativeArray<int>       OwnerSid;   // per-cell impassability provenance (-1 = terrain)
         [ReadOnly] public NativeArray<float>     Clearance;  // wall-distance field (cells); width gate
         public float HalfW;                                  // HalfWidth(slot width) — the clearance threshold
         [ReadOnly] public NativeArray<byte>      CellComp;   // WIDTH-eroded components for this job's width
@@ -1243,6 +1478,52 @@ public partial struct FlowFieldSystem : ISystem
         // the job's width fits centred on it. The one predicate that turns the
         // point-unit solver into a width-W solver; HalfW = 0.5 (width 1) admits
         // every non-impassable cell, so width 1 is byte-identical to before.
+        // Flood the blocked region around `goal` and seed the standable cells
+        // hugging it (cost 0, frozen). `owner >= 0`: grow ONLY through cells
+        // claimed by that entity (its own footprint). `owner == -2`: grow through
+        // ANY impassable cell (whole-component fallback). Returns seeds placed.
+        private int FloodSeed(int2 bcoord, int2 cellOrigin, int sub, int baseCost, NativeArray<byte> stateArr,
+                              int2 goal, int owner, int W, int HugR)
+        {
+            var visited = new NativeArray<bool>(W * W, Allocator.Temp);
+            var queue   = new NativeArray<int2>(W * W, Allocator.Temp);
+            int head = 0, tail = 0, seeded = 0;
+            queue[tail++] = goal;
+            visited[HugR * W + HugR] = true;
+
+            while (head < tail)
+            {
+                int2 cc = queue[head++];
+                for (int d = 0; d < 4; d++)
+                {
+                    int2 n = cc + new int2(d == 0 ? 1 : d == 1 ? -1 : 0, d == 2 ? 1 : d == 3 ? -1 : 0);
+                    int2 off = n - goal;
+                    if (math.max(math.abs(off.x), math.abs(off.y)) > HugR) continue;
+                    if (!NavGrid.InBounds(n.x, n.y)) continue;
+                    int vi = (off.y + HugR) * W + (off.x + HugR);
+                    if (visited[vi]) continue;
+                    visited[vi] = true;
+
+                    int ni = NavGrid.Index(n);
+                    if (CellType[ni] == NavCell.Impassable)
+                    {
+                        if (owner == -2 || OwnerSid[ni] == owner)
+                            queue[tail++] = n;                 // grow the claimed footprint
+                    }
+                    else if (math.all(NavGrid.BigOf(n) == bcoord) && StandW(n))
+                    {
+                        int2 gl = n - cellOrigin;              // standable cell hugging the footprint
+                        int gi = gl.y * sub + gl.x;
+                        FineCost[baseCost + gi] = 0f;
+                        stateArr[gi] = 2;
+                        seeded++;
+                    }
+                }
+            }
+            visited.Dispose(); queue.Dispose();
+            return seeded;
+        }
+
         private bool StandW(int2 c)
         {
             int i = NavGrid.Index(c);
@@ -1281,13 +1562,53 @@ public partial struct FlowFieldSystem : ISystem
             for (int i = 0; i < NavGrid.SubCells; i++) FineCost[baseCost + i] = INF;
 
             // --- seeds (frozen boundary conditions) ---
+            // Reachable goal: one zero-cost source at the goal cell. BLOCKED goal
+            // (a building/rock footprint): seed EVERY standable cell hugging the
+            // blocked region near the goal, all at cost 0 — the field becomes pure
+            // travel-distance to the nearest face, so each unit walks to the edge
+            // on ITS side. (Seeding only the snapped center-nearest cell made every
+            // unit converge on that single point regardless of approach side.)
             PathSlot sl = Slots[slot];
-            if (math.all(sl.GoalBig == bcoord) && StandW(sl.GoalCell))
+            if (StandW(sl.GoalCell))
             {
-                int2 gl = sl.GoalCell - cellOrigin;
-                int gi = gl.y * sub + gl.x;
-                FineCost[baseCost + gi] = 0f;
-                stateArr[gi] = 2;
+                if (math.all(sl.GoalBig == bcoord))
+                {
+                    int2 gl = sl.GoalCell - cellOrigin;
+                    int gi = gl.y * sub + gl.x;
+                    FineCost[baseCost + gi] = 0f;
+                    stateArr[gi] = 2;
+                }
+            }
+            else
+            {
+                const int HugR = 10;              // window radius: footprints up to ~20x20 cells
+                const int W = HugR * 2 + 1;       // 21x21 window around the goal
+
+                if (CellType[NavGrid.Index(sl.GoalCell)] == NavCell.Impassable)
+                {
+                    // Flood ONLY the ordered entity's own footprint (per-cell owner
+                    // provenance): a rock fused to the target tree must never seed,
+                    // or units path to the rock's face instead of the tree's.
+                    int goalOwner = OwnerSid[NavGrid.Index(sl.GoalCell)];
+                    int seeded = FloodSeed(bcoord, cellOrigin, sub, baseCost, stateArr, sl.GoalCell, goalOwner, W, HugR);
+
+                    // Interior target (e.g. a tree deep inside a merged blob: none
+                    // of ITS faces are standable): fall back to hugging the whole
+                    // blocked component — the nearest blob face is the best
+                    // physical approach, and node adoption converts the bump into
+                    // work on arrival.
+                    if (seeded == 0 && goalOwner >= 0)
+                        FloodSeed(bcoord, cellOrigin, sub, baseCost, stateArr, sl.GoalCell, -2, W, HugR);
+                }
+                else if (math.all(NavGrid.BigOf(sl.SeedCell) == bcoord) && StandW(sl.SeedCell))
+                {
+                    // Goal is a clearance PINCH (walkable type, too narrow for this
+                    // width) — no footprint to hug; use the snapped standable cell.
+                    int2 gl = sl.SeedCell - cellOrigin;
+                    int gi = gl.y * sub + gl.x;
+                    FineCost[baseCost + gi] = 0f;
+                    stateArr[gi] = 2;
+                }
             }
             // --- border seeds ---
             // For each border cell pair (this tile <-> cardinal neighbour),

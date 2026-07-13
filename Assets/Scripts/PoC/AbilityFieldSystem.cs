@@ -110,7 +110,7 @@ public partial struct AbilityFieldSystem : ISystem
         [ReadOnly] public NativeArray<FieldData> Fields;
         [ReadOnly] public NativeArray<FieldModifier> Mods;
 
-        private void Execute(ref DynamicBuffer<ActiveModifier> active, in LocalTransform xform, in Team team)
+        private void Execute(ref DynamicBuffer<ActiveModifier> active, in LocalTransform xform, in Player player)
         {
             float2 pos = new float2(xform.Position.x, xform.Position.z);
 
@@ -119,7 +119,7 @@ public partial struct AbilityFieldSystem : ISystem
                 var fd = Fields[fi];
                 var f = fd.Field;
 
-                bool ally = team.Value == f.Team;
+                bool ally = player.Value == f.Player;
                 if (f.Affects == AffectFilter.Enemies && ally) continue;
                 if (f.Affects == AffectFilter.Allies && !ally) continue;
                 if (!InShape(f, pos)) continue;

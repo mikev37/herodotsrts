@@ -1,7 +1,7 @@
 using Unity.Entities;
 using UnityEngine;
 
-// Put this on a GameObject in the scene (e.g. next to UnitManager). It installs a
+// Put this on a GameObject in the scene (e.g. next to UnitFactory). It installs a
 // rate manager that drives the SimulationSystemGroup at a FIXED real-time rate
 // (30 Hz wall-clock via an accumulator), so SystemAPI.Time.DeltaTime is constant
 // on every machine — a hard requirement for determinism.

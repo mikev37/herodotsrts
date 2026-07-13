@@ -10,7 +10,7 @@ using UnityEngine;
 //
 //   * On-screen HUD (Game view) with all the live counts from SimDebug.
 //   * Scene-view gizmos: flow-field directions, blocked obstacle cells, each
-//     unit's team/facing, lines to its target and its desired destination,
+//     unit's player/facing, lines to its target and its desired destination,
 //     and selection highlight.
 //
 // Everything is toggleable in the inspector, and the live stats are mirrored
@@ -46,7 +46,7 @@ public class DebugOverlay : MonoBehaviour
 
     [Header("Live stats (read-only)")]
     public float fps;
-    public int unitsTeam0, unitsTeam1, aliveTotal, deadTotal, projectiles;
+    public int unitsPlayer0, unitsPlayer1, aliveTotal, deadTotal, projectiles;
     public int wallFormers, tuckers, kiters, advancers;
     public int overridden, firing, inContact, selected;
     public int obstacleVersion, blockedCells;
@@ -59,7 +59,7 @@ public class DebugOverlay : MonoBehaviour
     private struct UnitGiz
     {
         public Vector3 Pos, Forward, TargetPos, DestPos;
-        public int Team; public bool HasTarget, HasDest, Selected;
+        public int Player; public bool HasTarget, HasDest, Selected;
     }
     private readonly List<(Vector3 pos, Vector3 dir)> _flowArrows = new();
     private readonly List<(Vector3 pos, Vector3 dir)> _fineArrows = new();
@@ -70,12 +70,26 @@ public class DebugOverlay : MonoBehaviour
 
     // Live readout for the first selected unit (context / surface debug).
     private bool _selHas;
+    private int _selCount;   // total selected units (detail readout shows the first)
     private byte _selCtx, _selCellType;
     private float _selY, _selNavH;
     private Vector2Int _selCell;
+    // Selected-unit ECONOMY readout (harvest/haul phase, cargo, and any bank on it).
+    private bool _selHasHarvest, _selHasHaul, _selHasBank;
+    private string _selHarvestPhase, _selHaulPhase, _selHarvestType;
+    private float _selHaulTimer;
+    private int _selDeposits = -1, _selRequests = -1;   // bank buffer lengths (-1 = no buffer)
+    private int _selProdQueue = -1;                      // ProductionItem count (-1 = not a producer)
+    private string _selProdInfo;                          // head paid/cost/progress readout
+    private string _selConstrInfo;                        // construction progress/paid readout
+    private int _selCargoG, _selCargoW, _selCargoF;
+    private int _selBankG, _selBankW, _selBankF;
+    private int _selHarvestNode = -1;
+    private bool _selHasTarget, _selTargetIsNode;
+    private Vector3 _selTargetWorld, _selWorld;
 
     private EntityManager _em;
-    private EntityQuery _debugQuery, _unitQuery, _flowQuery, _obstacleQuery, _requestQuery;
+    private EntityQuery _debugQuery, _unitQuery, _flowQuery, _obstacleQuery, _requestQuery, _stableRegQuery;
     private bool _ready;
     private float _fpsSmooth;
 
@@ -88,11 +102,12 @@ public class DebugOverlay : MonoBehaviour
         _debugQuery = _em.CreateEntityQuery(typeof(SimDebug));
         _flowQuery = _em.CreateEntityQuery(typeof(NavFields));
         _obstacleQuery = _em.CreateEntityQuery(typeof(ObstacleField));
+        _stableRegQuery = _em.CreateEntityQuery(typeof(StableIdRegistry));
         _requestQuery = _em.CreateEntityQuery(typeof(SimDebugRequest));
         _unitQuery = _em.CreateEntityQuery(
             ComponentType.ReadOnly<UnitTag>(),
             ComponentType.ReadOnly<LocalTransform>(),
-            ComponentType.ReadOnly<Team>(),
+            ComponentType.ReadOnly<Player>(),
             ComponentType.ReadOnly<CombatTarget>(),
             ComponentType.ReadOnly<DesiredDestination>());
         _ready = true;
@@ -130,7 +145,7 @@ public class DebugOverlay : MonoBehaviour
     {
         if (_debugQuery.IsEmptyIgnoreFilter) return;
         var d = _debugQuery.GetSingleton<SimDebug>();
-        unitsTeam0 = d.UnitsTeam0; unitsTeam1 = d.UnitsTeam1;
+        unitsPlayer0 = d.UnitsPlayer0; unitsPlayer1 = d.UnitsPlayer1;
         aliveTotal = d.AliveTotal; deadTotal = d.DeadTotal; projectiles = d.Projectiles;
         wallFormers = d.WallFormers; tuckers = d.Tuckers; kiters = d.Kiters; advancers = d.Advancers;
         overridden = d.Overridden; firing = d.Firing; inContact = d.InContact;
@@ -161,9 +176,13 @@ public class DebugOverlay : MonoBehaviour
                     byte t = obs.CellType[NavGrid.Index(x, y)];
                     if (t == NavCell.Ground) continue;
                     float2 c = NavGrid.CellCenter(x, y);
-                    float h = (hasNav && (t == NavCell.Roof || t == NavCell.Transition))
-                        ? obs.NavHeight[NavGrid.Index(x, y)] : gizmoY;
-                    if (t == NavCell.Impassable) _blocked.Add(new Vector3(c.x, gizmoY, c.y));
+                    // Every non-ground marker sits at the terrain SURFACE (NavHeight)
+                    // plus a small lift, so it draws on top of raised terrain rather
+                    // than being buried under it. Impassable cells previously used a
+                    // fixed low gizmoY and vanished under any elevated ground.
+                    float surf = hasNav ? obs.NavHeight[NavGrid.Index(x, y)] : 0f;
+                    float h = surf + gizmoY;
+                    if (t == NavCell.Impassable) _blocked.Add(new Vector3(c.x, h, c.y));
                     else if (t == NavCell.Roof) _roof.Add(new Vector3(c.x, h, c.y));
                     else if (t == NavCell.Transition) _ramp.Add(new Vector3(c.x, h, c.y));
                 }
@@ -233,7 +252,7 @@ public class DebugOverlay : MonoBehaviour
         // Units (capped + strided for perf).
         var entities = _unitQuery.ToEntityArray(Allocator.Temp);
         var xforms = _unitQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
-        var teams = _unitQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = _unitQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var targets = _unitQuery.ToComponentDataArray<CombatTarget>(Allocator.Temp);
         var dests = _unitQuery.ToComponentDataArray<DesiredDestination>(Allocator.Temp);
 
@@ -241,13 +260,26 @@ public class DebugOverlay : MonoBehaviour
         // the ObstacleField, so we can see live whether context matches the tile
         // it's standing on (and whether it jitters between roof/transition).
         _selHas = false;
+        _selCount = 0;
+        _selBankG = 0; _selBankW = 0; _selBankF = 0; _selHasBank = false;
         bool hasObs = _obstacleQuery.TryGetSingleton<ObstacleField>(out var obsField);
         for (int i = 0; i < entities.Length; i++)
         {
             if (!(_em.HasComponent<Selected>(entities[i]) && _em.IsComponentEnabled<Selected>(entities[i]))) continue;
+            _selCount++;
+            // Bank totals: SUMMED over the whole selection (3 loaded peasants show
+            // the combined cargo; a selected castle shows its stores).
+            if (_em.HasComponent<ResourceBank>(entities[i]))
+            {
+                var ba = _em.GetComponentData<ResourceBank>(entities[i]).Amounts;
+                _selBankG += ba.Gold; _selBankW += ba.Wood; _selBankF += ba.Food;
+                _selHasBank = true;
+            }
+            if (_selHas) continue;   // detail readout shows the FIRST selected; keep counting the rest
             float3 sp = xforms[i].Position;
             int2 c = NavGrid.Cell(new float2(sp.x, sp.z));
             _selHas = true;
+            _selWorld = new Vector3(sp.x, sp.y, sp.z);
             _selCell = new Vector2Int(c.x, c.y);
             _selY = sp.y;
             _selCtx = _em.HasComponent<NavContext>(entities[i])
@@ -258,7 +290,80 @@ public class DebugOverlay : MonoBehaviour
                 _selNavH = obsField.NavHeight[NavGrid.Index(c.x, c.y)];
             }
             else { _selCellType = 255; _selNavH = 0f; }
-            break;
+
+            // Economy readout for the selected unit: harvest/haul phase, the node
+            // it's working, its cargo, and any resource bank it carries. This is
+            // what surfaces HarvestPhase and ResourceBank.Amounts that were
+            // previously invisible in the overlay.
+            _selHasHarvest = _em.HasComponent<HarvestTask>(entities[i]);
+            if (_selHasHarvest)
+            {
+                var ht = _em.GetComponentData<HarvestTask>(entities[i]);
+                _selHarvestPhase = ht.Phase.ToString();
+                _selHarvestNode = ht.NodeStableId;
+                _selHarvestType = ht.Carrying.ToString();
+            }
+            _selHasHaul = _em.HasComponent<HaulTask>(entities[i]);
+            if (_selHasHaul)
+            {
+                var hl = _em.GetComponentData<HaulTask>(entities[i]);
+                _selHaulPhase = hl.Phase.ToString(); _selHaulTimer = hl.Timer;
+            }
+
+            // Bank-pipeline diagnostics: pending deposits/requests on THIS entity
+            // and its production queue length — pinpoints which link in a
+            // colony->cart or pay->produce chain is dead.
+            _selDeposits = _em.HasBuffer<BankDeposit>(entities[i]) ? _em.GetBuffer<BankDeposit>(entities[i]).Length : -1;
+            _selRequests = _em.HasBuffer<BankRequest>(entities[i]) ? _em.GetBuffer<BankRequest>(entities[i]).Length : -1;
+            _selProdQueue = _em.HasBuffer<ProductionItem>(entities[i]) ? _em.GetBuffer<ProductionItem>(entities[i]).Length : -1;
+
+            // Construction site: progress + what's been paid so far.
+            _selConstrInfo = null;
+            if (_em.HasComponent<BlueprintTag>(entities[i]))
+                _selConstrInfo = "Blueprint (plan) — awaiting a tasked builder in range";
+            else if (_em.HasComponent<Construction>(entities[i]))
+            {
+                var cst = _em.GetComponentData<Construction>(entities[i]);
+                float pct = cst.BuildTime > 0f ? 100f * cst.Progress / cst.BuildTime : 0f;
+                _selConstrInfo = $"Constr {pct:0}%  paid G{cst.Paid.Gold}/{cst.Cost.Gold} " +
+                                 $"W{cst.Paid.Wood}/{cst.Cost.Wood} F{cst.Paid.Food}/{cst.Cost.Food}";
+            }
+
+            // Production head: what's actually paid and how far along the build is
+            // (a producer has NO bank — its escrow lives on the queue item).
+            _selProdInfo = null;
+            if (_selProdQueue > 0)
+            {
+                var h = _em.GetBuffer<ProductionItem>(entities[i])[0];
+                float pct = h.BuildTime > 0f ? 100f * h.Progress / h.BuildTime : 0f;
+                _selProdInfo = $"head paid G{h.Paid.Gold}/{h.Cost.Gold} W{h.Paid.Wood}/{h.Cost.Wood} " +
+                               $"F{h.Paid.Food}/{h.Cost.Food}  {pct:0}%";
+            }
+
+            // (bank totals accumulated at the top of the loop across the whole selection)
+
+            // Resolve what this unit is heading to, for the world highlight:
+            // its harvest node (by StableId) if harvesting, else its MoveTarget.
+            _selHasTarget = false;
+            if (_selHasHarvest && _selHarvestNode >= 0 &&
+                _stableRegQuery.TryGetSingleton<StableIdRegistry>(out var reg) &&
+                reg.Map.TryGetValue(_selHarvestNode, out var nodeE) &&
+                _em.HasComponent<LocalTransform>(nodeE))
+            {
+                var np = _em.GetComponentData<LocalTransform>(nodeE).Position;
+                _selTargetWorld = new Vector3(np.x, np.y, np.z);
+                _selTargetIsNode = true; _selHasTarget = true;
+            }
+            else if (_em.HasComponent<MoveTarget>(entities[i]))
+            {
+                var mt = _em.GetComponentData<MoveTarget>(entities[i]);
+                if (mt.HasTarget)
+                {
+                    _selTargetWorld = new Vector3(mt.Value.x, sp.y, mt.Value.y);
+                    _selTargetIsNode = false; _selHasTarget = true;
+                }
+            }
+            // no break: keep iterating to count every selected unit (_selCount)
         }
 
         int total = entities.Length;
@@ -271,7 +376,7 @@ public class DebugOverlay : MonoBehaviour
             {
                 Pos = new Vector3(p.x, gizmoY, p.z),
                 Forward = new Vector3(fwd.x, 0f, fwd.z),
-                Team = teams[i].Value,
+                Player = players[i].Value,
                 HasTarget = targets[i].Has,
                 TargetPos = new Vector3(targets[i].Info.Position.x, gizmoY, targets[i].Info.Position.y),
                 HasDest = dests[i].Has,
@@ -280,7 +385,7 @@ public class DebugOverlay : MonoBehaviour
             });
         }
 
-        entities.Dispose(); xforms.Dispose(); teams.Dispose(); targets.Dispose(); dests.Dispose();
+        entities.Dispose(); xforms.Dispose(); players.Dispose(); targets.Dispose(); dests.Dispose();
     }
 
     // Cheapest component cost of a big tile (display-grade summary of the
@@ -296,6 +401,38 @@ public class DebugOverlay : MonoBehaviour
     private void OnGUI()
     {
         if (!showHud) return;
+
+        // World-space TARGET HIGHLIGHT: mark where the selected unit is heading
+        // (its harvest node = green, a move destination = cyan) and draw a line
+        // from the unit to it. This makes "which node is it going to" obvious.
+        if (worldReady && _selHas && _selHasTarget)
+        {
+            var cam = Camera.main;
+            if (cam != null)
+            {
+                Vector3 tsp = cam.WorldToScreenPoint(_selTargetWorld);
+                Vector3 usp = cam.WorldToScreenPoint(_selWorld);
+                if (tsp.z > 0f)
+                {
+                    Color col = _selTargetIsNode ? new Color(0.2f, 1f, 0.3f) : new Color(0.3f, 0.9f, 1f);
+                    float ty = Screen.height - tsp.y;
+                    var box = new Rect(tsp.x - 14, ty - 14, 28, 28);
+                    var prev = GUI.color;
+                    GUI.color = col;
+                    GUI.Box(box, _selTargetIsNode ? "NODE" : "GO");
+                    // simple connecting line via a thin rotated box is overkill in IMGUI;
+                    // a small label at the midpoint keeps it dependency-free.
+                    if (usp.z > 0f)
+                    {
+                        float uy = Screen.height - usp.y;
+                        GUI.color = new Color(col.r, col.g, col.b, 0.5f);
+                        GUI.Label(new Rect((tsp.x + usp.x) * 0.5f - 20, (ty + uy) * 0.5f - 8, 40, 16), "→target");
+                    }
+                    GUI.color = prev;
+                }
+            }
+        }
+
         const int w = 260, h = 320;
         GUI.Box(new Rect(Screen.width - w - 10, 10, w, h), "SIM DEBUG");
         var r = new Rect(Screen.width - w, 35, w - 15, 18);
@@ -303,7 +440,7 @@ public class DebugOverlay : MonoBehaviour
 
         if (!worldReady) { Line("NO ECS WORLD"); return; }
         Line($"FPS: {fps:0}");
-        Line($"Units  T0:{unitsTeam0}  T1:{unitsTeam1}  alive:{aliveTotal}");
+        Line($"Units  P0:{unitsPlayer0}  P1:{unitsPlayer1}  alive:{aliveTotal}");
         Line($"Dead:{deadTotal}   Projectiles:{projectiles}");
         Line($"Flags  Wall:{wallFormers} Tuck:{tuckers} Kite:{kiters} Adv:{advancers}");
         Line($"Overridden by hero: {overridden}");
@@ -317,12 +454,27 @@ public class DebugOverlay : MonoBehaviour
             string ctxName = _selCtx == 1 ? "Ground" : _selCtx == 2 ? "Roof" : _selCtx == 3 ? "Transition" : _selCtx.ToString();
             string typeName = _selCellType == 0 ? "Impassable" : _selCellType == 1 ? "Ground" : _selCellType == 2 ? "Roof" : _selCellType == 3 ? "Transition" : _selCellType.ToString();
             Line($"Sel cell:({_selCell.x},{_selCell.y}) y:{_selY:0.0} navH:{_selNavH:0.0}");
+            if (_selCount > 1) Line($"({_selCount} selected — details show the FIRST)");
             Line($"Sel ctx:{ctxName}  tile:{typeName}");
             // A unit on a Transition tile should have Transition context and be
             // repelled by nothing. Flag any mismatch so jitter is visible.
             bool mismatch = (_selCellType <= 3) && (_selCtx != _selCellType)
                             && !(_selCellType == 0);
             if (mismatch) Line($"  >> CTX/TILE MISMATCH <<");
+
+            // Economy state (only shown when the selected unit has it).
+            if (_selHasHarvest)
+                Line($"Harvest: {_selHarvestPhase}  node:{_selHarvestNode}  type:{_selHarvestType}");
+            if (_selHasHaul)
+                Line($"Haul: {_selHaulPhase} t:{_selHaulTimer:0.00}");
+            if (_selDeposits >= 0 || _selRequests >= 0 || _selProdQueue >= 0)
+                Line($"dep:{_selDeposits} req:{_selRequests} prodQ:{_selProdQueue}");
+            if (_selProdInfo != null)
+                Line(_selProdInfo);
+            if (_selConstrInfo != null)
+                Line(_selConstrInfo);
+            if (_selHasBank)
+                Line($"Bank Σ G:{_selBankG} W:{_selBankW} F:{_selBankF} ({_selCount} sel)");
         }
     }
 
@@ -360,7 +512,7 @@ public class DebugOverlay : MonoBehaviour
             }
             if (showUnitFacing)
             {
-                Gizmos.color = u.Team == 0 ? new Color(0.3f, 0.6f, 1f) : new Color(1f, 0.5f, 0.3f);
+                Gizmos.color = u.Player == 0 ? new Color(0.3f, 0.6f, 1f) : new Color(1f, 0.5f, 0.3f);
                 Gizmos.DrawRay(u.Pos, u.Forward * 0.8f);
             }
             if (showTargetLines && u.HasTarget)

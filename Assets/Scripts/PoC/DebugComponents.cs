@@ -9,7 +9,7 @@ using Unity.Mathematics;
 // ===========================================================================
 public struct SimDebug : IComponentData
 {
-    public int UnitsTeam0, UnitsTeam1;
+    public int UnitsPlayer0, UnitsPlayer1;
     public int AliveTotal, DeadTotal;
     public int Projectiles;
     public int WallFormers, Tuckers, Kiters, Advancers;   // by base flag, alive
@@ -53,12 +53,12 @@ public partial struct SimDebugSystem : ISystem
     {
         var d = new SimDebug();
 
-        foreach (var (team, status) in
-                 SystemAPI.Query<RefRO<Team>, RefRO<CombatStatus>>()
+        foreach (var (player, status) in
+                 SystemAPI.Query<RefRO<Player>, RefRO<CombatStatus>>()
                           .WithAll<UnitTag>().WithNone<Dead>())
         {
             d.AliveTotal++;
-            if (team.ValueRO.Value == 0) d.UnitsTeam0++; else d.UnitsTeam1++;
+            if (player.ValueRO.Value == 0) d.UnitsPlayer0++; else d.UnitsPlayer1++;
 
             if (status.ValueRO.InContactWithEnemy) d.InContact++;
         }

@@ -28,7 +28,7 @@ using UnityEngine;
 // into existence by restoring a host snapshot (see SimSnapshot.cs for why every
 // peer — host included — must rebuild from the same blob):
 //
-//   * Lobby: peers pick a team (MSG_TEAM). Nobody spawns anything.
+//   * Lobby: peers pick a player (MSG_PLAYER). Nobody spawns anything.
 //   * Start: host spawns its world, captures it, and distributes (epoch N+1).
 //   * Load:  host reads the save file and distributes it the same way.
 //   * Desync: clients piggyback their latest per-tick checksum on every input
@@ -44,9 +44,9 @@ using UnityEngine;
 // mismatch at ack time means the restore itself is nondeterministic — that is a
 // bug to root-cause, so the game stays paused and says so rather than retrying.
 //
-// Team authority: the host stamps PlayerId on every remote command from the
-// sender's lobby-assigned team, and CommandApplySystem rejects commands aimed at
-// units of another team — a client can't order the other side around.
+// Player authority: the host stamps PlayerId on every remote command from the
+// sender's lobby-assigned player, and CommandApplySystem rejects commands aimed at
+// units of another player — a client can't order the other side around.
 //
 // Requires packages: com.unity.netcode.gameobjects and com.unity.transport.
 // Scene setup + Multiplayer Play Mode steps are in README_LOCKSTEP.md.
@@ -55,8 +55,8 @@ public class LockstepNet : MonoBehaviour
 {
     private const string MSG_INPUT  = "ls_input";    // client -> server: epoch, checksum report, commands
     private const string MSG_TURN   = "ls_turn";     // server -> clients: epoch, combined commands for a tick
-    private const string MSG_TEAM   = "ls_team";     // client -> server: lobby team choice
-    private const string MSG_SNAP_B = "ls_snap_b";   // server -> client: snapshot header + team assignments
+    private const string MSG_PLAYER   = "ls_player";     // client -> server: lobby player choice
+    private const string MSG_SNAP_B = "ls_snap_b";   // server -> client: snapshot header + player assignments
     private const string MSG_SNAP_C = "ls_snap_c";   // server -> client: one snapshot chunk
     private const string MSG_ACK    = "ls_ack";      // client -> server: restored, here's my state hash
     private const string MSG_RESUME = "ls_resume";   // server -> clients: all verified, run from tick T
@@ -79,13 +79,13 @@ public class LockstepNet : MonoBehaviour
     // Host side.
     private readonly Dictionary<uint, Dictionary<ulong, List<SimCommand>>> _inbox = new();
     private List<ulong> _participants = new();
-    private readonly Dictionary<ulong, int> _teamOf = new();                       // lobby team assignments
+    private readonly Dictionary<ulong, int> _playerOf = new();                       // lobby player assignments
     private readonly Dictionary<ulong, (uint tick, uint hash)> _reports = new();   // latest client checksum reports
     private readonly HashSet<ulong> _pendingAcks = new();
     private uint _syncTick;         // tick of the snapshot being distributed
     private uint _hostHash;         // host's post-restore hash — the verification reference
     private bool _syncing;
-    private bool _started;          // teams are locked and a world exists once true
+    private bool _started;          // players are locked and a world exists once true
     private bool _syncFailed;       // a peer's restore hash disagreed — paused until root-caused
 
     // Client-side snapshot assembly.
@@ -93,7 +93,7 @@ public class LockstepNet : MonoBehaviour
     private int  _snapChunks, _snapGot;
     private uint _snapEpoch, _snapTick;
 
-    private int _myTeam = -1;       // local display + lobby choice
+    private int _myPlayer = -1;       // local display + lobby choice
 
     private bool _handlersRegistered;
     private EntityQuery _queueQuery;
@@ -115,8 +115,8 @@ public class LockstepNet : MonoBehaviour
             RegisterHandlers();
             NetworkManager.Singleton.OnClientDisconnectCallback += OnClientDisconnect;
             NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
-            _teamOf[NetworkManager.Singleton.LocalClientId] = 0;   // host defaults to team 1
-            _myTeam = 0;
+            _playerOf[NetworkManager.Singleton.LocalClientId] = 0;   // host defaults to player 1
+            _myPlayer = 0;
         }
     }
 
@@ -132,7 +132,7 @@ public class LockstepNet : MonoBehaviour
         var cmm = NetworkManager.Singleton.CustomMessagingManager;
         cmm.RegisterNamedMessageHandler(MSG_INPUT,  OnInputMsg);
         cmm.RegisterNamedMessageHandler(MSG_TURN,   OnTurnMsg);
-        cmm.RegisterNamedMessageHandler(MSG_TEAM,   OnTeamMsg);
+        cmm.RegisterNamedMessageHandler(MSG_PLAYER,   OnPlayerMsg);
         cmm.RegisterNamedMessageHandler(MSG_SNAP_B, OnSnapBegin);
         cmm.RegisterNamedMessageHandler(MSG_SNAP_C, OnSnapChunk);
         cmm.RegisterNamedMessageHandler(MSG_ACK,    OnAck);
@@ -144,41 +144,41 @@ public class LockstepNet : MonoBehaviour
     {
         if (!NetworkManager.Singleton.IsServer) return;
         if (clientId == NetworkManager.Singleton.LocalClientId) return;
-        if (!_teamOf.ContainsKey(clientId)) _teamOf[clientId] = 1;   // new clients default to team 2
+        if (!_playerOf.ContainsKey(clientId)) _playerOf[clientId] = 1;   // new clients default to player 2
     }
 
-    // --- lobby: team selection ------------------------------------------------
+    // --- lobby: player selection ------------------------------------------------
 
-    private void ChooseTeam(int team)
+    private void ChoosePlayer(int player)
     {
         if (_started) return;   // locked once a world exists
-        _myTeam = team;
+        _myPlayer = player;
         var nm = NetworkManager.Singleton;
         if (nm.IsServer)
         {
-            _teamOf[nm.LocalClientId] = team;
+            _playerOf[nm.LocalClientId] = player;
         }
         else
         {
             using var w = new FastBufferWriter(8, Allocator.Temp);
-            w.WriteValueSafe(team);
+            w.WriteValueSafe(player);
             nm.CustomMessagingManager.SendNamedMessage(
-                MSG_TEAM, NetworkManager.ServerClientId, w, NetworkDelivery.Reliable);
+                MSG_PLAYER, NetworkManager.ServerClientId, w, NetworkDelivery.Reliable);
         }
     }
 
-    private void OnTeamMsg(ulong sender, FastBufferReader reader)
+    private void OnPlayerMsg(ulong sender, FastBufferReader reader)
     {
-        reader.ReadValueSafe(out int team);
+        reader.ReadValueSafe(out int player);
         if (_started) return;
-        _teamOf[sender] = Mathf.Clamp(team, 0, 1);
+        _playerOf[sender] = Mathf.Clamp(player, 0, 1);
     }
 
-    private void ApplyLocalTeam(int team)
+    private void ApplyLocalPlayer(int player)
     {
-        _myTeam = team;
+        _myPlayer = player;
         var pc = UnityEngine.Object.FindFirstObjectByType<PlayerCommander>();
-        if (pc != null) pc.SetTeam(team);
+        if (pc != null) pc.SetPlayer(player);
     }
 
     // --- host: start / load / resync — all the same distribution path ----------
@@ -186,9 +186,21 @@ public class LockstepNet : MonoBehaviour
     private void HostStartGame()
     {
         if (_started) return;
-        var um = UnitManager.Instance;
-        if (um == null) { Debug.LogError("[Lockstep] no UnitManager in scene."); return; }
-        um.SpawnAll();
+        var factory = UnitFactory.Instance;
+        if (factory == null || !factory.Ready)
+        {
+            Debug.LogError("[Lockstep] no ready UnitFactory in scene — can't start.");
+            return;
+        }
+        // The host's world is placed by UnitFactory at Start (every scattered
+        // MapBootstrap, spawned in deterministic order), long before a lobby
+        // "Start Game" click. If that hasn't finished, fail loudly rather than
+        // capture and distribute an empty/partial map.
+        if (!factory.PlacementsDone)
+        {
+            Debug.LogError("[Lockstep] map placements haven't finished yet — can't start.");
+            return;
+        }
         _started = true;
         HostDistribute(SimSnapshot.Capture(World.DefaultGameObjectInjectionWorld));
     }
@@ -221,8 +233,8 @@ public class LockstepNet : MonoBehaviour
         _participants = new List<ulong>(nm.ConnectedClientsIds);
         _participants.Sort();
         foreach (var cid in _participants)
-            if (!_teamOf.ContainsKey(cid))
-                _teamOf[cid] = cid == nm.LocalClientId ? 0 : 1;
+            if (!_playerOf.ContainsKey(cid))
+                _playerOf[cid] = cid == nm.LocalClientId ? 0 : 1;
 
         // The host restores its OWN world from the blob first: that produces the
         // canonical chunk layout (see SimSnapshot.cs) and the reference hash
@@ -235,7 +247,7 @@ public class LockstepNet : MonoBehaviour
             IsPaused = false;
             return;
         }
-        ApplyLocalTeam(_teamOf[nm.LocalClientId]);
+        ApplyLocalPlayer(_playerOf[nm.LocalClientId]);
 
         _pendingAcks.Clear();
         foreach (var cid in _participants)
@@ -254,15 +266,15 @@ public class LockstepNet : MonoBehaviour
         var nm = NetworkManager.Singleton;
         int chunkCount = (data.Length + SnapshotChunkBytes - 1) / SnapshotChunkBytes;
 
-        using (var w = new FastBufferWriter(256 + _teamOf.Count * 16, Allocator.Temp))
+        using (var w = new FastBufferWriter(256 + _playerOf.Count * 16, Allocator.Temp))
         {
             w.WriteValueSafe(_epoch);
             w.WriteValueSafe(_syncTick);
             w.WriteValueSafe(LockstepRateManager.HaltAtTick);   // networked decision, as in Phase 3
             w.WriteValueSafe(data.Length);
             w.WriteValueSafe(chunkCount);
-            w.WriteValueSafe(_teamOf.Count);
-            foreach (var kv in _teamOf)
+            w.WriteValueSafe(_playerOf.Count);
+            foreach (var kv in _playerOf)
             {
                 w.WriteValueSafe(kv.Key);
                 w.WriteValueSafe(kv.Value);
@@ -294,7 +306,7 @@ public class LockstepNet : MonoBehaviour
         reader.ReadValueSafe(out uint haltAtTick);
         reader.ReadValueSafe(out int totalLen);
         reader.ReadValueSafe(out int chunkCount);
-        reader.ReadValueSafe(out int teamCount);
+        reader.ReadValueSafe(out int playerCount);
 
         // Adopt the new epoch immediately: everything still in flight from the
         // old one (turns, our own queued submissions) belongs to a dead timeline.
@@ -306,11 +318,11 @@ public class LockstepNet : MonoBehaviour
         LockstepRateManager.HaltAtTick = haltAtTick;
 
         var nm = NetworkManager.Singleton;
-        for (int i = 0; i < teamCount; i++)
+        for (int i = 0; i < playerCount; i++)
         {
             reader.ReadValueSafe(out ulong cid);
-            reader.ReadValueSafe(out int team);
-            if (cid == nm.LocalClientId) ApplyLocalTeam(team);
+            reader.ReadValueSafe(out int player);
+            if (cid == nm.LocalClientId) ApplyLocalPlayer(player);
         }
 
         _snapData = new byte[totalLen];
@@ -498,13 +510,13 @@ public class LockstepNet : MonoBehaviour
         var list = new List<SimCommand>(count);
         for (int i = 0; i < count; i++) { reader.ReadValueSafe(out SimCommand c); list.Add(c); }
 
-        // Team authority: the host stamps PlayerId from the sender's assigned
-        // team. Whatever the client claims, its commands act as its lobby team.
-        int team = _teamOf.TryGetValue(sender, out var t) ? t : 0;
+        // Player authority: the host stamps PlayerId from the sender's assigned
+        // player. Whatever the client claims, its commands act as its lobby player.
+        int player = _playerOf.TryGetValue(sender, out var t) ? t : 0;
         for (int i = 0; i < list.Count; i++)
         {
             var c = list[i];
-            c.PlayerId = team;
+            c.PlayerId = player;
             list[i] = c;
         }
 
@@ -607,7 +619,7 @@ public class LockstepNet : MonoBehaviour
     private void OnClientDisconnect(ulong clientId)
     {
         _participants.Remove(clientId);
-        _teamOf.Remove(clientId);
+        _playerOf.Remove(clientId);
         _reports.Remove(clientId);
 
         // If we were waiting on this client's restore ack, stop waiting.
@@ -648,16 +660,16 @@ public class LockstepNet : MonoBehaviour
         {
             GUILayout.Label(nm.IsServer ? "ROLE: HOST (lobby)" : "ROLE: CLIENT (lobby)");
             GUILayout.Label($"connected: {nm.ConnectedClientsIds.Count}");
-            GUILayout.Label($"my team: {(_myTeam < 0 ? "-" : (_myTeam + 1).ToString())}");
+            GUILayout.Label($"my player: {(_myPlayer < 0 ? "-" : (_myPlayer + 1).ToString())}");
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Play Team 1")) ChooseTeam(0);
-            if (GUILayout.Button("Play Team 2")) ChooseTeam(1);
+            if (GUILayout.Button("Play Player 1")) ChoosePlayer(0);
+            if (GUILayout.Button("Play Player 2")) ChoosePlayer(1);
             GUILayout.EndHorizontal();
 
             if (nm.IsServer)
             {
-                foreach (var kv in _teamOf)
-                    GUILayout.Label($"  peer {kv.Key}: team {kv.Value + 1}");
+                foreach (var kv in _playerOf)
+                    GUILayout.Label($"  peer {kv.Key}: player {kv.Value + 1}");
                 if (GUILayout.Button("Start Game")) HostStartGame();
                 if (File.Exists(SimSnapshot.DefaultSavePath) && GUILayout.Button("Load Save"))
                     HostLoadGame();
@@ -670,7 +682,7 @@ public class LockstepNet : MonoBehaviour
         else
         {
             GUILayout.Label(nm.IsServer ? "ROLE: HOST" : "ROLE: CLIENT");
-            GUILayout.Label($"team: {_myTeam + 1}   epoch: {_epoch}");
+            GUILayout.Label($"player: {_myPlayer + 1}   epoch: {_epoch}");
             GUILayout.Label($"execTick: {_execTick}   running: {IsRunning}");
             if (IsPaused) GUILayout.Label(_syncing ? "PAUSED — syncing..." : "PAUSED");
             if (_syncFailed) GUILayout.Label("SYNC FAILED — check log");

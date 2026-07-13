@@ -21,16 +21,23 @@ MonoBehaviour:
   applyMode: 0
   affects: 2
   lifetime: 5
+  castRange: 0
+  chargeUp: 0
   cooldown: 1
+  manaCost: 20
+  costGold: 50
+  costWood: 0
+  costFood: 0
+  spawnUnit: {fileID: 0}
+  anchorFieldToSpawn: 0
   castEffectPrefab: {fileID: 8244839700207486601, guid: 2566012ba7080f34193c0fc198345ccc, type: 3}
   castEffectSeconds: 1
   attachedEffectPrefab: {fileID: 0}
-  modifiers:
+  numericModifiers:
   - target: 0
-    delta: -500
+    delta: -100
     mode: 0
     revert: 0
     capMode: 0
     capRef: 0
     capValue: 0
-    boolValue: 0

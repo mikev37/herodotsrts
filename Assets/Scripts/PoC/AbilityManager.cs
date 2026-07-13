@@ -5,11 +5,11 @@ using Unity.Mathematics;
 using UnityEngine;
 
 // ===========================================================================
-// ABILITY MANAGER — the AbilityDefinition counterpart of UnitManager:
+// ABILITY MANAGER — the AbilityDefinition counterpart of UnitFactory:
 //   id -> ScriptableObject -> view prefabs.
 //
 // SIMULATION side: registers every AbilityDefinition (collected automatically
-// from the UnitManager roster's unit abilities, plus any listed extras) under a
+// from the roster's unit abilities, plus any listed extras) under a
 // deterministic integer id, and bakes each into a blittable AbilitySpec +
 // FieldModifier payload that CommandApplySystem reads when an Ability command
 // fires. Registration order = roster order, so ids match on every client.
@@ -35,7 +35,7 @@ public struct AbilitySpec
     public uint        ChargeUpTicks;   // commit -> fire delay (0 = same tick)
     public float       CastRange;       // WorldPoint max cast distance (0 = unlimited)
     public float       ManaCost;
-    public int3        Cost;            // commander resources: x=Gold, y=Wood, z=Stone
+    public ResourceAmount Cost;         // commander resources (ResourceAmount; add Stone/etc. in one place)
     public byte        HasSpawn;        // definition has a spawnUnit (resolved managed at fire)
     public byte        AnchorToSpawn;   // banner/totem: bind the field to the spawned unit
 }
@@ -85,7 +85,7 @@ public class AbilityManager : MonoBehaviour
 
     // --- registry -------------------------------------------------------------
 
-    // Idempotent. Called by UnitManager at spawn for each roster ability, in
+    // Idempotent. Called by UnitFactory at spawn for each roster ability, in
     // roster order — which makes ids deterministic across machines.
     public int Register(AbilityDefinition def)
     {
@@ -109,7 +109,7 @@ public class AbilityManager : MonoBehaviour
             ChargeUpTicks = (uint)math.max(0, (int)math.ceil(def.chargeUp * LockstepConfig.TickRate)),
             CastRange = math.max(0f, def.castRange),
             ManaCost = math.max(0f, def.manaCost),
-            Cost = new int3(math.max(0, def.costGold), math.max(0, def.costWood), math.max(0, def.costStone)),
+            Cost = new ResourceAmount { Gold = math.max(0, def.costGold), Wood = math.max(0, def.costWood), Food = math.max(0, def.costFood) },
             HasSpawn = (byte)(def.spawnUnit != null ? 1 : 0),
             AnchorToSpawn = (byte)(def.anchorFieldToSpawn && def.spawnUnit != null &&
                                    def.applyMode == ApplyMode.PersistentArea ? 1 : 0),
@@ -182,8 +182,8 @@ public class AbilityManager : MonoBehaviour
 
     private void SyncAttachedEffects()
     {
-        var um = UnitManager.Instance;
-        if (um == null) return;
+        var vm = UnitViewManager.Instance;
+        if (vm == null) return;
 
         // Which (unit, ability) pairs SHOULD have an attached effect right now.
         _wanted.Clear();
@@ -206,7 +206,7 @@ public class AbilityManager : MonoBehaviour
         foreach (var key in _wanted)
         {
             if (_attached.ContainsKey(key)) continue;
-            var view = um.GetView(key.Item1);
+            var view = vm.GetView(key.Item1);
             if (view == null) continue;
             var def = GetDefinition(key.Item2);
             var go = Instantiate(def.attachedEffectPrefab, view.transform);

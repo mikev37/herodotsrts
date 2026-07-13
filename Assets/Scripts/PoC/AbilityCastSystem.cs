@@ -25,7 +25,7 @@ using UnityEngine;
 // charge was interrupted). Pure-spawn abilities (no modifiers) skip the field.
 //
 // NOT Burst-compiled: spawning is structural and reads the managed
-// AbilityManager / UnitManager registries — a handful of casts per tick.
+// AbilityManager / UnitFactory registries — a handful of casts per tick.
 // Ordered after CommandApplySystem so 0-charge casts fire the tick they
 // commit, and before BehaviorSystem like the old inline cast did.
 // ===========================================================================
@@ -99,20 +99,20 @@ public partial struct AbilityCastSystem : ISystem
             dir = math.normalizesafe(targetPos - casterPos, casterFwd);
         }
 
-        int team = em.HasComponent<Team>(caster) ? em.GetComponentData<Team>(caster).Value : 0;
+        int player = em.HasComponent<Player>(caster) ? em.GetComponentData<Player>(caster).Value : 0;
 
         // ---- optional spawn ----------------------------------------------------
         Entity spawned = Entity.Null;
-        if (spec.HasSpawn != 0 && def != null && def.spawnUnit != null && UnitManager.Instance != null)
+        if (spec.HasSpawn != 0 && def != null && def.spawnUnit != null && UnitFactory.Instance != null)
         {
-            var um = UnitManager.Instance;
-            int defId = um.GetDefId(team, def.spawnUnit);
+            var factory = UnitFactory.Instance;
+            int defId = factory.Roster.GetId(def.spawnUnit);
             if (defId >= 0)
             {
-                // Buildings snap + re-derive Y inside SpawnUnit; plain units
+                // Buildings snap + re-derive Y inside Create; plain units
                 // spawn at the terrain height under the point.
                 float y = hasTerrain ? NavTerrain.SampleHeight(terrain, targetPos) : 0f;
-                spawned = um.SpawnUnit(def.spawnUnit, defId, team, new float3(targetPos.x, y, targetPos.y));
+                spawned = factory.Create(def.spawnUnit, defId, player, new float3(targetPos.x, y, targetPos.y));
             }
         }
 
@@ -136,7 +136,7 @@ public partial struct AbilityCastSystem : ISystem
             {
                 FieldId = fieldId,
                 AbilityId = abilityId,
-                Team = team,
+                Player = player,
                 Affects = spec.Affects,
                 Shape = spec.Shape,
                 Radius = spec.Radius,

@@ -7,7 +7,7 @@ using Unity.Entities;
 //
 // Raw Entity values differ between worlds/clients/runs, so a recorded order like
 // "units 4,5,6 move here" must reference units by something stable. StableId is
-// assigned in spawn order (deterministic — see UnitManager's formation spawn), so
+// assigned in spawn order (deterministic — see UnitFactory.Create / MapBootstrap), so
 // id N is the same logical unit on every machine and in every replay.
 // ===========================================================================
 

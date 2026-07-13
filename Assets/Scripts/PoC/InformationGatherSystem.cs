@@ -55,8 +55,10 @@ public partial struct InformationGatherSystem : ISystem {
             ProjMap = projHash.Map,
             ProjCellSize = projHash.CellSize,
             CellType = SystemAPI.GetSingleton<ObstacleField>().CellType,
+            OccluderHeight = SystemAPI.GetSingleton<ObstacleField>().OccluderHeight,
             MoveLookup = SystemAPI.GetComponentLookup<MoveTarget>(true),
-            SearchCells = 2,            // global: how many hash cells out to perceive
+            SearchCells = 2,            // global: baseline hash cells to perceive (melee/short range)
+            MaxSearchCells = 8,         // global: cap on per-unit perception growth for long-range attackers
             ContactRadius = 6f,         // global: neighbors within this go into the ContactList
             FriendlyRadius = 8f,       // global: friendlies within this go into the FriendlyUnit buffer
             FriendlyCap = 16,           // global: max friendlies in the formation buffer (nearest kept, furthest dropped)
@@ -74,19 +76,21 @@ public partial struct InformationGatherSystem : ISystem {
         [ReadOnly] public NativeParallelMultiHashMap<int, UnitInfo> Map;
         [ReadOnly] public NativeParallelMultiHashMap<int, IncomingProjectile> ProjMap;
         [ReadOnly] public NativeArray<byte> CellType;
+        [ReadOnly] public NativeArray<float> OccluderHeight;
         [ReadOnly] public ComponentLookup<MoveTarget> MoveLookup;   // for a neighbor's FormationId
         public float CellSize, ContactRadius, FriendlyRadius, OutlierFactor, ClusterRadius;
         public float ProjCellSize;
         public float NoLosMultiplier, HeightGate;
-        public int SearchCells, LosRange, FriendlyCap;
+        public int SearchCells, MaxSearchCells, LosRange, FriendlyCap;
 
         private void Execute(
             Entity self,
             in LocalTransform xform,
-            in Team team,
+            in Player player,
             in UnitTuning meUnit,
             in Attack myAttack,
             in Defense myDefense,
+            in UnitRadius myRadius,
             in GroundSpeedMultiplier slope,
             in MoveTarget myMove,                       // self FormationId (0 = ungrouped)
             ref Perception perception,
@@ -94,6 +98,12 @@ public partial struct InformationGatherSystem : ISystem {
             DynamicBuffer<IncomingProjectile> incomingProjectiles) {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float myHeight = slope.Height;
+            float myEyeOffset = meUnit.EyeOffset;
+            // A shooter must never be occluded by its OWN footprint: skip sight
+            // cells within its inscribed radius (+1 cell margin). For a tower this
+            // covers its whole body so it sees enemies just past its own walls; for
+            // a unit (radius ~0.5) it's the default ~2-cell inner radius.
+            int selfSightSkip = math.max(2, (int)math.ceil(myRadius.Value / NavGrid.CellSize) + 1);
             float3 forward3 = math.forward(xform.Rotation);
             float2 myFacing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
 
@@ -121,8 +131,20 @@ public partial struct InformationGatherSystem : ISystem {
             float2 avgFacing = float2.zero, avgVelocity = float2.zero, movingVelocity = float2.zero;
             int movingCount = 0;
 
-            for (int offsetY = -SearchCells; offsetY <= SearchCells; offsetY++)
-                for (int offsetX = -SearchCells; offsetX <= SearchCells; offsetX++) {
+            // A ranged attacker must perceive at least as far as it can shoot,
+            // or a long-range tower would never see (and never fire on) targets
+            // inside its own range. Grow the hash-cell search to cover attackRange
+            // (in hash cells), clamped so the per-unit cost stays bounded. Melee /
+            // short-range units keep the cheap default.
+            int searchCells = SearchCells;
+            if (myAttack.isRange && myAttack.Range > 0f)
+            {
+                int need = (int)math.ceil(myAttack.Range / CellSize);
+                searchCells = math.clamp(math.max(SearchCells, need), SearchCells, MaxSearchCells);
+            }
+
+            for (int offsetY = -searchCells; offsetY <= searchCells; offsetY++)
+                for (int offsetX = -searchCells; offsetX <= searchCells; offsetX++) {
                     int key = ((cellX + offsetX) * 73856093) ^ ((cellY + offsetY) * 19349663);
                     if (!Map.TryGetFirstValue(key, out UnitInfo neighbor, out var iterator)) continue;
                     do {
@@ -130,18 +152,55 @@ public partial struct InformationGatherSystem : ISystem {
                         float distance = math.distance(position, neighbor.Position);
 
                         if (neighbor.IsBuilding)
-                            distance = math.max(0f, distance - neighbor.Radius);
+                            distance = CombatMath.DistanceToFootprint(position, neighbor.Position, neighbor.HalfExtents);
 
                         bool heightBlocked = !myAttack.isRange && !neighbor.IsBuilding &&
                                              math.abs(neighbor.Height - myHeight) > HeightGate;
 
+                        // 2.5D height-occlusion sight: a raised shooter (tower/parapet)
+                        // sees over lower walls; a ground unit behind one is blocked.
+                        // Buildings are large and always "seen" for targeting once in range.
+                        // The ray cap covers this unit's attack range (in nav cells) so a
+                        // long-range tower's sightline isn't truncated before the target.
+                        int sightCap = math.max(LosRange,
+                            myAttack.isRange ? (int)math.ceil(myAttack.Range / NavGrid.CellSize) : 0);
                         bool los = neighbor.IsBuilding ||
-                                   NavTerrain.LineOfSight(position, neighbor.Position, CellType, LosRange);
+                                   NavTerrain.SightLine(position, neighbor.Position,
+                                                        myHeight + myEyeOffset,
+                                                        neighbor.Height + neighbor.EyeOffset,
+                                                        OccluderHeight, sightCap, selfSightSkip);
                         float effectiveDist = los ? distance : distance + NoLosMultiplier;
-                        if (!neighbor.IsBuilding && !heightBlocked && effectiveDist <= ContactRadius)
-                            contacts.Add(neighbor);
+                        // Add to the ContactList (used for melee, separation, and
+                        // resolving an ordered building target). `distance` is already
+                        // the footprint-edge distance for a building, so both branches
+                        // use the same ContactRadius gate.
+                        if (!heightBlocked)
+                        {
+                            if (!neighbor.IsBuilding)
+                            {
+                                // Measure from MY edge (inscribed radius), not my
+                                // center: a large depot's center is farther from a
+                                // peasant than ContactRadius, so center-to-center a
+                                // castle could NEVER see adjacent harvesters and
+                                // never pulled their cargo. Edge-based, a unit at
+                                // any wall registers. (For a unit perceiver the
+                                // inset is its tiny body radius — same semantics.)
+                                if (effectiveDist - myRadius.Value <= ContactRadius) contacts.Add(neighbor);
+                            }
+                            else if (distance <= ContactRadius)
+                            {
+                                contacts.Add(neighbor);
+                            }
+                        }
 
-                        if (neighbor.Team != team.Value) {
+                        // Neutral (player -1) entities — rocks, trees, unowned
+                        // structures — are NOBODY's enemy: they must never enter the
+                        // enemies buffer, or every downstream consumer (threat
+                        // centroid, attack-nearby, kiting) treats terrain as a
+                        // hostile and units march into rocks. They stay in contacts
+                        // (separation / ordered resolution) above.
+                        if (neighbor.Player >= 0 &&
+                            neighbor.Player != player.Value && !neighbor.IsNonCombatant) {
                             if (effectiveDist > meUnit.PursueDistance && !myAttack.isRange)
                                 continue;
                             if (heightBlocked)
@@ -243,7 +302,7 @@ public partial struct InformationGatherSystem : ISystem {
                         int key = ((projCellX + offsetX) * 73856093) ^ ((projCellY + offsetY) * 19349663);
                         if (!ProjMap.TryGetFirstValue(key, out IncomingProjectile proj, out var pit)) continue;
                         do {
-                            if (proj.Team == team.Value) continue;
+                            if (proj.Player == player.Value) continue;
                             if (math.distance(position, proj.Position) > proj.HitRadius) continue;
                             incomingProjectiles.Add(proj);
                         }

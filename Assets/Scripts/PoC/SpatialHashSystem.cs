@@ -26,12 +26,11 @@ public partial struct SpatialHashSystem : ISystem
     [BurstCompile]
     public void OnCreate(ref SystemState state)
     {
-        // Create the singleton that holds the map.
         var e = state.EntityManager.CreateEntity();
         state.EntityManager.AddComponentData(e, new SpatialHash
         {
             Map = default,
-            CellSize = 12f,   // ~ a couple of unit-diameters; tune to your scale.
+            CellSize = 12f,
         });
         state.RequireForUpdate<UnitTag>();
     }
@@ -39,32 +38,33 @@ public partial struct SpatialHashSystem : ISystem
     [BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
-        var query = SystemAPI.QueryBuilder().WithAll<UnitTag, Team>().Build();
-        int count = query.CalculateEntityCount();   // upper bound (incl. dead) -> safe capacity
+        var query = SystemAPI.QueryBuilder().WithAll<UnitTag, Player>().Build();
+        int count = query.CalculateEntityCount();
 
         var hashRef = SystemAPI.GetSingletonRW<SpatialHash>();
         float cellSize = hashRef.ValueRO.CellSize;
 
-        // Rewindable allocator: auto-freed at end of frame, no manual Dispose.
         var map = new NativeParallelMultiHashMap<int, UnitInfo>(
             math.max(count, 1), state.WorldUpdateAllocator);
 
         var fill = new FillHashJob
         {
-            CellSize = cellSize,
-            Writer = map.AsParallelWriter(),
-            BuildingLk = SystemAPI.GetComponentLookup<BuildingTag>(true),
+            CellSize       = cellSize,
+            Writer         = map.AsParallelWriter(),
+            BuildingLk     = SystemAPI.GetComponentLookup<BuildingTag>(true),
+            NonCombatantLk = SystemAPI.GetComponentLookup<NonCombatant>(true),
+            ObstacleLk     = SystemAPI.GetComponentLookup<Obstacle>(true),
+            ContactDamageLk = SystemAPI.GetComponentLookup<ContactDamage>(true),
+            ConstructionLk = SystemAPI.GetComponentLookup<Construction>(true),
+            BlueprintLk = SystemAPI.GetComponentLookup<BlueprintTag>(true),
         };
-        // DETERMINISM: Schedule (single-thread), NOT ScheduleParallel. With a
-        // parallel fill, the order of values within each cell's bucket depends on
-        // which worker thread inserted first — OS scheduling, different every run.
-        // Five systems iterate GetValuesForKey in that order (Steering sums
-        // separation floats — non-associative; Targeting breaks ties by it;
-        // ContactCombat scans strikes/blocks in it), so parallel fill = lockstep
-        // and replay divergence. Single-threaded, insertion order = query chunk
-        // order, which is deterministic given identical archetype history.
-        // Hundreds of units make this job trivial; if profiling ever demands a
-        // parallel fill, consumers must sort each bucket (e.g. by StableId) first.
+        // DETERMINISM: Schedule (single-thread), NOT ScheduleParallel.
+        // With a parallel fill, bucket insertion order depends on OS thread
+        // scheduling — different every run. Five systems iterate GetValuesForKey
+        // in that order (separation sums are non-associative; targeting and
+        // contact-combat break ties by it), so parallel fill = lockstep / replay
+        // divergence. Single-threaded, insertion order = query chunk order =
+        // deterministic given identical archetype history.
         state.Dependency = fill.Schedule(state.Dependency);
 
         hashRef.ValueRW.Map = map;
@@ -76,41 +76,57 @@ public partial struct SpatialHashSystem : ISystem
     {
         public float CellSize;
         public NativeParallelMultiHashMap<int, UnitInfo>.ParallelWriter Writer;
-        [ReadOnly] public ComponentLookup<BuildingTag> BuildingLk;
+        [ReadOnly] public ComponentLookup<BuildingTag>   BuildingLk;
+        [ReadOnly] public ComponentLookup<NonCombatant>  NonCombatantLk;
+        [ReadOnly] public ComponentLookup<Obstacle>      ObstacleLk;
+        [ReadOnly] public ComponentLookup<ContactDamage> ContactDamageLk;
+        [ReadOnly] public ComponentLookup<Construction> ConstructionLk;
+        [ReadOnly] public ComponentLookup<BlueprintTag> BlueprintLk;
 
-        private void Execute(Entity entity, in LocalTransform xform, in Team team,
+        private void Execute(Entity entity, in LocalTransform xform, in Player player,
                              in Velocity velocity, in Mass mass, in Health health,
                              in Attack attack, in StableId stableId,
                              in UnitRadius radius, in GroundSpeedMultiplier slope,
                              in CombatStatus status, in CombatTarget target,
-                             in Defense defense, in UnitDefId defId)
+                             in Defense defense, in UnitDefId defId, in UnitTuning tuning)
         {
             float2 position = new float2(xform.Position.x, xform.Position.z);
             float3 forward3 = math.forward(xform.Rotation);
-            float2 facing = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
+            float2 facing   = math.normalizesafe(new float2(forward3.x, forward3.z), new float2(0f, 1f));
+
             Writer.Add(SpatialHashSystem.Hash(position, CellSize), new UnitInfo
             {
-                Entity = entity,
-                StableId = stableId.Value,
-                DefId = defId.Value,
-                Team = team.Value,
-                Position = position,
-                Height = slope.Height,
-                Velocity = velocity.Value,
-                Facing = facing,
-                Radius = radius.Value,
-                Mass = mass.Value,
-                Health = health.Current,
-                Damage = attack.Damage,
-                Armor = defense.Armor,
-                Shield = defense.Shield,
-                IsAttacking = status.IsAttacking,
-                AttackTarget = target.Has ? target.Info.Entity : Entity.Null,
-                StrikeDamage = attack.Pulse,
-                AttackRange = attack.Range,
-                StrikeArcDot = attack.ArcDot,
-                Cleave = attack.Cleave,
-                IsBuilding = BuildingLk.HasComponent(entity),
+                Entity          = entity,
+                StableId        = stableId.Value,
+                DefId           = defId.Value,
+                Player          = player.Value,
+                Position        = position,
+                Height          = slope.Height,
+                EyeOffset       = tuning.EyeOffset,
+                Velocity        = velocity.Value,
+                Facing          = facing,
+                Radius          = radius.Value,
+                Mass            = mass.Value,
+                Health          = health.Current,
+                Damage          = attack.Damage,
+                Armor           = defense.Armor,
+                Shield          = defense.Shield,
+                IsAttacking     = status.IsAttacking,
+                AttackTarget    = target.Has ? target.Info.Entity : Entity.Null,
+                StrikeDamage    = attack.Pulse,
+                // A scaffold's spikes aren't installed yet: under-construction
+                // entities publish ZERO contact damage to every reader.
+                ContactDamage   = (ConstructionLk.HasComponent(entity) || BlueprintLk.HasComponent(entity)) ? 0f
+                                : ContactDamageLk.HasComponent(entity) ? ContactDamageLk[entity].DamagePerSecond : 0f,
+                AttackRange     = attack.Range,
+                StrikeArcDot    = attack.ArcDot,
+                Cleave          = attack.Cleave,
+                IsBuilding      = BuildingLk.HasComponent(entity),
+                HalfExtents     = ObstacleLk.HasComponent(entity)
+                                    ? (float2)ObstacleLk[entity].Extents * (NavGrid.CellSize * 0.5f)
+                                    : float2.zero,
+                IsNonCombatant  = NonCombatantLk.HasComponent(entity),
             });
-        }    }
+        }
+    }
 }

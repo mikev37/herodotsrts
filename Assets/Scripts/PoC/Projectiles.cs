@@ -100,7 +100,7 @@ public partial struct ProjectileSystem : ISystem
                 Direction = math.normalizesafe(proj.Velocity, new float2(0f, 1f)),
                 Damage    = proj.Damage,
                 HitRadius = proj.HitRadius,
-                Team      = proj.Team,
+                Player    = proj.Player,
             });
         }
     }

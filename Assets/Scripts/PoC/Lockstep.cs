@@ -39,7 +39,7 @@ public struct SimChecksum : IComponentData { public uint Tick; public uint Value
 [BurstCompile]
 public static class LockstepHash
 {
-    public static uint Unit(float3 pos, float hp, float2 vel, int team, int stableId, byte navCtx)
+    public static uint Unit(float3 pos, float hp, float2 vel, int player, int stableId, byte navCtx)
     {
         uint a = math.hash(new uint4(
             math.asuint(pos.x),
@@ -48,9 +48,22 @@ public static class LockstepHash
             math.asuint(vel.x)));
         uint b = math.hash(new uint4(
             math.asuint(vel.y),
-            (uint)team,
+            (uint)player,
             (uint)stableId,
             navCtx));          // surface context — a roof/ground divergence shows here
+        return a ^ b;
+    }
+
+    // Folds a ResourceBank into the tick checksum — the single highest-value
+    // economy addition to live desync detection: money silently diverging
+    // between peers is the most catastrophic class of economy desync, and
+    // (unlike combat float drift) has no other tell until something can't be
+    // afforded on one peer but can on another. stableId keeps two entities that
+    // happen to hold identical amounts from being indistinguishable in the sum.
+    public static uint Bank(int gold, int wood, int food, byte paused, int stableId)
+    {
+        uint a = math.hash(new uint4((uint)gold, (uint)wood, (uint)food, (uint)stableId));
+        uint b = (uint)(paused == 0 ? 0x9E3779B9u : 0x85EBCA6Bu);   // cheap salt so Paused flips the sum
         return a ^ b;
     }
 }
@@ -247,6 +260,7 @@ public partial struct SimChecksumSystem : ISystem
             JobsUtility.ThreadIndexCount, state.WorldUpdateAllocator, NativeArrayOptions.ClearMemory);
 
         state.Dependency = new ChecksumJob { Partials = partials }.ScheduleParallel(state.Dependency);
+        state.Dependency = new BankChecksumJob { Partials = partials }.ScheduleParallel(state.Dependency);
 
         state.Dependency = new FinalizeJob
         {
@@ -269,13 +283,31 @@ public partial struct SimChecksumSystem : ISystem
             in LocalTransform xform,
             in Health health,
             in Velocity velocity,
-            in Team team,
+            in Player player,
             in StableId stableId,
             in NavContext navCtx)
         {
             Partials[_threadIndex] += LockstepHash.Unit(
                 xform.Position, health.Current, velocity.Value,
-                team.Value, stableId.Value, navCtx.Value);
+                player.Value, stableId.Value, navCtx.Value);
+        }
+    }
+
+    // Separate job for bank entities — they have no LocalTransform/Health/Velocity,
+    // so they can't share the unit job without requiring all those components.
+    // Runs after ChecksumJob; both feed into the same Partials array (thread-safe
+    // for the same reason: each thread writes only its own slot).
+    [BurstCompile]
+    private partial struct BankChecksumJob : IJobEntity
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<uint> Partials;
+        [NativeSetThreadIndex] private int _threadIndex;
+
+        private void Execute(in ResourceBank bank, in StableId stableId, in PlayerBankTag _)
+        {
+            Partials[_threadIndex] += LockstepHash.Bank(
+                bank.Amounts.Gold, bank.Amounts.Wood, bank.Amounts.Food,
+                bank.Paused, stableId.Value);
         }
     }
 

@@ -32,7 +32,7 @@ public class AICommander : Commander
 
     protected virtual void Tick()
     {
-        var mine = GetTeamUnits();
+        var mine = GetPlayerUnits();
         commandedUnits = mine.Count;
         if (mine.Count == 0) { lastDecision = "no units"; return; }
 
@@ -43,18 +43,18 @@ public class AICommander : Commander
         center /= valid;
 
         var entities = AllUnitsQuery.ToEntityArray(Allocator.Temp);
-        var teams = AllUnitsQuery.ToComponentDataArray<Team>(Allocator.Temp);
+        var players = AllUnitsQuery.ToComponentDataArray<Player>(Allocator.Temp);
         var xforms = AllUnitsQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
 
         Entity tgt = Entity.Null; float2 tgtPos = default; float bestD = float.MaxValue;
         for (int i = 0; i < entities.Length; i++)
         {
-            if (teams[i].Value == team) continue;
+            if (players[i].Value == player) continue;
             float2 p = new float2(xforms[i].Position.x, xforms[i].Position.z);
             float d = math.distancesq(center, p);
             if (d < bestD) { bestD = d; tgt = entities[i]; tgtPos = p; }
         }
-        entities.Dispose(); teams.Dispose(); xforms.Dispose();
+        entities.Dispose(); players.Dispose(); xforms.Dispose();
 
         if (tgt != Entity.Null) { IssueAttack(mine, tgt, tgtPos); lastDecision = $"attack {tgt.Index}"; }
         else lastDecision = "no enemies";

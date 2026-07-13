@@ -43,17 +43,24 @@ public partial struct ContactCombatSystem : ISystem
             KnockbackScale = 0.4f,   // global: knockback strength
             BodyContactScale = 1.2f, // global: bodies "touch" within (rA + rB) * this
             ImmobileLk = SystemAPI.GetComponentLookup<Immobile>(true),
+            ObstacleLk = SystemAPI.GetComponentLookup<Obstacle>(true),
             ProjLookup = SystemAPI.GetComponentLookup<Projectile>(false),
             Ecb = ecb,
         }.ScheduleParallel();
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(BlueprintTag))]   // blueprints are untargetable PLANS.
+    // NOTE: this job is the VICTIM side — each entity computes its own incoming
+    // damage from its neighbors' state. Scaffolds (Construction) MUST run here or
+    // they can't be hurt. Their OUTGOING damage is disarmed at the source instead:
+    // AttackTimerSystem (strike declaration) excludes them, and InfoGather zeroes
+    // their ContactDamage in the neighbor snapshot.
     private partial struct CombatJob : IJobEntity
     {
         public float Dt, ImpactScale, KnockbackScale, BodyContactScale;
         [ReadOnly] public ComponentLookup<Immobile> ImmobileLk;
+        [ReadOnly] public ComponentLookup<Obstacle> ObstacleLk;
 
         // Write Stale on hit projectiles. Race-safe: two threads writing true
         // simultaneously on the same projectile always produce true.
@@ -74,7 +81,7 @@ public partial struct ContactCombatSystem : ISystem
             in UnitRadius radius,
             in Mass mass,
             in Defense defense,
-            in Team team,
+            in Player player,
             DynamicBuffer<UnitInfo> contacts,
             DynamicBuffer<IncomingProjectile> incomingProjectiles)
         {
@@ -85,34 +92,73 @@ public partial struct ContactCombatSystem : ISystem
             float2 knockback = float2.zero;
             bool inContact = false;
 
+            // Am I a building? Decide first — it gates everything below. A building
+            // has no facing (no shield-arc/backstab; it takes damage FLAT) and is
+            // never rammed. selfHalf (my rectangular footprint) is only meaningful
+            // for a building victim, so compute it only then.
+            bool iAmBuilding = ImmobileLk.HasComponent(self);
+            float2 selfHalf = float2.zero;
+            if (iAmBuilding && ObstacleLk.HasComponent(self))
+                selfHalf = (float2)ObstacleLk[self].Extents * (NavGrid.CellSize * 0.5f);
+
             for (int i = 0; i < contacts.Length; i++)
             {
                 UnitInfo neighbor = contacts[i];
-                if (neighbor.Team == team.Value) continue;
+                if (neighbor.Player == player.Value) continue;
+                if (neighbor.IsNonCombatant) continue;   // nodes / neutral obstacles: never a combat source
 
-                float2 fromNeighbor = position - neighbor.Position;   // attacker -> me
+                float2 fromNeighbor = position - neighbor.Position;   // neighbor -> me
                 float distance = math.length(fromNeighbor);
                 if (distance < 1e-4f) { fromNeighbor = new float2(0.01f, 0f); distance = 0.01f; }
                 float2 normal = fromNeighbor / distance;
 
-                // --- BODY contact: ramming damage + knockback (radii-based) ---
+                // If I'm a building, measure the neighbor to my footprint EDGE (a
+                // rectangle), not my inscribed-circle radius, so a unit at my long
+                // wall counts as touching. Mobile units stay circular (selfHalf 0).
+                float edgeDist = iAmBuilding
+                    ? CombatMath.DistanceToFootprint(neighbor.Position, position, selfHalf)
+                    : distance;
                 float bodyRange = (radius.Value + neighbor.Radius) * BodyContactScale;
-                if (distance <= bodyRange)
+                bool touching = edgeDist <= bodyRange;
+                if (touching) inContact = true;
+
+                // --- RAMMING: mobile-vs-mobile only (mass × closing speed) --------
+                // Skipped when EITHER side is a building. A building never rams and
+                // is never rammed: a unit walking up to a wall must not be flung
+                // away, and a crowd milling by a wall must not chip it. Structures
+                // are solid obstacles the nav grid routes around; steering/separation
+                // keeps units off them. Damage to/from a building is ONLY the melee
+                // strike and contact-damage paths below.
+                if (touching && !iAmBuilding && !neighbor.IsBuilding)
                 {
-                    inContact = true;
                     float closing = math.max(0f, math.dot(neighbor.Velocity - velocity.Value, -normal));
                     float impact = neighbor.Mass * closing;
                     incoming += ImpactScale * impact * Dt;
                     knockback += normal * (impact * KnockbackScale / mass.Value);
                 }
 
-                // --- MELEE strike: lands by the attacker's DECLARED state ---
-                // Single-target: I am the unit the attacker committed to. Cleave:
-                // anyone inside the attacker's strike arc. Both require being
-                // within weapon reach and an unblocked line (first body in the
-                // way eats a long weapon's hit instead of everyone behind it).
-                if (neighbor.StrikeDamage > 0f &&
-                    distance <= neighbor.AttackRange + bodyRange)
+                // --- CONTACT DAMAGE: a spiked/palisade body I'm touching ----------
+                // Any touching enemy that carries ContactDamage deals it per second
+                // while in contact — no order, no facing. A palisade's spikes are
+                // just ContactDamage > 0; there's no separate "spike" concept. Applies
+                // to a building neighbor (palisade) or a thorned unit alike; a building
+                // victim still takes none itself (it isn't the one with the value here).
+                if (touching && neighbor.ContactDamage > 0f)
+                {
+                    incoming += iAmBuilding
+                        ? CombatMath.MitigateFlat(neighbor.ContactDamage * Dt, defense.Armor)
+                        : CombatMath.Mitigate(neighbor.ContactDamage * Dt, myFacing, -normal,
+                                              defense.Armor, defense.Shield);
+                }
+
+                // --- MELEE strike: lands by the attacker's DECLARED state ---------
+                // Single-target: I'm the unit it committed to. Cleave: anyone in its
+                // strike arc. Both need weapon reach and an unblocked line. If the
+                // attacker is a building (palisade/tower), its reach starts at its
+                // own footprint edge (HalfExtents).
+                float attackerReach = neighbor.AttackRange + bodyRange
+                    + math.max(neighbor.HalfExtents.x, neighbor.HalfExtents.y);
+                if (neighbor.StrikeDamage > 0f && edgeDist <= attackerReach)
                 {
                     bool targeted = neighbor.AttackTarget == self;
                     bool cleaved = neighbor.Cleave &&
@@ -120,8 +166,10 @@ public partial struct ContactCombatSystem : ISystem
                     if ((targeted || cleaved) &&
                         !StrikeBlocked(position, neighbor, self, radius.Value, contacts))
                     {
-                        incoming += CombatMath.Mitigate(neighbor.StrikeDamage, myFacing, -normal,
-                                                        defense.Armor, defense.Shield);
+                        incoming += iAmBuilding
+                            ? CombatMath.MitigateFlat(neighbor.StrikeDamage, defense.Armor)
+                            : CombatMath.Mitigate(neighbor.StrikeDamage, myFacing, -normal,
+                                                  defense.Armor, defense.Shield);
                     }
                 }
             }
@@ -138,8 +186,10 @@ public partial struct ContactCombatSystem : ISystem
                 projComp.Stale = true;
                 ProjLookup[proj.Entity] = projComp;
 
-                incoming += CombatMath.Mitigate(proj.Damage, myFacing, -proj.Direction,
-                                                defense.Armor, defense.Shield);
+                incoming += iAmBuilding
+                    ? CombatMath.MitigateFlat(proj.Damage, defense.Armor)
+                    : CombatMath.Mitigate(proj.Damage, myFacing, -proj.Direction,
+                                          defense.Armor, defense.Shield);
             }
 
             status.InContactWithEnemy = inContact;
@@ -175,7 +225,7 @@ public partial struct ContactCombatSystem : ISystem
             {
                 UnitInfo body = contacts[i];
                 if (body.Entity == self || body.Entity == attacker.Entity) continue;
-                if (body.Team == attacker.Team) continue;
+                if (body.Player == attacker.Player) continue;
                 float2 toBody = body.Position - attacker.Position;
                 float t = math.dot(toBody, line) / lineLengthSq;     // position along attacker->me
                 if (t <= 0.1f || t >= 0.9f) continue;                 // must be BETWEEN, not at an endpoint

@@ -1,0 +1,79 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fabe54d3493da3645874e32c38b40900, type: 3}
+  m_Name: Peasant
+  m_EditorClassIdentifier: 
+  displayName: Unit
+  viewPrefab: {fileID: 7923573935776784043, guid: 95874b1e1779b0e47ae200d984bace8b, type: 3}
+  speed: 4
+  radius: 0.5
+  mass: 1
+  turnSpeed: 6
+  separationStrength: 8
+  combatSpacing: 1.3
+  idleSpacing: 2.2
+  maxHealth: 100
+  deathAnimSeconds: 2
+  armor: 0
+  shield: 0
+  receivesAbilities: 1
+  attackInterval: 1
+  attackCooldown: 0
+  attackDamage: 18
+  meleeCleave: 0
+  meleeStrikeArc: 120
+  meleeRange: 1.2
+  isRanged: 0
+  projectile: {fileID: 0}
+  attackRange: 10
+  eyeOffset: 1.5
+  isHero: 0
+  maxMana: 100
+  manaRegen: 2
+  abilities:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  prodCostGold: 0
+  prodCostWood: 0
+  prodCostFood: 50
+  productionTime: 8
+  foodCost: 0
+  buildPower: 10
+  buildRange: 2.5
+  builds:
+  - {fileID: 11400000, guid: ff0be7765ce5ea14b973e65a545c1bd1, type: 2}
+  - {fileID: 11400000, guid: 9f3043742b1314e4bb411da65466ccf0, type: 2}
+  - {fileID: 11400000, guid: 3ad0e168a66f5314a8f67d23e9063fac, type: 2}
+  - {fileID: 11400000, guid: 9536a728d5090204385f52f2ff8a3301, type: 2}
+  - {fileID: 11400000, guid: c43c81611863ac4499c23986e5faff75, type: 2}
+  harvestRate: 5
+  carryCapacity: 50
+  reacquireRange: 40
+  depositRange: 2.5
+  depositRate: 0
+  isHauler: 0
+  icon: {fileID: 0}
+  morphEffectPrefab: {fileID: 0}
+  morphTarget: {fileID: 0}
+  morphTicks: 30
+  upgrades: []
+  attackNearbyRange: 8
+  avoidMeleeRange: 6
+  retreatHealthFraction: 0.25
+  pursueDistance: 40
+  cohesionRadius: 20
+  frontPriority: 0
+  looseness: 0
+  aggression: 1
+  formationSpacing: 3

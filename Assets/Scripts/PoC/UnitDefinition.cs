@@ -2,7 +2,7 @@ using UnityEngine;
 
 // ===========================================================================
 // THE SINGLE SOURCE OF TRUTH for a unit. Stats, the view/projectile prefabs,
-// per-unit tuning, and behavior toggles all live here. At spawn the UnitManager
+// per-unit tuning, and behavior toggles all live here. At spawn UnitFactory.Create
 // copies these onto the entity (stats + a UnitTuning component + a BehaviorFlags
 // bitmask). Add a unit = make one of these and drop it in the manager roster.
 //
@@ -66,6 +66,10 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Projectile this unit fires (defines speed, arc, view). Required if isRanged.")]
     public ProjectileDefinition projectile;
     public float attackRange = 10f;
+    [Tooltip("Sight/shoot eye height above this unit's own surface. A tower with a tall eyeOffset " +
+             "(set it above the building's own occluderHeight) sees and fires OVER lower walls; a ground " +
+             "soldier uses a small offset. This is what lets a raised shooter clear a nearby parapet.")]
+    public float eyeOffset = 1.5f;
 
     [Header("Hero")]
     [Tooltip("If set, this unit is spawned as a hero (gets HeroTag). It's a normal unit " +
@@ -82,6 +86,66 @@ public class UnitDefinition : ScriptableObject
     [Tooltip("Abilities this unit can cast. When a selection is ordered to cast, the " +
              "selected unit with the MOST abilities is the caster.")]
     public AbilityDefinition[] abilities = new AbilityDefinition[4];
+
+    [Header("Economy — production cost")]
+    [Tooltip("Resources drawn from the player bank, pay-as-you-build, when this unit is queued.")]
+    public int prodCostGold = 0, prodCostWood = 0, prodCostFood = 0;
+    [Tooltip("Ticks to complete production at a building (multiplied by tick rate).")]
+    public float productionTime = 5f;
+    [Tooltip("Food consumed while this unit is alive (population cap cost).")]
+    public int foodCost = 0;
+
+    [Header("Economy — builder")]
+    [Tooltip("Build power contributed per tick to adjacent scaffolds. >0 = this unit is a builder.")]
+    public float buildPower = 0f;
+    [Tooltip("How far from a site's footprint EDGE this builder can work (world units). Also the " +
+             "arrival distance that converts a blueprint into a scaffold.")]
+    public float buildRange = 2.5f;
+    [Tooltip("Buildings this unit (as a builder) can place. Drives the in-game build menu keys.")]
+    public System.Collections.Generic.List<BuildingDefinition> builds = new();
+
+    [Header("Economy — harvester / hauler")]
+    [Tooltip("Resources gathered PER SECOND while in contact with a node (fractional ok — 0.5 = one " +
+             "resource every 2s). Accrued per lockstep tick; whole units transfer when the accumulator " +
+             "reaches 1. 0 = cannot harvest.")]
+    public float harvestRate = 0f;
+    [Tooltip("Cargo capacity — used by BOTH a harvester (return-to-depot when full) and a hauler/ox " +
+             "cart (how much of the colony's holdings one trip carries).")]
+    public int carryCapacity = 0;
+
+    [Tooltip("When this harvester's node runs dry, it auto-targets the nearest node of the SAME type " +
+             "within this range (world units, measured from where it stands — i.e. at the drained node). " +
+             "Nothing in range = it idles and waits for orders. 0 = unlimited search.")]
+    public float reacquireRange = 40f;
+
+    [Tooltip("How close to a depot's footprint EDGE (world units) this harvester must be to unload.")]
+    public float depositRange = 2.5f;
+
+    [Tooltip("Unload speed at the depot, resources PER SECOND. 0 = use harvestRate (symmetric).")]
+    public float depositRate = 0f;
+
+    [Header("Economy — hauler")]
+    [Tooltip("A hauler carries a colony's holdings to the nearest capital then is destroyed. Free to sustain (foodCost should be 0).")]
+    public bool isHauler = false;
+
+    [Header("UI")]
+    [Tooltip("Icon shown in build/produce menus, progress bar, and queue strip.")]
+    public Sprite icon;
+
+    [Tooltip("One-shot VFX spawned (unparented, at the unit's transform) when this unit is the RESULT " +
+             "of a morph/upgrade — so a Keep→Castle, a siege tank deploying, and a Knight→Paladin can each " +
+             "have their own effect. Null = no effect. Should self-destruct.")]
+    public GameObject morphEffectPrefab;
+
+    [Header("Morph (free toggle — e.g. siege/unsiege, building settles into unit)")]
+    [Tooltip("The OTHER form this unit toggles to (siege/unsiege, etc.). Null = cannot morph. G key triggers it.")]
+    public UnitDefinition morphTarget;
+    [Tooltip("Transition duration in ticks.")]
+    public int morphTicks = 30;
+
+    [Header("Upgrade (one-way, paid — e.g. Knight → Paladin via a TechDefinition)")]
+    [Tooltip("Forms this unit can upgrade INTO. Cost + time come from the target's own costGold/Wood/Food + buildTime.")]
+    public System.Collections.Generic.List<UnitDefinition> upgrades = new();
 
 
     [Header("Behavior ranges")]

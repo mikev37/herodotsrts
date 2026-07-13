@@ -6,7 +6,7 @@ using Unity.Entities;
 // ===========================================================================
 
 // Stable handle from an entity back to its UnitDefinition (= index in the
-// UnitManager roster). Replaces the old hand-authored viewTypeId; the manager
+// RosterDefinition asset). Replaces the old hand-authored viewTypeId; the manager
 // uses it to find the view prefab, so the visual link can't drift.
 public struct UnitDefId : IComponentData { public int Value; }
 
@@ -27,6 +27,7 @@ public struct UnitTuning : IComponentData
     public float PursueDistance;      // AdvanceIndividual/AdvanceOnEnemy contribute only within this range
 	public float CohesionRadius;      // GroupCohesion activates beyond this distance from friendly center
     public float RetreatTime;         // Time to retreat from enemies when hit and below X health
+    public float EyeOffset;           // sight/shoot eye height above surface (raised shooters see over walls)
 }
 
 // Unified attack: ONE countdown->act->cooldown timer for both melee and ranged.
