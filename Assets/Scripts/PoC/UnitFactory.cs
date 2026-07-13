@@ -390,7 +390,7 @@ public class UnitFactory : MonoBehaviour
         }
         if (def.buildPower > 0f)
         {
-            _em.AddComponentData(e, new BuildPower { Value = def.buildPower });
+            _em.AddComponentData(e, new BuildPower { Value = def.buildPower, Range = math.max(0.5f, def.buildRange) });
             _em.AddComponentData(e, new BuildSignal { LastTick = 0 });
         }
         if (def.harvestRate > 0f && def.carryCapacity > 0)   // a HARVESTER: can gather AND carry.

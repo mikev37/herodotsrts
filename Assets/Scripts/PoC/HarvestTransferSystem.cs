@@ -59,7 +59,16 @@ public partial struct HarvestTransferSystem : ISystem
                 var h = contacts[i].Entity;
                 if (!TaskLk.HasComponent(h) || !BankLk.HasComponent(h)) continue;
                 var t = TaskLk[h];
-                if (t.NodeStableId != nodeSid.Value) continue;            // not targeting me
+                if (t.NodeStableId != nodeSid.Value)
+                {
+                    // ADOPTION: a harvester heading for a same-type node that bumps
+                    // into ME harvests ME instead — merged tree-blobs made the
+                    // ordered tree unreachable while the peasant ground against its
+                    // neighbors forever.
+                    if (t.Phase == HarvestPhase.ToNode && t.Carrying == node.Yield && avail > 0)
+                        t.NodeStableId = nodeSid.Value;
+                    else continue;                                        // not targeting me
+                }
                 if (t.Phase != HarvestPhase.ToNode && t.Phase != HarvestPhase.Gathering) continue;
 
                 // carrying a DIFFERENT type already? deliver it before taking a new one (single-type carts)

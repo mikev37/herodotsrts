@@ -276,10 +276,25 @@ public abstract class Commander : MonoBehaviour
         lastOrder = "Toggle bank pause";
     }
 
-    protected void IssuePlaceBlueprint(int defId, float2 pos)
+    protected void IssuePlaceBlueprint(int defId, float2 pos, List<Entity> builders = null)
     {
+        _selection.Clear();
+        if (builders != null)
+            foreach (var e in builders)
+                if (Em.HasComponent<StableId>(e)) _selection.Add(Em.GetComponentData<StableId>(e).Value);
         Issue(CommandKind.PlaceBlueprint, pos, defId, 0);
         lastOrder = $"Blueprint def {defId} @ {pos}";
+    }
+
+    // Order builders onto a specific blueprint/scaffold (right-click it, or AI).
+    protected void IssueBuild(List<Entity> builders, int siteStableId)
+    {
+        if (builders == null || builders.Count == 0) return;
+        _selection.Clear();
+        foreach (var e in builders)
+            if (Em.HasComponent<StableId>(e)) _selection.Add(Em.GetComponentData<StableId>(e).Value);
+        Issue(CommandKind.Build, default, siteStableId, 0);
+        lastOrder = $"Build site {siteStableId}";
     }
 
     protected void IssueToggleProducerLoop(int buildingStableId)

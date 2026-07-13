@@ -43,4 +43,13 @@ public struct BankRequest : IBufferElementData
 }
 
 // One grouped grant/income. Folded (summed) into Amounts.
-public struct BankDeposit : IBufferElementData { public ResourceAmount Amount; }
+public struct BankDeposit : IBufferElementData
+{
+    public ResourceAmount Amount;
+    public byte Purpose;   // SpendClass of the request this pays (Transfer for plain income).
+                           // Producer*/Construction* deposits are consumed ONLY by
+                           // ProductionSystem/ConstructionSystem; BankJob takes the rest —
+                           // a depot+producer castle otherwise ate its own production
+                           // payments into stores and the intake looped them back to the
+                           // player bank forever.
+}

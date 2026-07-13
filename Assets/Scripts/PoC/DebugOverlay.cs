@@ -76,11 +76,12 @@ public class DebugOverlay : MonoBehaviour
     private Vector2Int _selCell;
     // Selected-unit ECONOMY readout (harvest/haul phase, cargo, and any bank on it).
     private bool _selHasHarvest, _selHasHaul, _selHasBank;
-    private string _selHarvestPhase, _selHaulPhase;
+    private string _selHarvestPhase, _selHaulPhase, _selHarvestType;
     private float _selHaulTimer;
     private int _selDeposits = -1, _selRequests = -1;   // bank buffer lengths (-1 = no buffer)
     private int _selProdQueue = -1;                      // ProductionItem count (-1 = not a producer)
     private string _selProdInfo;                          // head paid/cost/progress readout
+    private string _selConstrInfo;                        // construction progress/paid readout
     private int _selCargoG, _selCargoW, _selCargoF;
     private int _selBankG, _selBankW, _selBankF;
     private int _selHarvestNode = -1;
@@ -300,6 +301,7 @@ public class DebugOverlay : MonoBehaviour
                 var ht = _em.GetComponentData<HarvestTask>(entities[i]);
                 _selHarvestPhase = ht.Phase.ToString();
                 _selHarvestNode = ht.NodeStableId;
+                _selHarvestType = ht.Carrying.ToString();
             }
             _selHasHaul = _em.HasComponent<HaulTask>(entities[i]);
             if (_selHasHaul)
@@ -314,6 +316,18 @@ public class DebugOverlay : MonoBehaviour
             _selDeposits = _em.HasBuffer<BankDeposit>(entities[i]) ? _em.GetBuffer<BankDeposit>(entities[i]).Length : -1;
             _selRequests = _em.HasBuffer<BankRequest>(entities[i]) ? _em.GetBuffer<BankRequest>(entities[i]).Length : -1;
             _selProdQueue = _em.HasBuffer<ProductionItem>(entities[i]) ? _em.GetBuffer<ProductionItem>(entities[i]).Length : -1;
+
+            // Construction site: progress + what's been paid so far.
+            _selConstrInfo = null;
+            if (_em.HasComponent<BlueprintTag>(entities[i]))
+                _selConstrInfo = "Blueprint (plan) — awaiting a tasked builder in range";
+            else if (_em.HasComponent<Construction>(entities[i]))
+            {
+                var cst = _em.GetComponentData<Construction>(entities[i]);
+                float pct = cst.BuildTime > 0f ? 100f * cst.Progress / cst.BuildTime : 0f;
+                _selConstrInfo = $"Constr {pct:0}%  paid G{cst.Paid.Gold}/{cst.Cost.Gold} " +
+                                 $"W{cst.Paid.Wood}/{cst.Cost.Wood} F{cst.Paid.Food}/{cst.Cost.Food}";
+            }
 
             // Production head: what's actually paid and how far along the build is
             // (a producer has NO bank — its escrow lives on the queue item).
@@ -450,13 +464,15 @@ public class DebugOverlay : MonoBehaviour
 
             // Economy state (only shown when the selected unit has it).
             if (_selHasHarvest)
-                Line($"Harvest: {_selHarvestPhase}  node:{_selHarvestNode}");
+                Line($"Harvest: {_selHarvestPhase}  node:{_selHarvestNode}  type:{_selHarvestType}");
             if (_selHasHaul)
                 Line($"Haul: {_selHaulPhase} t:{_selHaulTimer:0.00}");
             if (_selDeposits >= 0 || _selRequests >= 0 || _selProdQueue >= 0)
                 Line($"dep:{_selDeposits} req:{_selRequests} prodQ:{_selProdQueue}");
             if (_selProdInfo != null)
                 Line(_selProdInfo);
+            if (_selConstrInfo != null)
+                Line(_selConstrInfo);
             if (_selHasBank)
                 Line($"Bank Σ G:{_selBankG} W:{_selBankW} F:{_selBankF} ({_selCount} sel)");
         }

@@ -46,13 +46,22 @@ MonoBehaviour:
   - {fileID: 0}
   prodCostGold: 0
   prodCostWood: 0
-  prodCostFood: 1
+  prodCostFood: 50
   productionTime: 8
   foodCost: 0
-  buildPower: 0
-  builds: []
+  buildPower: 10
+  buildRange: 2.5
+  builds:
+  - {fileID: 11400000, guid: ff0be7765ce5ea14b973e65a545c1bd1, type: 2}
+  - {fileID: 11400000, guid: 9f3043742b1314e4bb411da65466ccf0, type: 2}
+  - {fileID: 11400000, guid: 3ad0e168a66f5314a8f67d23e9063fac, type: 2}
+  - {fileID: 11400000, guid: 9536a728d5090204385f52f2ff8a3301, type: 2}
+  - {fileID: 11400000, guid: c43c81611863ac4499c23986e5faff75, type: 2}
   harvestRate: 5
   carryCapacity: 50
+  reacquireRange: 40
+  depositRange: 2.5
+  depositRate: 0
   isHauler: 0
   icon: {fileID: 0}
   morphEffectPrefab: {fileID: 0}

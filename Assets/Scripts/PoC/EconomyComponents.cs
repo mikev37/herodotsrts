@@ -15,7 +15,7 @@ public struct PlayerBankTag : IComponentData { }
 public struct NodeTag : IComponentData { public ResourceType Yield; public byte DespawnWhenEmpty; public float HuskLinger; }
 
 // builder capability (>0 = builder)
-public struct BuildPower : IComponentData { public float Value; }
+public struct BuildPower : IComponentData { public float Value; public float Range; }
 
 // harvester round-trip (no Amounts writes here; all transfers via the bank job)
 public enum HarvestPhase : byte { Idle, ToNode, Gathering, ToDepot, Depositing }
@@ -38,13 +38,15 @@ public struct HarvestTask : IComponentData
 // also the exact refund on voluntary cancel.
 public struct Construction : IComponentData
 {
-    public float          Progress;          // in build-ticks
-    public float          BuildTime;          // total build-ticks (fixed timestep; no Dt)
-    public ResourceAmount Cost;               // TOTAL cost
-    public ResourceAmount Paid;               // cumulative consumed == cancel refund
+    public float          Progress;          // in SECONDS of accumulated work (power × Dt)
+    public float          BuildTime;         // authored buildTime, seconds ÷ total buildPower
+    public ResourceAmount Cost;              // TOTAL cost
+    public ResourceAmount Paid;              // cumulative consumed == cancel refund
+    public ResourceAmount InFlight;          // requested but not yet arrived (prevents double-billing)
+    public float          InFlightT;         // ticks until stale in-flight expires
     public float          HealthPerProgress;
-    public float          SelfPower;          // >0 = builds itself with no worker (Protoss-style), stacks with builders
-    public int            SacrificeDefId;     // >=0: gate progress until a unit of this def arrives & is consumed; else -1
+    public float          SelfPower;         // >0 = builds itself with no worker (Protoss-style), stacks with builders
+    public int            SacrificeDefId;    // >=0: gate progress until a unit of this def arrives & is consumed; else -1
 }
 
 // Player toggle: HIGH-priority builds/producers win bank contention over LOW ones
@@ -95,6 +97,8 @@ public struct ProductionItem : IBufferElementData
     public float          BuildTime;          // total build-ticks
     public ResourceAmount Cost;
     public ResourceAmount Paid;               // cumulative consumed == cancel refund
+    public ResourceAmount InFlight;           // requested but not yet arrived (prevents double-billing)
+    public float          InFlightT;          // ticks until stale in-flight expires (short-funded bank re-ask)
     public byte           Loop;
 }
 

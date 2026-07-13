@@ -45,13 +45,21 @@ public partial struct ResourceBankSystem : ISystem
                              ref DynamicBuffer<BankDeposit> deposits, ref DynamicBuffer<BankRequest> requests)
         {
             // income
-            for (int i = 0; i < deposits.Length; i++)
+            for (int i = deposits.Length - 1; i >= 0; i--)
             {
+                // Producer/Construction installments belong to ProductionSystem /
+                // ConstructionSystem — leave them in the mailbox. Consuming them
+                // here (a depot+producer castle) stole production's money into
+                // stores, and the intake looped it back to the player bank forever.
+                byte p = deposits[i].Purpose;
+                if (p == (byte)SpendClass.ProducerHigh || p == (byte)SpendClass.ProducerLow ||
+                    p == (byte)SpendClass.ConstructionHigh || p == (byte)SpendClass.ConstructionLow) continue;
+
                 bank.Amounts += deposits[i].Amount;
                 for (int r = 0; r < ResourceAmount.Count; r++)
                     if (bank.Capacity[r] > 0 && bank.Amounts[r] > bank.Capacity[r]) bank.Amounts[r] = bank.Capacity[r];
+                deposits.RemoveAt(i);
             }
-            deposits.Clear();
 
             int n = requests.Length;
             if (n == 0) return;
@@ -75,7 +83,7 @@ public partial struct ResourceBankSystem : ISystem
                 if (!give.Any) continue;
                 if (!Registry.TryGetValue(req.RequesterStableId, out Entity to)) continue;   // recipient gone -> drop
                 bank.Amounts -= give;
-                Ecb.AppendToBuffer(sortKey, to, new BankDeposit { Amount = give });
+                Ecb.AppendToBuffer(sortKey, to, new BankDeposit { Amount = give, Purpose = req.Class });
             }
             sorted.Dispose();
         }

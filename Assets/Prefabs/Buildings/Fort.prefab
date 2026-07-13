@@ -270,6 +270,7 @@ GameObject:
   - component: {fileID: 6952790459548412725}
   - component: {fileID: 2405841735622363541}
   - component: {fileID: 6675730526476798380}
+  - component: {fileID: 462437236041684411}
   m_Layer: 0
   m_Name: Fort
   m_TagString: Untagged
@@ -365,6 +366,20 @@ MonoBehaviour:
   playerColor: {fileID: 0}
   autoTintAllRenderers: 0
   HP: 0
+--- !u!114 &462437236041684411
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4735678258241096891}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d88e8f4c660765143aa3a5a2f6a018bd, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  riser: {fileID: 4967691736124107324}
+  Progress01: 0
 --- !u!1 &8647000965107062816
 GameObject:
   m_ObjectHideFlags: 0

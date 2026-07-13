@@ -40,6 +40,48 @@ public class UnitViewManager : MonoBehaviour
     private readonly Dictionary<UnitView, long> _poolKeyOf = new(); // composite pool key, for release
     private readonly Dictionary<Entity, GameObject> _rallyMarkers = new();   // view-only rally flags
     private static readonly List<Entity> _rallyDead = new();
+    [Tooltip("Optional: material blueprints (plans) render with — assign a transparent material here. " +
+             "Unset = a translucent tint is applied via property block (shader-dependent).")]
+    public Material blueprintMaterial;
+
+    private readonly HashSet<UnitView> _tinted = new();   // views currently plan-tinted
+    private readonly Dictionary<Renderer, Material[]> _planOriginals = new();
+    private static readonly int _colorId = Shader.PropertyToID("_Color");
+    private static readonly int _baseColorId = Shader.PropertyToID("_BaseColor");
+
+    private void ApplyPlanTint(UnitView view, bool plan)
+    {
+        var c = new Color(0.55f, 0.8f, 1f, 0.45f);
+        foreach (var r in view.GetComponentsInChildren<Renderer>())
+        {
+            if (plan)
+            {
+                if (blueprintMaterial != null)
+                {
+                    if (!_planOriginals.ContainsKey(r))
+                    {
+                        _planOriginals[r] = r.sharedMaterials;
+                        var mats = new Material[r.sharedMaterials.Length];
+                        for (int m = 0; m < mats.Length; m++) mats[m] = blueprintMaterial;
+                        r.sharedMaterials = mats;
+                    }
+                }
+                else
+                {
+                    var mpb = new MaterialPropertyBlock();
+                    r.GetPropertyBlock(mpb);
+                    mpb.SetColor(_colorId, c); mpb.SetColor(_baseColorId, c);
+                    r.SetPropertyBlock(mpb);
+                }
+            }
+            else
+            {
+                if (_planOriginals.TryGetValue(r, out var orig)) { r.sharedMaterials = orig; _planOriginals.Remove(r); }
+                r.SetPropertyBlock(null);   // restore original material state
+            }
+        }
+        if (plan) _tinted.Add(view); else _tinted.Remove(view);
+    }
     private readonly List<Entity> _toRemove = new();
 
     private void Awake() { Instance = this; }
@@ -108,6 +150,10 @@ public class UnitViewManager : MonoBehaviour
             t.rotation = xforms[i].Rotation;
             view.Apply(anims[i].State);
             view.setHP(hps[i].Current);
+
+            // Blueprints render as faded PLANS; the tint clears on conversion.
+            bool isPlan = _em.HasComponent<BlueprintTag>(e);
+            if (isPlan || _tinted.Contains(view)) ApplyPlanTint(view, isPlan);
 
             // economy view pushes (optional components on the prefab)
             var rv = view.GetComponent<ResourceView>();

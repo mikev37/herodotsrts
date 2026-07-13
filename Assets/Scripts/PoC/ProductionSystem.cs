@@ -57,10 +57,16 @@ public partial struct ProductionSystem : ISystem
             if (queue.Length > 0)
             {
                 var h = queue[0];
-                for (int i = 0; i < deposits.Length; i++) h.Paid += deposits[i].Amount;
+                for (int i = deposits.Length - 1; i >= 0; i--)
+                {
+                    byte pu = deposits[i].Purpose;
+                    if (pu != (byte)SpendClass.ProducerHigh && pu != (byte)SpendClass.ProducerLow) continue;
+                    h.Paid += deposits[i].Amount;
+                    h.InFlight = ResourceAmount.Max0(h.InFlight - deposits[i].Amount);   // payment landed
+                    deposits.RemoveAt(i);
+                }
                 queue[0] = h;
             }
-            deposits.Clear();
             if (queue.Length == 0) continue;
 
             int p = player.Value, sid = sidRef.Value;
@@ -83,9 +89,10 @@ public partial struct ProductionSystem : ISystem
             if (head.Progress >= head.BuildTime)
             {
                 queue[0] = head;
-                float2 rp = rally.Has != 0 ? rally.Value : new float2(xf.Position.x, xf.Position.z);
+                float3 door = Entrance(xf, SystemAPI.GetComponent<Obstacle>(e));
+                float2 rp = rally.Has != 0 ? rally.Value : new float2(door.x, door.z);
                 toSpawn.Add(new SpawnReq { Player = p, DefId = head.UnitDefId,
-                                           Pos = Entrance(xf, SystemAPI.GetComponent<Obstacle>(e)),
+                                           Pos = door,
                                            Rally = rp, Loop = head.Loop, Producer = e, IsHauler = false });
                 queue.RemoveAt(0);
                 continue;
@@ -104,14 +111,19 @@ public partial struct ProductionSystem : ISystem
                     Gold = math.min(head.Cost.Gold, (int)math.ceil(head.Cost.Gold * frac)),
                     Wood = math.min(head.Cost.Wood, (int)math.ceil(head.Cost.Wood * frac)),
                     Food = math.min(head.Cost.Food, (int)math.ceil(head.Cost.Food * frac)) };
-                var deficit = ResourceAmount.Max0(required - head.Paid);
+                var deficit = ResourceAmount.Max0(required - head.Paid - head.InFlight);
                 if (deficit.Any)
                 {
                     byte high = PrioLk.HasComponent(e) ? PrioLk[e].High : (byte)0;
                     ecb.AppendToBuffer(bank, new BankRequest {
                         Amount = deficit, RequesterStableId = sid,
                         Class = (byte)(high != 0 ? SpendClass.ProducerHigh : SpendClass.ProducerLow), CastTick = 0 });
+                    head.InFlight += deficit;   // don't re-bill while the payment travels
+                    head.InFlightT = 6f;        // > the 2-tick request->deposit latency
                 }
+                // A short-funded bank pays less than asked; expire the stale
+                // in-flight so the shortfall gets re-requested once funds exist.
+                if (head.InFlight.Any && (head.InFlightT -= 1f) <= 0f) head.InFlight = default;
             }
             queue[0] = head;
         }
@@ -179,10 +191,14 @@ public partial struct ProductionSystem : ISystem
             var def = roster.GetDefinition(effDef);
             if (def == null) continue;
             var unit = factory.Create(def, effDef, s.Player, s.Pos);
-            if (em.HasComponent<MoveTarget>(unit))
+            // Rally via a WAYPOINT, not a raw MoveTarget: a hard slotless move has
+            // no drive tier (the cart-freeze bug class), so fresh units never left
+            // the doorway. WaypointSystem drives them soft/slotless and clears the
+            // leg on arrival so they idle cleanly at the rally point.
+            if (em.HasComponent<MoveTarget>(unit) && math.distancesq(s.Rally, new float2(s.Pos.x, s.Pos.z)) > 0.25f)
             {
-                var mv = em.GetComponentData<MoveTarget>(unit);
-                mv.Value = s.Rally; mv.HasTarget = true; mv.AttackMove = false; em.SetComponentData(unit, mv);
+                if (!em.HasBuffer<Waypoint>(unit)) em.AddBuffer<Waypoint>(unit);
+                em.GetBuffer<Waypoint>(unit).Add(new Waypoint { Pos = s.Rally, AttackMove = 0 });
             }
             if (s.IsHauler && em.HasComponent<HaulTask>(unit))
                 em.SetComponentData(unit, new HaulTask { SourceStableId = s.SourceSid, SinkStableId = s.SinkSid, Phase = HaulPhase.ToSource });

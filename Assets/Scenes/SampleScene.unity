@@ -987,7 +987,7 @@ TerrainCollider:
     m_Bits: 0
   m_LayerOverridePriority: 0
   m_ProvidesContacts: 0
-  m_Enabled: 0
+  m_Enabled: 1
   serializedVersion: 2
   m_TerrainData: {fileID: 15600000, guid: fe539551b4193ce4c8bb99217f6a176d, type: 2}
   m_EnableTreeColliders: 1
@@ -2913,6 +2913,8 @@ MonoBehaviour:
   selectedCount: 0
   dragging: 0
   armedIndex: -1
+  ghostValidMaterial: {fileID: 0}
+  ghostInvalidMaterial: {fileID: 0}
 --- !u!4 &760247947
 Transform:
   m_ObjectHideFlags: 0
@@ -4543,6 +4545,7 @@ MonoBehaviour:
   trackedEntities: 0
   activeViews: 0
   pooledViews: 0
+  blueprintMaterial: {fileID: 0}
 --- !u!1 &1677794981
 GameObject:
   m_ObjectHideFlags: 0

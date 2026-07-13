@@ -125,7 +125,9 @@ public struct Dead : IComponentData { }
 public struct Waypoint : IBufferElementData
 {
     public float2 Pos;
-    public byte   AttackMove;   // 1 = attack-move leg
+    public byte   AttackMove;      // 1 = attack-move leg
+    public byte   Kind;            // 0 = plain move; 1 = BUILD (assign BuildTask on pop)
+    public int    TargetStableId;  // Kind=1: the blueprint/scaffold to build
 }
 
 // Spikes / palisade: passive per-second damage this building deals to any enemy

@@ -55,6 +55,7 @@ public class PlayerCommander : Commander
     private float2  _rmbEnemyPos;
     private int     _rmbNode = -1;   // resource-node StableId under the press point, if any
     private int     _rmbDepot = -1;  // OWN depot StableId under the press point, if any
+    private int     _rmbBuild = -1;  // OWN blueprint/scaffold StableId under the press point, if any
 
     // Latched while the orbit chord (both buttons) is engaged, so the button-ups
     // that end an orbit don't also fire a box-select or a move order. Cleared
@@ -88,12 +89,16 @@ public class PlayerCommander : Commander
         // orbit are not mistaken for a box-select / move commit.
         if (leftDown && rightDown) _orbitChordLatched = true;
 
-        // ---- left mouse: box select ----
-        if (Input.GetMouseButtonDown(0)) { _dragStart = Input.mousePosition; dragging = true; }
+        // ---- build ghost (placement preview) ----
+        UpdateGhost();
+
+        // ---- left mouse: box select (never while placing a blueprint) ----
+        if (Input.GetMouseButtonDown(0) && _ghostDefId < 0) { _dragStart = Input.mousePosition; dragging = true; }
         if (Input.GetMouseButtonUp(0) && dragging)
         {
             dragging = false;
-            if (!_orbitChordLatched) BoxSelect();
+            if (_swallowSelect) _swallowSelect = false;          // that click placed a blueprint
+            else if (!_orbitChordLatched) BoxSelect();
         }
 
         // Q/W/E/R toggles an armed ability slot (only if the current caster has it).
@@ -154,7 +159,8 @@ public class PlayerCommander : Commander
         // ---- right mouse: armed cast on press, else a formation drag ----
         if (Input.GetMouseButtonDown(1))
         {
-            if (armedIndex >= 0) { TryCastArmed(); armedIndex = -1; }
+            if (_ghostCancelledThisFrame) _ghostCancelledThisFrame = false;   // this RMB cancelled the ghost; consume it
+            else if (armedIndex >= 0) { TryCastArmed(); armedIndex = -1; }
             else BeginRightDrag();
         }
         if (Input.GetMouseButtonUp(1) && _rmbDragging)
@@ -317,6 +323,238 @@ public class PlayerCommander : Commander
         ents.Dispose(); players.Dispose();
     }
 
+    // ---- build-placement ghost: armed by the builds menu, follows the cursor
+    // (footprint-snapped), LMB places the blueprint, RMB/Esc cancels. The
+    // placement click is swallowed so it doesn't also box-select.
+    private int _ghostDefId = -1;
+    private BuildingDefinition _ghostDef;
+    private GameObject _ghost;
+    private bool _swallowSelect;
+    private bool _ghostCancelledThisFrame;
+
+    private void ArmGhost(int defId, BuildingDefinition def)
+    {
+        CancelGhost();
+        _ghostDefId = defId; _ghostDef = def;
+        if (def.viewPrefab != null)
+        {
+            _ghost = Instantiate(def.viewPrefab);
+            foreach (var col in _ghost.GetComponentsInChildren<Collider>()) col.enabled = false;
+        }
+        else
+        {
+            // No view prefab authored: a placement ghost must STILL be visible —
+            // fall back to a footprint-sized cube so arming is never silent.
+            _ghost = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            Destroy(_ghost.GetComponent<Collider>());
+            _ghost.transform.localScale = new Vector3(def.footprintX * NavGrid.CellSize, 2f, def.footprintZ * NavGrid.CellSize);
+        }
+        lastOrder = $"placing {def.displayName} (LMB place, RMB/Esc cancel, Shift=line, Shift+Alt=square)";
+    }
+
+    private void CancelGhost()
+    {
+        if (_ghost != null) Destroy(_ghost);
+        _ghost = null; _ghostDefId = -1; _ghostDef = null;
+        _placeDragging = false;
+        ClearLineGhosts();
+    }
+
+    private void UpdateGhost()
+    {
+        if (_ghostDefId < 0) return;
+        if (Input.GetKeyDown(KeyCode.Escape) || Input.GetMouseButtonDown(1)) { CancelGhost(); _ghostCancelledThisFrame = true; return; }
+        if (!GroundPoint3(out float3 gp3)) return;
+        float2 gp = new float2(gp3.x, gp3.z);
+
+        var extents = new int2(math.max(1, _ghostDef.footprintX), math.max(1, _ghostDef.footprintZ));
+        float2 snapped = BuildingFootprint.SnappedCenter(BuildingFootprint.MinCell(gp, extents), extents);
+        if (_ghost != null)
+            _ghost.transform.position = new Vector3(snapped.x, gp3.y, snapped.y);   // terrain height, not buried
+
+        // Validity = the REAL sim verdict (cells, height delta/TooSteep) + no unit
+        // in the footprint — the ghost can never show green for a click the sim
+        // would reject.
+        bool valid = GhostPlacementValid(snapped, extents);
+        TintGhost(valid ? new Color(0.4f, 1f, 0.4f, 0.6f) : new Color(1f, 0.3f, 0.3f, 0.6f));
+
+        bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+        bool alt   = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+
+        if (Input.GetMouseButtonDown(0)) { _placeAnchor = snapped; _placeDragging = true; _swallowSelect = true; }
+
+        // live multi-preview while shift-dragging: one clone per planned spot,
+        // each tinted by ITS validity
+        if (_placeDragging && shift)
+        {
+            BuildDragPositions(snapped, alt, extents, _dragPositions);
+            SyncLineGhosts(gp3.y, extents);
+        }
+        else ClearLineGhosts();
+
+        if (Input.GetMouseButtonUp(0) && _placeDragging)
+        {
+            _placeDragging = false;
+            var builders = GetSelected().FindAll(e => Em.HasComponent<BuildPower>(e) &&
+                                                      Em.GetComponentData<BuildPower>(e).Value > 0f);
+            if (shift)
+            {
+                BuildDragPositions(snapped, alt, extents, _dragPositions);
+                int placed = 0;
+                foreach (var p in _dragPositions)
+                {
+                    if (!GhostPlacementValid(p, extents)) continue;   // invalid spots discarded
+                    IssuePlaceBlueprint(_ghostDefId, p, builders);
+                    placed++;
+                }
+                lastOrder = $"placed {placed} blueprints";
+                CancelGhost();
+            }
+            else if (valid)
+            {
+                IssuePlaceBlueprint(_ghostDefId, snapped, builders);
+                CancelGhost();
+            }
+            else lastOrder = "cannot place here (blocked / too steep / unit in footprint)";
+        }
+    }
+
+    private readonly List<float2> _dragPositions = new();
+    private readonly List<GameObject> _lineGhosts = new();
+
+    private void BuildDragPositions(float2 snapped, bool alt, int2 extents, List<float2> outList)
+    {
+        outList.Clear();
+        float2 pitch = (float2)extents * NavGrid.CellSize;   // one footprint per step
+        float2 d = snapped - _placeAnchor;
+        int nx, ny;
+        if (alt) { nx = (int)math.round(math.abs(d.x) / pitch.x); ny = (int)math.round(math.abs(d.y) / pitch.y); }
+        else
+        {
+            bool alongX = math.abs(d.x) >= math.abs(d.y);
+            nx = alongX ? (int)math.round(math.abs(d.x) / pitch.x) : 0;
+            ny = alongX ? 0 : (int)math.round(math.abs(d.y) / pitch.y);
+        }
+        float2 sx = new float2(d.x >= 0 ? pitch.x : -pitch.x, 0);
+        float2 sy = new float2(0, d.y >= 0 ? pitch.y : -pitch.y);
+        for (int iy = 0; iy <= ny && outList.Count < 32; iy++)
+        for (int ix = 0; ix <= nx && outList.Count < 32; ix++)
+        {
+            float2 p = _placeAnchor + sx * ix + sy * iy;
+            outList.Add(BuildingFootprint.SnappedCenter(BuildingFootprint.MinCell(p, extents), extents));
+        }
+    }
+
+    private void SyncLineGhosts(float y, int2 extents)
+    {
+        while (_lineGhosts.Count < _dragPositions.Count && _ghost != null)
+        {
+            var g = Instantiate(_ghost);
+            g.transform.localScale = _ghost.transform.localScale;
+            _lineGhosts.Add(g);
+        }
+        while (_lineGhosts.Count > _dragPositions.Count)
+        { Destroy(_lineGhosts[^1]); _lineGhosts.RemoveAt(_lineGhosts.Count - 1); }
+        for (int i = 0; i < _lineGhosts.Count; i++)
+        {
+            // each clone sits on ITS ground, not the cursor's
+            float gy = y;
+            if (Physics.Raycast(new Vector3(_dragPositions[i].x, 1000f, _dragPositions[i].y), Vector3.down,
+                                out RaycastHit hit, 2000f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+                gy = hit.point.y;
+            _lineGhosts[i].transform.position = new Vector3(_dragPositions[i].x, gy, _dragPositions[i].y);
+            bool ok = GhostPlacementValid(_dragPositions[i], extents);
+            TintObject(_lineGhosts[i], ok ? new Color(0.4f, 1f, 0.4f, 0.6f) : new Color(1f, 0.3f, 0.3f, 0.6f));
+        }
+    }
+
+    private void ClearLineGhosts()
+    {
+        foreach (var g in _lineGhosts) if (g != null) Destroy(g);
+        _lineGhosts.Clear();
+    }
+
+    private float2 _placeAnchor;
+    private bool _placeDragging;
+
+    private bool GroundPoint3(out float3 p)
+    {
+        p = default;
+        var cam = Camera.main; if (cam == null) return false;
+        var ray = cam.ScreenPointToRay(Input.mousePosition);
+        if (Physics.Raycast(ray, out RaycastHit hit, 5000f, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+        { p = hit.point; return true; }
+        return false;
+    }
+
+    private bool GhostPlacementValid(float2 center, int2 extents)
+    {
+        // the exact sim verdict (cells + height/TooSteep)
+        var oq = Em.CreateEntityQuery(ComponentType.ReadOnly<ObstacleField>());
+        var tq = Em.CreateEntityQuery(ComponentType.ReadOnly<TerrainHeightField>());
+        if (!oq.IsEmptyIgnoreFilter)
+        {
+            var obs = oq.GetSingleton<ObstacleField>();
+            bool hasTerrain = !tq.IsEmptyIgnoreFilter;
+            var terrain = hasTerrain ? tq.GetSingleton<TerrainHeightField>() : default;
+            bool cutCorners = !(_ghostDef is WallDefinition);
+            var verdict = BuildingFootprint.ValidatePlacement(center, extents, _ghostDef.maxHeightDelta,
+                                                              obs.CellType, hasTerrain, terrain, cutCorners, out _);
+            if (verdict != PlacementVerdict.Ok) return false;
+        }
+        // units: nobody standing in the footprint
+        float2 half = (float2)extents * (NavGrid.CellSize * 0.5f);
+        var ents = AllUnitsQuery.ToComponentDataArray<LocalTransform>(Allocator.Temp);
+        bool clear = true;
+        for (int i = 0; i < ents.Length && clear; i++)
+        {
+            float2 p = new float2(ents[i].Position.x, ents[i].Position.z);
+            float2 d = math.abs(p - center) - half;
+            if (math.length(math.max(d, 0f)) < 0.6f) clear = false;
+        }
+        ents.Dispose();
+        return clear;
+    }
+
+    [Tooltip("Optional: materials the placement ghost renders with (assign transparent green/red). " +
+             "Unset = a tint is applied via property block (shader-dependent).")]
+    public Material ghostValidMaterial, ghostInvalidMaterial;
+
+    private static readonly int ColorId = Shader.PropertyToID("_Color");
+    private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+    private void TintGhost(Color c) => TintObject(_ghost, c);
+    private void TintObject(GameObject go, Color c)
+    {
+        if (go == null) return;
+        // assigned materials win (proper transparency); tint is the fallback
+        bool valid = c.g > c.r;
+        var mat = valid ? ghostValidMaterial : ghostInvalidMaterial;
+        if (mat != null)
+        {
+            foreach (var r in go.GetComponentsInChildren<Renderer>())
+            {
+                var mats = r.sharedMaterials;
+                bool differs = false;
+                for (int m = 0; m < mats.Length; m++) if (mats[m] != mat) { differs = true; break; }
+                if (differs)
+                {
+                    var swap = new Material[mats.Length];
+                    for (int m = 0; m < swap.Length; m++) swap[m] = mat;
+                    r.sharedMaterials = swap;
+                }
+            }
+            return;
+        }
+        var mpb = new MaterialPropertyBlock();
+        foreach (var r in go.GetComponentsInChildren<Renderer>())
+        {
+            r.GetPropertyBlock(mpb);
+            mpb.SetColor(ColorId, c);
+            mpb.SetColor(BaseColorId, c);
+            r.SetPropertyBlock(mpb);
+        }
+    }
+
     private void TryBuildingMenuKeys()
     {
         var roster = UnitFactory.Instance?.Roster;
@@ -391,16 +629,27 @@ public class PlayerCommander : Commander
             { buildMenuLen = udef.builds.Count; buildsMenu = udef.builds.ToArray(); }
         }
 
-        if (buildsMenu != null && buildsMenu.Length > 0 && GroundPoint(out float2 blueprintPos))
+        if (buildsMenu != null && buildsMenu.Length > 0)
         {
             for (int i = 0; i < SlotKeys.Length && i < buildsMenu.Length; i++)
             {
                 if (!Input.GetKeyDown(SlotKeys[i])) continue;
                 var bdef2 = buildsMenu[i];
-                if (bdef2 == null) continue;
+                if (bdef2 == null) { lastOrder = $"builds[{i}] is EMPTY on the selected unit's definition"; continue; }
                 int uid = roster.GetId(bdef2);
-                if (uid >= 0) { IssuePlaceBlueprint(uid, blueprintPos); sel.Dispose(); return; }
+                if (uid < 0) { lastOrder = $"'{bdef2.displayName}' is not in the roster (add it to RosterDefinition)"; continue; }
+                // ARM the ghost: a preview follows the cursor, LMB places, RMB/Esc cancels.
+                ArmGhost(uid, bdef2); sel.Dispose(); return;
             }
+        }
+        else if (bld == Entity.Null)
+        {
+            // A builder is selected but its def lists nothing to build: pressing a
+            // slot key must SAY so, not silently do nothing (the doc prerequisite
+            // is `builds: [BarracksDef]` on the unit's definition asset).
+            for (int i = 0; i < SlotKeys.Length; i++)
+                if (Input.GetKeyDown(SlotKeys[i]))
+                    lastOrder = "selected unit's `builds` list is empty — author it on the UnitDefinition asset";
         }
 
         sel.Dispose();
@@ -469,6 +718,7 @@ public class PlayerCommander : Commander
         _rmbEnemy    = Entity.Null;
         _rmbNode     = -1;
         _rmbDepot    = -1;
+        _rmbBuild    = -1;
 
         // Destination = the terrain point under the press. GroundPoint raycasts
         // the real terrain (see its note), so the drag measures true world
@@ -509,6 +759,11 @@ public class PlayerCommander : Commander
             if (Em.HasComponent<NodeTag>(sEnts[i]))                       // resource node -> harvest
             {
                 if (d < bestNode) { bestNode = d; _rmbNode = Em.GetComponentData<StableId>(sEnts[i]).Value; }
+            }
+            else if (sPlayers[i].Value == player &&
+                     (Em.HasComponent<BlueprintTag>(sEnts[i]) || Em.HasComponent<Construction>(sEnts[i])))
+            {
+                if (d < bestBldg) { bestBldg = d; _rmbBuild = Em.GetComponentData<StableId>(sEnts[i]).Value; }
             }
             else if (sPlayers[i].Value == player && Em.HasComponent<DepotTag>(sEnts[i]))   // OWN depot -> deliver
             {
@@ -571,6 +826,19 @@ public class PlayerCommander : Commander
                 return;
             }
             // No harvesters selected → fall through (attack if enemy, else move).
+        }
+
+        // An OWN blueprint/scaffold under the press → assign selected builders.
+        if (_rmbBuild >= 0)
+        {
+            var crews = selected.FindAll(e => Em.HasComponent<BuildPower>(e) &&
+                                              Em.GetComponentData<BuildPower>(e).Value > 0f);
+            if (crews.Count > 0)
+            {
+                IssueBuild(crews, _rmbBuild);
+                lastOrder = $"build site {_rmbBuild} ({crews.Count})";
+                return;
+            }
         }
 
         // An OWN depot under the press → send selected harvesters to drop their

@@ -50,7 +50,12 @@ public partial struct ContactCombatSystem : ISystem
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(BlueprintTag))]   // blueprints are untargetable PLANS.
+    // NOTE: this job is the VICTIM side — each entity computes its own incoming
+    // damage from its neighbors' state. Scaffolds (Construction) MUST run here or
+    // they can't be hurt. Their OUTGOING damage is disarmed at the source instead:
+    // AttackTimerSystem (strike declaration) excludes them, and InfoGather zeroes
+    // their ContactDamage in the neighbor snapshot.
     private partial struct CombatJob : IJobEntity
     {
         public float Dt, ImpactScale, KnockbackScale, BodyContactScale;

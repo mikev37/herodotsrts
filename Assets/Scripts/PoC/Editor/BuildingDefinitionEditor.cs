@@ -46,6 +46,16 @@ public class BuildingDefinitionEditor : Editor
     };
 
     // Vision (2.5D line of sight) — every building blocks/participates in sight.
+    // Placement price + construction time — CHARGED by blueprint placement but
+    // previously shown in no editor (walls looked priceless). Shared with the
+    // wall editor so they can't drift.
+    public static readonly string[] CostFields =
+    {
+        "costGold", "costWood", "costFood",   // one-time blueprint price (pay-as-you-build)
+        "buildTime",                          // Construction build-ticks to complete
+        "selfBuildPower",                     // >0 = builds itself, no worker needed
+    };
+
     // Vision (2.5D sight) fields — reused by node/obstacle editors so every
     // structure can set its occluder height.
     public static readonly string[] VisionFields =
@@ -89,6 +99,11 @@ public class BuildingDefinitionEditor : Editor
                                 "shooter's eye height. For a working tower, set eyeOffset ABOVE occluderHeight " +
                                 "so it sees and fires over its own walls (otherwise it's blind to everything).",
                                 MessageType.None);
+
+        // ---- construction: what placing this blueprint costs and how long it takes ----
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Construction (blueprint price / build time)", EditorStyles.boldLabel);
+        foreach (var name in BuildingDefinitionEditor.CostFields) Field(so, name);
 
         // ---- combat: opt-in. Most buildings never attack. ----
         EditorGUILayout.Space();

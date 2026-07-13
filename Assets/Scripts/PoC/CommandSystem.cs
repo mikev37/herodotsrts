@@ -34,6 +34,7 @@ public enum CommandKind : byte
     Research = 19,          // TargetStableId = building StableId; AbilitySlot = index into building.researches
     Deliver = 20,           // Units[]: harvesters; TargetStableId = depot StableId (drop cargo there)
     LaunchCart = 21,        // TargetStableId = colony StableId; force-dispatch a hauler now (normal build time)
+    Build = 22,             // Units[]: builders; TargetStableId = blueprint/scaffold StableId
 }
 
 // One order. The struct is fully unmanaged/blittable (FixedList included), so it
@@ -314,6 +315,7 @@ public partial struct CommandApplySystem : ISystem
             if (c.Kind == CommandKind.SetRally)
             {
                 if (map.TryGetValue(c.TargetStableId, out Entity rb) &&
+                    !em.HasComponent<Construction>(rb) && !em.HasComponent<BlueprintTag>(rb) &&
                     em.GetComponentData<Player>(rb).Value == c.PlayerId)
                 {
                     if (!em.HasComponent<RallyPoint>(rb)) em.AddComponent<RallyPoint>(rb);
@@ -327,6 +329,8 @@ public partial struct CommandApplySystem : ISystem
                 if (!map.TryGetValue(c.TargetStableId, out Entity pb)) { continue; }
                 if (em.GetComponentData<Player>(pb).Value != c.PlayerId) { continue; }
                 if (!em.HasComponent<ProducerTag>(pb)) { continue; }
+                // Not until BUILT: a scaffold/blueprint has no working interior.
+                if (em.HasComponent<Construction>(pb) || em.HasComponent<BlueprintTag>(pb)) { continue; }
                 // Guard: can't queue while constructing, upgrading, or researching
                 var busy = EconomyQuery.BuildingBusy(em, pb, queueingProduction: true);
                 if (busy != EconomyQuery.ActivityKind.None) { continue; }
@@ -392,23 +396,34 @@ public partial struct CommandApplySystem : ISystem
                             if (verd == PlacementVerdict.Ok)
                             {
                                 var bpEnt = factory.Create(bpDef, c.TargetStableId, c.PlayerId, bpPos);
-                                // Add Construction so it starts at 1 HP and requires builders
-                                em.AddComponentData(bpEnt, new Construction
-                                {
-                                    Progress          = 0f,
-                                    BuildTime         = math.max(1f, bpDef.buildTime),
-                                    Cost              = new ResourceAmount { Gold = bpDef.costGold, Wood = bpDef.costWood, Food = bpDef.costFood },
-                                    Paid              = default,
-                                    HealthPerProgress = bpDef.maxHealth / math.max(1f, bpDef.buildTime),
-                                    SelfPower         = bpDef.selfBuildPower,   // >0 = Protoss self-build (no worker needed)
-                                    SacrificeDefId    = bpDef.sacrifice         // sacrifice flag baked into ConstructionSystem
-                                                        ? (factory.Roster.GetId(bpDef) >= 0
-                                                           ? factory.Roster.GetId(bpDef) : -1)
-                                                        : -1,
-                                });
+                                // BLUEPRINT, not scaffold: a non-solid, untargetable
+                                // PLAN. It blocks nothing and pays nothing until a
+                                // tasked worker arrives — BlueprintSystem then stamps
+                                // the Obstacle, adds Construction, and payment begins
+                                // (the design: no free body-blocking from range).
+                                if (em.HasComponent<Obstacle>(bpEnt)) em.RemoveComponent<Obstacle>(bpEnt);
+                                if (!em.HasComponent<NonCombatant>(bpEnt)) em.AddComponent<NonCombatant>(bpEnt);
+                                em.AddComponent<BlueprintTag>(bpEnt);
                                 var hp2 = em.GetComponentData<Health>(bpEnt);
                                 hp2.Current = 1f;
                                 em.SetComponentData(bpEnt, hp2);
+
+                                // QUEUE a build-leg on the commanding builders —
+                                // never clear: shift-dragging a line issues one
+                                // PlaceBlueprint per building, and the crew chains
+                                // through them 1, 2, 3... (WaypointSystem assigns
+                                // the BuildTask when each leg pops).
+                                int bpSid = em.GetComponentData<StableId>(bpEnt).Value;
+                                float2 sitePos = SnapStandable(cellType, hasGrid, new float2(bpPos.x, bpPos.z));
+                                for (int u = 0; u < c.Units.Length; u++)
+                                {
+                                    if (!map.TryGetValue(c.Units[u], out Entity w)) continue;
+                                    if (em.HasComponent<Immobile>(w)) continue;
+                                    if (!em.HasComponent<BuildPower>(w) || em.GetComponentData<BuildPower>(w).Value <= 0f) continue;
+                                    if (!em.HasBuffer<Waypoint>(w)) em.AddBuffer<Waypoint>(w);
+                                    em.GetBuffer<Waypoint>(w).Add(new Waypoint
+                                    { Pos = sitePos, AttackMove = 0, Kind = 1, TargetStableId = bpSid });
+                                }
                             }
                         }
                     }
@@ -454,6 +469,7 @@ public partial struct CommandApplySystem : ISystem
                 {
                     if (!map.TryGetValue(c.Units[u], out Entity me)) continue;
                     if (em.HasComponent<MorphState>(me)) continue;   // already morphing
+                    if (em.HasComponent<Construction>(me) || em.HasComponent<BlueprintTag>(me)) continue;   // not until built
                     var mdef = UnitFactory.Instance?.Roster.GetDefinition(
                         em.HasComponent<UnitDefId>(me) ? em.GetComponentData<UnitDefId>(me).Value : -1);
                     if (mdef?.morphTarget == null) continue;
@@ -501,6 +517,7 @@ public partial struct CommandApplySystem : ISystem
             {
                 if (!map.TryGetValue(c.TargetStableId, out Entity resb)) { continue; }
                 if (em.GetComponentData<Player>(resb).Value != c.PlayerId) { continue; }
+                if (em.HasComponent<BlueprintTag>(resb)) { continue; }   // not until built
                 if (EconomyQuery.BuildingBusy(em, resb, false) != EconomyQuery.ActivityKind.None) { continue; }
                 var resBDef = UnitFactory.Instance?.Roster.GetDefinition(
                     em.GetComponentData<UnitDefId>(resb).Value) as BuildingDefinition;
@@ -524,6 +541,37 @@ public partial struct CommandApplySystem : ISystem
                 });
                 continue;
             }
+            if (c.Kind == CommandKind.Build && map.TryGetValue(c.TargetStableId, out Entity site) &&
+                em.GetComponentData<Player>(site).Value == c.PlayerId &&
+                (em.HasComponent<BlueprintTag>(site) || em.HasComponent<Construction>(site)))
+            {
+                var sxf = em.GetComponentData<LocalTransform>(site);
+                float2 sp2 = SnapStandable(cellType, hasGrid, new float2(sxf.Position.x, sxf.Position.z));
+                for (int u = 0; u < c.Units.Length; u++)
+                {
+                    if (!map.TryGetValue(c.Units[u], out Entity w)) continue;
+                    if (em.HasComponent<Immobile>(w)) continue;
+                    if (!em.HasComponent<BuildPower>(w) || em.GetComponentData<BuildPower>(w).Value <= 0f) continue;
+                    // OVERRIDE, mirroring placement: drop the current assignment,
+                    // clear the chain, queue THIS site as a build-leg — the pop
+                    // assigns the task and routes to the perimeter. (Setting the
+                    // task directly here left the busy-hold blocking the queued
+                    // move-leg: the order registered but the peasant never moved.)
+                    if (em.HasComponent<BuildTask>(w)) em.RemoveComponent<BuildTask>(w);
+                    if (em.HasComponent<MoveTarget>(w))
+                    {
+                        var mv = em.GetComponentData<MoveTarget>(w);
+                        mv.HasTarget = false; mv.FormationId = 0;
+                        em.SetComponentData(w, mv);
+                    }
+                    if (!em.HasBuffer<Waypoint>(w)) em.AddBuffer<Waypoint>(w);
+                    var wps2 = em.GetBuffer<Waypoint>(w);
+                    wps2.Clear();
+                    wps2.Add(new Waypoint { Pos = sp2, AttackMove = 0, Kind = 1, TargetStableId = c.TargetStableId });
+                }
+                continue;
+            }
+
             if (c.Kind == CommandKind.LaunchCart)
             {
                 // Manual colony launch: arm the force flag; ProductionSystem runs
@@ -665,6 +713,9 @@ public partial struct CommandApplySystem : ISystem
                 }
                 // A fresh (unqueued) order cancels any pending waypoint chain.
                 if (em.HasBuffer<Waypoint>(e)) em.GetBuffer<Waypoint>(e).Clear();
+                // ...and any build assignment: only tasked builders contribute, so
+                // a move order genuinely pulls the peasant off the site.
+                if (em.HasComponent<BuildTask>(e)) em.RemoveComponent<BuildTask>(e);
             }
 
             ents.Dispose();
@@ -709,6 +760,7 @@ public partial struct CommandApplySystem : ISystem
         }
         return p;
     }
+
 
     private void ApplyPlaceBuilding(in SimCommand c, NativeArray<byte> cellType,
                                     bool hasTerrain, in TerrainHeightField terrain)

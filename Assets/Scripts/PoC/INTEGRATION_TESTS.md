@@ -462,8 +462,10 @@ command, a scaffold entity appears at cost, Peasant walks up and applies
 
 **Verify (step by step):**
 
-1. Select a Peasant. Press the build key for Barracks (first entry in `builds`).
-   A ghost preview appears; click to place.
+1. Select a Peasant. Press `Q` (the builds menu uses `Q/W/E/R` = `builds`
+   slots 0-3, same contract as every building menu; digits are control groups).
+   A ghost preview follows the cursor, snapped to the footprint grid. `LMB`
+   places the blueprint; `RMB`/`Esc` cancels.
 2. A Barracks entity spawns with `Construction` component:
    `Progress = 0, BuildTime = 60, Health.Current = 1`.
 3. `EconomyQuery.GetActivity` on the Barracks returns `Kind = Construction,

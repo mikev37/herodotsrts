@@ -15,6 +15,13 @@ public class WallDefinitionEditor : Editor
             if (prop != null) EditorGUILayout.PropertyField(prop, true);
         }
         EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Construction (blueprint price / build time)", EditorStyles.boldLabel);
+        foreach (var name in BuildingDefinitionEditor.CostFields)
+        {
+            var prop = serializedObject.FindProperty(name);
+            if (prop != null) EditorGUILayout.PropertyField(prop, true);
+        }
+        EditorGUILayout.Space();
         foreach (var name in new[] { "wallHeight", "rampCells", "rampSide" })
         {
             var prop = serializedObject.FindProperty(name);

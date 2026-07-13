@@ -55,6 +55,8 @@ public partial struct SpatialHashSystem : ISystem
             NonCombatantLk = SystemAPI.GetComponentLookup<NonCombatant>(true),
             ObstacleLk     = SystemAPI.GetComponentLookup<Obstacle>(true),
             ContactDamageLk = SystemAPI.GetComponentLookup<ContactDamage>(true),
+            ConstructionLk = SystemAPI.GetComponentLookup<Construction>(true),
+            BlueprintLk = SystemAPI.GetComponentLookup<BlueprintTag>(true),
         };
         // DETERMINISM: Schedule (single-thread), NOT ScheduleParallel.
         // With a parallel fill, bucket insertion order depends on OS thread
@@ -78,6 +80,8 @@ public partial struct SpatialHashSystem : ISystem
         [ReadOnly] public ComponentLookup<NonCombatant>  NonCombatantLk;
         [ReadOnly] public ComponentLookup<Obstacle>      ObstacleLk;
         [ReadOnly] public ComponentLookup<ContactDamage> ContactDamageLk;
+        [ReadOnly] public ComponentLookup<Construction> ConstructionLk;
+        [ReadOnly] public ComponentLookup<BlueprintTag> BlueprintLk;
 
         private void Execute(Entity entity, in LocalTransform xform, in Player player,
                              in Velocity velocity, in Mass mass, in Health health,
@@ -110,7 +114,10 @@ public partial struct SpatialHashSystem : ISystem
                 IsAttacking     = status.IsAttacking,
                 AttackTarget    = target.Has ? target.Info.Entity : Entity.Null,
                 StrikeDamage    = attack.Pulse,
-                ContactDamage   = ContactDamageLk.HasComponent(entity) ? ContactDamageLk[entity].DamagePerSecond : 0f,
+                // A scaffold's spikes aren't installed yet: under-construction
+                // entities publish ZERO contact damage to every reader.
+                ContactDamage   = (ConstructionLk.HasComponent(entity) || BlueprintLk.HasComponent(entity)) ? 0f
+                                : ContactDamageLk.HasComponent(entity) ? ContactDamageLk[entity].DamagePerSecond : 0f,
                 AttackRange     = attack.Range,
                 StrikeArcDot    = attack.ArcDot,
                 Cleave          = attack.Cleave,

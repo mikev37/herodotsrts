@@ -137,7 +137,7 @@ public partial struct HaulSystem : ISystem
                     task.Timer -= Dt;
                     if (task.Timer > 0f) break;
                     if (Registry.TryGetValue(task.SinkStableId, out Entity capital) && cargo.Amounts.Any)
-                        Ecb.AppendToBuffer(sortKey, capital, new BankDeposit { Amount = cargo.Amounts });
+                        Ecb.AppendToBuffer(sortKey, capital, new BankDeposit { Amount = cargo.Amounts, Purpose = (byte)SpendClass.Transfer });
                     task.Phase = HaulPhase.Done;
                     Vanish(sortKey, self);   // success anim + despawn (NOT death)
                     break;

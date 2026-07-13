@@ -50,7 +50,7 @@ public partial struct AttackTimerSystem : ISystem
     }
 
     [BurstCompile]
-    [WithNone(typeof(Dead))]
+    [WithNone(typeof(Dead), typeof(Construction), typeof(BlueprintTag))]   // under construction = unarmed
     private partial struct AttackJob : IJobEntity
     {
         public float Dt, HeightDamageBonus, HeightBonusCap;

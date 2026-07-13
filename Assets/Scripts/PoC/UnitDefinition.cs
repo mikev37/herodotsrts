@@ -98,6 +98,9 @@ public class UnitDefinition : ScriptableObject
     [Header("Economy — builder")]
     [Tooltip("Build power contributed per tick to adjacent scaffolds. >0 = this unit is a builder.")]
     public float buildPower = 0f;
+    [Tooltip("How far from a site's footprint EDGE this builder can work (world units). Also the " +
+             "arrival distance that converts a blueprint into a scaffold.")]
+    public float buildRange = 2.5f;
     [Tooltip("Buildings this unit (as a builder) can place. Drives the in-game build menu keys.")]
     public System.Collections.Generic.List<BuildingDefinition> builds = new();
 
